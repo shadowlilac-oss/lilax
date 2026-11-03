@@ -11,8 +11,9 @@ import orbax.checkpoint as ocp
 
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import common_types
-from lilax._backend.layers import quantizations
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, model_creation_utils
+from lilax._backend.layers.quantization.configure import configure_quantization
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx
+from lilax._backend.utils.model_creation import model_factory, pretrained
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any
@@ -84,7 +85,7 @@ class LayerwiseQuantization:
     self.rng = rng
     devices = device_mesh.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices, config.mesh_axes)
-    self.quant = quantizations.configure_quantization(config)
+    self.quant = configure_quantization(config)
     self.unboxed_abstract_state = None
 
   def load_and_quantize(self) -> None:
@@ -94,13 +95,13 @@ class LayerwiseQuantization:
     config = self.config
     max_logging.log("Loading full-precision NNX checkpoint in TRAIN mode...")
     with self._mesh:
-      train_model = model_creation_utils.from_pretrained(
+      train_model = pretrained.from_pretrained(
           config, mesh=self._mesh, model_mode=common_types.MODEL_MODE_TRAIN, quant_mode_str="train"
       )
     max_logging.log("Building CONVERT-mode model (random init) and copying kernels in...")
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=self.rng)
     with logical_axis_rules(config.logical_axis_rules):
-      convert_model = model_creation_utils.from_config(
+      convert_model = model_factory.from_config(
           config, mesh=self._mesh, rngs=rngs, model_mode=common_types.MODEL_MODE_TRAIN, quant_mode_str="convert"
       )
     self._copy_kernel_leaves_(convert_model, train_model)

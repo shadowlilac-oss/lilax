@@ -23,7 +23,8 @@ from lilax._backend.layers.learn_to_init_layer import apply_lti_model_update
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.distillation import distillation_utils, lti_utils
 from lilax._backend.trainers.post_train.hooks import GoodputTrainingHooks
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils
+from lilax._backend.utils.model_creation import pretrained
 
 
 class ReportingMetricsLogger(metrics_logger.MetricsLogger):
@@ -318,7 +319,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 def get_maxtext_model(config, mesh: jax.sharding.Mesh) -> nnx.Module:
   """Load a MaxText model on the specified mesh."""
   max_logging.log(f"Initializing model: {config.model_name}...")
-  return model_creation_utils.from_pretrained(config, mesh=mesh)
+  return pretrained.from_pretrained(config, mesh=mesh)
 
 
 def build_training_components(student_config, teacher_config, is_offline: bool = False, offline_data_dir: str | None = None):

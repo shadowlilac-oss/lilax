@@ -10,7 +10,8 @@ import jax
 from lilax._backend.common import flops, profiler
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.input_pipeline.packing import prefill_packing
-from lilax._backend.utils import gcs_utils, max_utils
+from lilax._backend.utils import gcs_utils
+from lilax._backend.utils.diagnostics import pytree
 
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
@@ -224,10 +225,10 @@ def summarize_prefill_result(engine_prefill, params, tokens, true_length):
   rng = jax.random.PRNGKey(1234)
   prefill_result, _ = engine_prefill(params, tokens, true_length, rng)
   jax.block_until_ready(prefill_result)
-  num_logits, total_logits, avg_logits = max_utils.summarize_pytree_data(
+  num_logits, total_logits, avg_logits = pytree.summarize_pytree_data(
       prefill_result["logits"], name="Prefill Logits", raw=True
   )
-  num_cache, total_cache, avg_cache = max_utils.summarize_pytree_data(prefill_result["cache"], name="Prefill Cache")
+  num_cache, total_cache, avg_cache = pytree.summarize_pytree_data(prefill_result["cache"], name="Prefill Cache")
   del prefill_result
   return {
       "num_logits_params": num_logits,
@@ -257,8 +258,8 @@ def run_benchmarks(config):
   generate_executable, params, decode_state_executable = engine.aot_compile(params, pass_rng_shape=True)
   decode_state = decode_state_executable(rng_init_decode)
 
-  _, cache_size, _ = max_utils.summarize_pytree_data(decode_state["cache"], name="Cache")
-  num_model_params, model_size, _ = max_utils.summarize_pytree_data(params, name="Model")
+  _, cache_size, _ = pytree.summarize_pytree_data(decode_state["cache"], name="Cache")
+  num_model_params, model_size, _ = pytree.summarize_pytree_data(params, name="Model")
 
   benchmark_results = {}
   if "prefill" in stages_to_benchmark:

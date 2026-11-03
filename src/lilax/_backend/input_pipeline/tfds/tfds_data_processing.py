@@ -18,7 +18,16 @@ except ImportError as error:
       "To continue using the deprecated TFDS pipeline, run: `pip install tensorflow tensorflow-datasets`."
   ) from error
 
-from lilax._backend.input_pipeline import input_pipeline_utils, multihost_dataloading
+import datasets
+from lilax._backend.input_pipeline.sources import host_sharding
+from grain._src.python.dataset.sources import tfrecord_dataset
+from grain.experimental import TFRecordIterDataset
+from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
+from lilax._backend.input_pipeline import encoding_dsv4
+from lilax._backend.input_pipeline.tfds import tfds_operations
+from lilax._backend.input_pipeline.protos import example_pb2
+from lilax._backend.multimodal import processor as mm_processor
+from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.input_pipeline.packing import sequence_packing
 from lilax._backend.utils import max_logging
 
@@ -35,7 +44,7 @@ def get_datasets(dataset_name, data_split, shuffle_files, shuffle_seed, dataload
   ds_builder = tfds.builder(dataset_name, data_dir=dataset_path)
   read_config = tfds.ReadConfig(shuffle_seed=shuffle_seed) if shuffle_files else tfds.ReadConfig()
   num_shards = ds_builder.info.splits[data_split].num_shards
-  _, _, row_shard = input_pipeline_utils.compute_file_sharding(num_shards, dataloading_host_index, dataloading_host_count)
+  _, _, row_shard = host_sharding.compute_file_sharding(num_shards, dataloading_host_index, dataloading_host_count)
   if num_shards >= dataloading_host_count:
     input_pipeline_id, num_input_pipelines = dataloading_host_index, dataloading_host_count
   else:
@@ -80,9 +89,9 @@ def preprocessing_pipeline(
           "Set tokenize_train_data or tokenize_eval_data to True if your dataset needs tokenization."
       )
   assert len(data_column_names) == 1
-  dataset = dataset.map(lambda x: input_pipeline_utils.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE)
+  dataset = dataset.map(lambda x: tfds_operations.normalize_features(x, data_column_names[0]), num_parallel_calls=AUTOTUNE)
   data_column_names = ("inputs", "targets")
-  tokenizer_model = input_pipeline_utils.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tfds_operations.get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id
   elif tokenizer_model.unk_id is not None:
@@ -91,19 +100,19 @@ def preprocessing_pipeline(
     pad_id = -1
   if tokenize:
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.TokenizeOp(tokenizer_model=tokenizer_model, features=x, data_keys=data_column_names),
+        lambda x: tfds_operations.TokenizeOp(tokenizer_model=tokenizer_model, features=x, data_keys=data_column_names),
         num_parallel_calls=AUTOTUNE,
     )
   if max_target_length > 0:
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.truncate_to_max_allowable_length(x, max_target_length + 1),
+        lambda x: tfds_operations.truncate_to_max_allowable_length(x, max_target_length + 1),
         num_parallel_calls=AUTOTUNE,
     )
   if shuffle:
     dataset = dataset.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
   dataset = dataset.repeat(num_epochs)
   if shift:
-    dataset = dataset.map(input_pipeline_utils.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
+    dataset = dataset.map(tfds_operations.shift_data_by_truncation, num_parallel_calls=tf.data.AUTOTUNE, deterministic=True)
   if pack_examples:
     dataset = sequence_packing.pack_dataset(dataset, max_target_length, pad_id)
     dataset = dataset.batch(global_batch_size // jax.process_count(), drop_remainder=drop_remainder)
@@ -113,7 +122,7 @@ def preprocessing_pipeline(
         padding_values={k: pad_id for k in data_column_names}, drop_remainder=drop_remainder,
     )
     dataset = dataset.map(
-        lambda x: input_pipeline_utils.add_segmentation_and_position(x, data_column_names, padding_token=pad_id),
+        lambda x: tfds_operations.add_segmentation_and_position(x, data_column_names, padding_token=pad_id),
         num_parallel_calls=tf.data.AUTOTUNE, deterministic=True,
     )
   if prefetch_size:

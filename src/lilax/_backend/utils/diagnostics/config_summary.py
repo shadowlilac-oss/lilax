@@ -2,7 +2,7 @@
 
 import jax
 
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.tensorboard_logging import summary_writing
 
 
 def add_config_to_summary_writer(config, summary_writer):
@@ -14,4 +14,4 @@ def add_config_to_summary_writer(config, summary_writer):
     else:
       config_dict = dict(config)
     for key, value in config_dict.items():
-      max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
+      summary_writing.add_text_to_summary_writer(key, str(value), summary_writer)

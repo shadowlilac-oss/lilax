@@ -57,10 +57,11 @@ from lilax._backend.layers import attention_mla
 from lilax._backend.layers import initializers
 from lilax._backend.layers import linears
 from lilax._backend.layers import moe
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.aqt import AqtQuantization
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.utils import max_utils
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
@@ -176,7 +177,7 @@ class MingKimiDeltaAttention(nnx.Module):
       config: Config,
       mesh: Mesh,
       model_mode: str,
-      quant: None | quantizations.AqtQuantization = None,
+      quant: None | AqtQuantization = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -258,7 +259,7 @@ class MingKimiDeltaAttention(nnx.Module):
     )
 
     if model_mode != MODEL_MODE_TRAIN:
-      batch_size, _ = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
+      batch_size, _ = model_mode_shapes.get_batch_seq_len_for_mode(cfg, model_mode)
       self.cache = kvcache.KVCache(
           max_prefill_length=cfg.max_prefill_predict_length,
           max_target_length=cfg.max_target_length,
@@ -465,7 +466,7 @@ class MingDecoderLayer(nnx.Module):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: None | quantizations.AqtQuantization = None,
+      quant: None | AqtQuantization = None,
       layer_idx: int = -1,
       *,
       is_mla: bool | None = None,
@@ -482,7 +483,7 @@ class MingDecoderLayer(nnx.Module):
     self.is_mla = is_mla_layer(layer_idx, cfg) if is_mla is None else is_mla
     self.is_moe = is_moe_layer(layer_idx, cfg) if is_moe is None else is_moe
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(cfg, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, cfg.emb_dim)
     length_name = "prefill_activation_norm_length" if model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
     self.activation_axis_names = ("activation_batch", length_name, "activation_embed")
@@ -522,7 +523,7 @@ class MingDecoderLayer(nnx.Module):
           float32_qk_product=cfg.float32_qk_product,
           float32_logits=cfg.float32_logits,
           quant=quant,
-          kv_quant=quantizations.configure_kv_quant(cfg),
+          kv_quant=configure_kv_quant(cfg),
           q_lora_rank=cfg.q_lora_rank,
           kv_lora_rank=cfg.kv_lora_rank,
           qk_nope_head_dim=cfg.qk_nope_head_dim,
@@ -641,7 +642,7 @@ class MingScannableBlock(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: None | quantizations.AqtQuantization = None,
+      quant: None | AqtQuantization = None,
   ):
     self.config = config
     self.num_layers = config.inhomogeneous_layer_cycle_interval

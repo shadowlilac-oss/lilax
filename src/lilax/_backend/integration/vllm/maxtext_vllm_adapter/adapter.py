@@ -24,8 +24,9 @@ from lilax._backend.integration.vllm.hybrid_cache_utils import (
     resolve_layer_kv_cache_indices,
     scatter_layer_kv_caches,
 )
-from lilax._backend.utils import lora_utils, max_logging, model_creation_utils
+from lilax._backend.utils import lora_utils, max_logging
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
+from lilax._backend.utils.model_creation import pretrained
 from .multimodal import get_multimodal_handler
 
 
@@ -209,7 +210,7 @@ class MaxTextForCausalLM(nnx.Module):
     if self.model is not None:
       return
     with self.mesh, logical_axis_rules(self.maxtext_config.logical_axis_rules):
-      model = model_creation_utils.from_pretrained(
+      model = pretrained.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
       if self.maxtext_config.lora.enable_lora:

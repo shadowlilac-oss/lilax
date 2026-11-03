@@ -25,18 +25,22 @@ from lilax._backend.common.common_types import (
     get_weight_dtype,
 )
 from lilax._backend.configs.types import check_forced_routing_support
-from lilax._backend.layers import linears, mhc, moe, normalizations, quantizations
+from lilax._backend.layers import linears, mhc, moe, normalizations
 from lilax._backend.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
 from lilax._backend.layers.attentions import Attention
-from lilax._backend.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
+from lilax._backend.layers.embeddings import Embed, attend_on_embedding
+from lilax._backend.layers.position_embeddings.sinusoidal import PositionalEmbedding
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.layers.pipeline import create_nnx_pipeline
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.layers.quantization.configure import configure_kv_quant
+from lilax._backend.layers.quantization.weights import get_weight_quant_config
 from lilax._backend.models import (
     deepseek,
     deepseek4,
-    deepseek_batchsplit,
-    deepseek_batchsplit_fp8,
+)
+from lilax._backend.models.deepseek_batchsplit.schedule import layer_scan as deepseek_batchsplit_layer_scan
+from lilax._backend.models import (
     envy,
     gemma,
     gemma2,
@@ -57,12 +61,15 @@ from lilax._backend.models import (
     qwen3_5,
     qwen3_custom,
     simple_layer,
-    weaver,
 )
+from lilax._backend.models.weaver import decoder_layer as weaver_decoder_layer
+from lilax._backend.models.deepseek_batchsplit_fp8 import schedule as deepseek_batchsplit_fp8_schedule
 
 from lilax._backend.layers import scan_cache
 from lilax._backend.multimodal import utils as mm_utils
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
+from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx, sharding
+from lilax._backend.utils.autodiff import cotangents
+from lilax._backend.utils.device_memory import memory_kinds
 from lilax._backend.utils.sharding import create_sharding
 from lilax._backend.layers.fsdp_weight_gather import (
     _FSDP_MESH_AXES,
@@ -124,7 +131,7 @@ class NNXDecoderLayer(nnx.Module):
         float32_qk_product=cfg.float32_qk_product,
         float32_logits=cfg.float32_logits,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(cfg),
+        kv_quant=configure_kv_quant(cfg),
         prefill_cache_axis_order=tuple(map(int, cfg.prefill_cache_axis_order.split(","))),
         ar_cache_axis_order=tuple(map(int, cfg.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, cfg.compute_axis_order.split(","))),
@@ -522,7 +529,7 @@ class NNXDecoder(nnx.Module):
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
-          weight_quant=quantizations.get_weight_quant_config(config, "logits_dense"),
+          weight_quant=get_weight_quant_config(config, "logits_dense"),
           weight_grad_in_kernel_order=config.lm_head_weight_grad_in_kernel_order,
           rngs=rngs,
       )
@@ -1246,7 +1253,7 @@ class NNXDecoder(nnx.Module):
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(
-            lambda x: jax.device_put(x, max_utils.device_space()),
+            lambda x: jax.device_put(x, memory_kinds.device_space()),
             current_params,
         )
       else:
@@ -1411,7 +1418,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
-        DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
+        DecoderBlockType.WEAVER: [weaver_decoder_layer.WeaverMoTDecoderLayer],
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
         DecoderBlockType.HY4: get_scannable(hy4.Hy4DecoderLayer, hy4.Hy4ScannableBlock),
     }
@@ -1810,10 +1817,10 @@ class NNXDecoder(nnx.Module):
       embedding_table = shared_embedding.embedding[...]
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
       # Release the head's input and embedding cotangents together, so the backward pass does not keep
-      # the [batch, length, vocab] dlogits alive until the embedding-gradient matmul (see max_utils.tie_cotangents).
+      # the [batch, length, vocab] dlogits alive until the embedding-gradient matmul (see cotangents.tie_cotangents).
       y_head, head_table = y, embedding_table
       if cfg.tie_lm_head_cotangents:
-        y_head, head_table = max_utils.tie_cotangents(y, embedding_table)
+        y_head, head_table = cotangents.tie_cotangents(y, embedding_table)
       logits = attend_on_embedding(y_head, head_table, attend_dtype, self.config, out_sharding)
 
       if self.config.normalize_embedding_logits:
@@ -1829,10 +1836,10 @@ class NNXDecoder(nnx.Module):
             y, head_in_axes, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
         )
       # Release the head's input and weight cotangents together, so the backward pass does not keep
-      # the [batch, length, vocab] dlogits alive until the weight-gradient matmul (see max_utils.tie_cotangents).
+      # the [batch, length, vocab] dlogits alive until the weight-gradient matmul (see cotangents.tie_cotangents).
       if cfg.tie_lm_head_cotangents:
         head_graphdef, head_state = nnx.split(self.logits_dense)
-        y_head, head_state = max_utils.tie_cotangents(y, head_state)
+        y_head, head_state = cotangents.tie_cotangents(y, head_state)
         logits = nnx.merge(head_graphdef, head_state)(y_head, out_sharding=out_sharding)
       else:
         logits = self.logits_dense(y, out_sharding=out_sharding)
@@ -1845,7 +1852,7 @@ class NNXDecoder(nnx.Module):
   def _build_linen_params(self, moe_stack: nnx.Module) -> dict:
     """
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
-    structure expected by `deepseek_batchsplit.fetch_weights`.
+    structure expected by `deepseek_batchsplit.weights.fetch.fetch_weights`.
     """
     state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
     moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
@@ -2139,12 +2146,12 @@ class NNXDecoder(nnx.Module):
               policy = self.get_remat_policy()
               mock_params = self._build_linen_params(self.moe_layers)
               if cfg.quantization and cfg.use_qwix_quantization and not cfg.use_manual_quantization:
-                y = deepseek_batchsplit_fp8.scan_batch_split_layers(
+                y = deepseek_batchsplit_fp8_schedule.scan_batch_split_layers(
                     y, mock_params, decoder_positions, decoder_segment_ids, model_mode=model_mode,
                     mesh=self.mesh, quant=self.quant, cfg=cfg, policy=policy,
                 )
               else:
-                y = deepseek_batchsplit.scan_batch_split_layers(
+                y = deepseek_batchsplit_layer_scan.scan_batch_split_layers(
                     y, mock_params, decoder_positions, mesh=self.mesh, cfg=cfg, num_layers=num_moe,
                 )
             else:
@@ -2204,7 +2211,7 @@ class NNXDecoder(nnx.Module):
 
         def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs):
           if cfg.parameter_memory_host_offload:
-            state_in = jax.tree.map(lambda x: jax.device_put(x, max_utils.device_space()), state_in)
+            state_in = jax.tree.map(lambda x: jax.device_put(x, memory_kinds.device_space()), state_in)
           merged_layer = nnx.merge(graphdef_in, state_in)
           layer_out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           out_y, out_kv = layer_out[:2]

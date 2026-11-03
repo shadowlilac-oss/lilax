@@ -10,9 +10,10 @@ from typing import Iterable, Optional
 
 from lilax._backend.common.common_types import DType, ShardMode, Array
 from lilax._backend.layers.nnx_wrappers import ToNNX
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.layers.initializers import NdInitializer, nd_dense_init
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.device_memory import memory_kinds
 
 
 LTI_MODIFIED_ATTENTION_PARAM_NAMES = ["query", "key", "value", "out"]
@@ -252,7 +253,7 @@ class LearnToInitDense(nnx.Module):
 
     if self.parameter_memory_host_offload:
       max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-      kernel = jax.device_put(kernel, max_utils.device_space())
+      kernel = jax.device_put(kernel, memory_kinds.device_space())
     kernel = jnp.asarray(kernel, self.dtype)
 
     if self.shard_mode != ShardMode.EXPLICIT:

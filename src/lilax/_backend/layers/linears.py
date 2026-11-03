@@ -16,12 +16,16 @@ from flax import nnx
 
 from lilax._backend.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config, Shape, is_fp8_dtype
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, get_quant, get_weight_dtype, is_module_unquantized
-from lilax._backend.layers import nnx_wrappers, quantizations
+from lilax._backend.layers import nnx_wrappers
 from lilax._backend.layers import normalizations
 from lilax._backend.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, Initializer
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.layers.quantization.modes import in_serve_mode
+from lilax._backend.layers.quantization.nnx_ops import make_dot_general
+from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization, native_fp8_dot_general
+from lilax._backend.layers.quantization.weights import WeightQuantConfig, dequantize_weight, get_weight_quant_config
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.device_memory import memory_kinds
 from lilax._backend.utils.sharding import maybe_shard_with_logical
 from lilax._backend.utils.sharding import maybe_shard_with_name
 from lilax._backend.utils.sharding import maybe_shard_with_pspec
@@ -58,11 +62,6 @@ def canonicalize_tuple(x):
     return tuple(x)
   else:
     return (x,)
-
-
-# Re-export dequantize_weight and WeightQuantConfig from quantizations for backward compatibility.
-dequantize_weight = quantizations.dequantize_weight
-WeightQuantConfig = quantizations.WeightQuantConfig
 
 
 def _carries_reduction_tag(x) -> bool:
@@ -174,7 +173,7 @@ def _compute_dot_general_nnx(
       and len(contract_ind) == 1
   ):
     # Native FP8 supports single contracted axis; multi-axis contractions fall back to dequantize.
-    return quantizations.native_fp8_dot_general(
+    return native_fp8_dot_general(
         inputs,
         kernel,
         kernel_scale,
@@ -228,7 +227,7 @@ class DenseGeneral(nnx.Module):
       scale_axes: tuple[None | str, ...] | None = None,
       scale_dtype: DType = jnp.float32,
       block_size: int | tuple[int, ...] | None = None,
-      weight_quant: quantizations.WeightQuantConfig | None = None,
+      weight_quant: WeightQuantConfig | None = None,
       weight_grad_in_kernel_order: bool = False,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
@@ -278,7 +277,7 @@ class DenseGeneral(nnx.Module):
       scale_dtype = weight_quant.scale_dtype
       if block_size is None:
         block_size = weight_quant.block_size
-    if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not is_fp8_dtype(weight_dtype):
+    if isinstance(quant, ServeFp8WeightQuantization) and not is_fp8_dtype(weight_dtype):
       quant = None
 
     self.in_features_shape = canonicalize_tuple(in_features_shape)
@@ -307,7 +306,7 @@ class DenseGeneral(nnx.Module):
     kernel_in_axis = np.arange(len(self.axis))
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    if not quantizations.in_serve_mode(self.quant):
+    if not in_serve_mode(self.quant):
       init_dtype = jnp.float32 if is_fp8_dtype(self.weight_dtype) else self.weight_dtype
       kernel_val = self.kernel_init(
           rngs.params(),
@@ -334,7 +333,7 @@ class DenseGeneral(nnx.Module):
       self.bias = None
 
     should_have_scale = is_fp8_dtype(self.weight_dtype) if has_scale is None else has_scale
-    if should_have_scale and not quantizations.in_serve_mode(self.quant):
+    if should_have_scale and not in_serve_mode(self.quant):
       # Phase 1: Resolve scale shape based on quantization granularity
       # - Explicit scale_shape: user or caller override.
       # - Block scaling (e.g. block_size=128): scales are partitioned into a grid
@@ -386,9 +385,9 @@ class DenseGeneral(nnx.Module):
       self.scale_axes = None
       self.kernel_scale = None
 
-    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+    if quant and not isinstance(quant, ServeFp8WeightQuantization):
       # Native FP8 compute runs in _compute_dot_general_nnx; no Linen quantizer needed.
-      self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
+      self._quant_dot_general_name, quant_dot_general = make_dot_general(quant, kernel_axes, rngs)
       setattr(self, self._quant_dot_general_name, quant_dot_general)
       if isinstance(quant_dot_general, nnx_wrappers.ToNNX):
         # A bridged Linen quantizer creates its state on the first call.
@@ -469,7 +468,7 @@ class DenseGeneral(nnx.Module):
             f"does not match expected input feature size {self.in_features_shape[i]}"
         )
 
-    if quantizations.in_serve_mode(self.quant):
+    if in_serve_mode(self.quant):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
       kernel_scale = None
@@ -485,11 +484,11 @@ class DenseGeneral(nnx.Module):
       # Move logit_dense kernel to device if parameter offloading is enabled
       if self.parameter_memory_host_offload:
         max_logging.log("linear.py: Moving parameter logits_dense kernel to device")
-        kernel = jax.device_put(kernel, max_utils.device_space())
+        kernel = jax.device_put(kernel, memory_kinds.device_space())
       if self.kernel_scale is not None:
         kernel_scale = self.kernel_scale[...]
         if self.parameter_memory_host_offload:
-          kernel_scale = jax.device_put(kernel_scale, max_utils.device_space())
+          kernel_scale = jax.device_put(kernel_scale, memory_kinds.device_space())
       else:
         kernel_scale = None
 
@@ -521,7 +520,7 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
-    native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+    native_fp8_compute = isinstance(self.quant, ServeFp8WeightQuantization)
     quant_dot_general = self.quant_dot_general if slice_bounds is None else None
     # The auto-axes region only buys anything where XLA refuses to fold the
     # transpose away, and it has to own the whole dot to do it -- so it is off
@@ -671,7 +670,7 @@ class MlpBlock(nnx.Module):
     else:
       self.intermediate_logical = ("activation_batch", "activation_length", "activation_mlp")
 
-    weight_quant = quantizations.get_weight_quant_config(config, "mlp")
+    weight_quant = get_weight_quant_config(config, "mlp")
     block_size = weight_quant.block_size if weight_quant is not None else getattr(config, "weight_block_size", None)
 
     if config.fused_mlp:
@@ -915,7 +914,7 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     kernel = self.kernel[...]
     if self.parameter_memory_host_offload:
       max_logging.log("linear.py: Moving parameter grouped_linear kernel to device")
-      kernel = jax.device_put(kernel, max_utils.device_space())
+      kernel = jax.device_put(kernel, memory_kinds.device_space())
     kernel = jnp.asarray(kernel, self.dtype)
 
     # Perform a batched matrix multiplication using einsum with explicit precision.

@@ -34,7 +34,9 @@ import datasets
 import grain.python as grain
 
 from lilax._backend.input_pipeline import input_pipeline_interface
-from lilax._backend.input_pipeline import input_pipeline_utils
+from lilax._backend.input_pipeline.sources import hf_data_source
+from lilax._backend.input_pipeline.transforms import hf_tokenization
+from lilax._backend.input_pipeline.transforms import pad_or_trim
 
 
 class SingleHostDataLoader:
@@ -142,7 +144,7 @@ def preprocessing_pipeline(
     )
 
     dataset = dataset.map(
-        input_pipeline_utils.tokenization,
+        hf_tokenization.tokenization,
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
@@ -152,7 +154,7 @@ def preprocessing_pipeline(
         },
     )
   dataset = dataset.select_columns(data_column_names)
-  dataset = input_pipeline_utils.HFDataSource(
+  dataset = hf_data_source.HFDataSource(
       dataset,
       dataloading_host_index,
       dataloading_host_count,
@@ -167,7 +169,7 @@ def preprocessing_pipeline(
 
   operations = [
       grain.MapOperation(lists2array),
-      input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, add_true_length=True),
+      pad_or_trim.PadOrTrimToMaxLength(max_target_length, add_true_length=True),
       grain.Batch(batch_size=global_batch_size // jax.process_count(), drop_remainder=drop_remainder),
   ]
 

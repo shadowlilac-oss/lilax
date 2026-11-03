@@ -13,7 +13,8 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.common_types import ReorderStrategy
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.optimizers.schedules import create_learning_rate_schedule
-from lilax._backend.utils import max_logging, max_utils, sharding
+from lilax._backend.utils import max_logging, sharding
+from lilax._backend.utils.context_parallel import sequence_reorder
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 
@@ -46,7 +47,7 @@ def shard_reorder_causal_load_balanced(
     batch, cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP, hardware="tpu"
 ):
   """Shard the output of the reordered sequence."""
-  reordered = max_utils.reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware)
+  reordered = sequence_reorder.reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware)
   for _, value in batch.items():
     if isinstance(value, jax.Array):
       reordered = sharding.maybe_shard_with_name(reordered, value.sharding, shard_mode)

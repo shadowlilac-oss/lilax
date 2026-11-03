@@ -6,7 +6,8 @@ import jax
 from cloud_accelerator_diagnostics import tensorboard, uploader
 
 from lilax._backend.common.cloud import is_decoupled
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.tensorboard_logging import gcloud_project
 
 
 class VertexTensorboardManager:
@@ -57,7 +58,7 @@ class VertexTensorboardManager:
       return
     if jax.process_index() == 0:
       if not os.environ.get("TENSORBOARD_PROJECT"):
-        os.environ["TENSORBOARD_PROJECT"] = config.vertex_tensorboard_project or max_utils.get_project()
+        os.environ["TENSORBOARD_PROJECT"] = config.vertex_tensorboard_project or gcloud_project.get_project()
       if not os.environ.get("TENSORBOARD_REGION"):
         os.environ["TENSORBOARD_REGION"] = config.vertex_tensorboard_region
       if not os.environ.get("TENSORBOARD_NAME"):

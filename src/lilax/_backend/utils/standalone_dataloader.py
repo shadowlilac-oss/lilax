@@ -6,7 +6,7 @@ import os
 import jax
 import numpy as np
 
-from lilax._backend.trainers.pre_train.train import get_first_step
+from lilax._backend.trainers.pre_train.start_step import get_first_step
 from lilax._backend.utils import max_logging
 from lilax._backend.utils.train_utils import setup_train_loop, validate_train_config
 

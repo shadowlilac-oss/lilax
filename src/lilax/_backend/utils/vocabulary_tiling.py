@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.losses import cross_entropy
 from lilax._backend.utils.sharding import (
     FSDP_MESH_AXES, create_sharding, get_logical_axis_rules, get_physical_spec_without_axes, maybe_shard_with_name,
 )
@@ -82,7 +82,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       target_chunk = shard(target_chunk, chunked_data_spec)
       segment_chunk = shard(segment_chunk, chunked_data_spec)
       logits = logits_for_chunk(head, other, state, hidden_chunk)
-      xent, z_loss = max_utils.cross_entropy_with_logits(
+      xent, z_loss = cross_entropy.cross_entropy_with_logits(
           logits, jax.nn.one_hot(target_chunk, config.vocab_size), z_loss=config.z_loss_multiplier
       )
       mask = segment_chunk != 0
@@ -98,7 +98,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
 
     def single_loss(input_head, input_hidden, input_targets, input_segments):
       logits = logits_for_chunk(input_head, other, state, input_hidden)
-      xent, _ = max_utils.cross_entropy_with_logits(
+      xent, _ = cross_entropy.cross_entropy_with_logits(
           logits, jax.nn.one_hot(input_targets, config.vocab_size), z_loss=config.z_loss_multiplier
       )
       return jnp.sum(xent * (input_segments != 0))

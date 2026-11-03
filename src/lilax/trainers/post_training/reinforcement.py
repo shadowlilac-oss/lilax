@@ -12,7 +12,8 @@ from lilax._backend.configs import pyconfig, types
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.trainers.post_train.rl import train_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import generate_responses
-from lilax._backend.utils import device_mesh, model_creation_utils
+from lilax._backend.utils import device_mesh
+from lilax._backend.utils.model_creation import pretrained
 from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime
 from tunix.sft import checkpoint_manager
@@ -80,7 +81,7 @@ class GRPOTrainer:
     runtime, sampler_config, sampler_devices = Runtime.for_rl(config, devices=devices)
     trainer_config = GRPOConfig.resolve(args, runtime) if args is not None else runtime.config
     if reference_model is None:
-      reference_native, reference_config = model_creation_utils.from_pretrained(
+      reference_native, reference_config = pretrained.from_pretrained(
           trainer_config, mesh=runtime.mesh, return_effective_config=True
       )
       reference_model = MaxTextModel(reference_native, runtime, construction_config=reference_config)
@@ -95,7 +96,7 @@ class GRPOTrainer:
         actor_native = nnx.clone(reference_model.native_model)
       actor_config = reference_model.construction_config
     else:
-      actor_native, actor_config = model_creation_utils.from_pretrained(
+      actor_native, actor_config = pretrained.from_pretrained(
           trainer_config, mesh=runtime.mesh, return_effective_config=True
       )
     model = MaxTextModel(actor_native, runtime, construction_config=actor_config)
@@ -153,7 +154,7 @@ class GRPOTrainer:
       raise ValueError("Supplying an evaluation dataset requires a positive num_test_batches.")
     reference_model = self.reference_model
     if reference_model is None and not config.load_checkpoint_only_once:
-      reference_native, reference_config = model_creation_utils.from_pretrained(
+      reference_native, reference_config = pretrained.from_pretrained(
           self.model.construction_config, mesh=self.model.runtime.mesh, return_effective_config=True
       )
       reference_model = MaxTextModel(

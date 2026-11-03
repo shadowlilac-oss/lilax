@@ -30,7 +30,7 @@ from lilax._backend.layers.embeddings import Embed
 from lilax._backend.layers.initializers import NdInitializer, nd_dense_init
 from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 import numpy as np
 import sympy
 import tokenizers

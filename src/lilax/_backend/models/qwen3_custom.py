@@ -11,11 +11,11 @@ from jax.ad_checkpoint import checkpoint_name
 from lilax._backend.common.common_types import Config
 from lilax._backend.layers import initializers as max_initializers
 from lilax._backend.layers import moe
-from lilax._backend.layers import quantizations
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.configure import configure_kv_quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import DenseGeneral
-from lilax._backend.utils import max_utils
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.models.qwen3 import AttentionWithNorm
 from lilax._backend.layers.normalizations import RMSNorm
 
@@ -73,7 +73,7 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
     super().__init__(config, mesh, model_mode, quant, rngs)
 
     query_pre_attn_scalar = config.head_dim**-0.5
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.self_attention = Qwen3CustomAttention(
@@ -93,7 +93,7 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
         float32_qk_product=config.float32_qk_product,
         float32_logits=config.float32_logits,
         quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         use_ragged_attention=config.use_ragged_attention,
         ragged_block_size=config.ragged_block_size,
         use_qk_norm=config.use_qk_norm,

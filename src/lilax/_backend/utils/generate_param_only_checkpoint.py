@@ -12,8 +12,10 @@ from jax.sharding import Mesh
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import state_initialization, train_state_nnx
 from lilax._backend.common.common_types import DecoderBlockType
-from lilax._backend.utils import gcs_utils, lora_utils, max_logging, max_utils
-from lilax._backend.utils import device_mesh, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils import gcs_utils, lora_utils, max_logging
+from lilax._backend.utils import device_mesh, maxtext_utils_nnx, train_utils
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 from lilax._backend.utils.training import state_setup
 
 _SCAN_AXIS_NAMES = ("layers_per_stage", "layers", "circular_repeats")
@@ -93,9 +95,9 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
   rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=random.PRNGKey(0))
-  model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
+  model = model_factory.from_config(config, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(config, model)
-  create_model, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  create_model, _ = nnx_abstract_model.create_nnx_abstract_model(config, mesh)
 
   def init_state_fn():
     model = create_model()
@@ -104,7 +106,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
 
   state, _, shardings, _, _ = state_setup.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
   params, _ = nnx.split_state(state.model, nnx.Param, ...)
-  num_params = max_utils.calculate_num_params_from_pytree(params)
+  num_params = pytree.calculate_num_params_from_pytree(params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
   return state, shardings
 
@@ -175,7 +177,7 @@ def _save_lora_decode_checkpoint_nnx(config, state, checkpoint_manager):
 
 def _generate_lora_decode_checkpoints_nnx(config, mesh):
   rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=random.PRNGKey(0))
-  model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
+  model = model_factory.from_config(config, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(config, model)
   for lora_id in gcs_utils.gcs_list_directories(config.lora_input_adapters_path):
     directory = os.path.join(config.checkpoint_dir, "loras", lora_id, "")

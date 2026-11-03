@@ -8,7 +8,9 @@ import jax
 from orbax import checkpoint as ocp
 
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.model_creation import model_factory
 
 
 def _unwrap_var(v):
@@ -94,7 +96,7 @@ def stitch_and_save_checkpoints(
   max_logging.log("Generating target omni model from config with initial random weights...")
   with jax.set_mesh(mesh):
     rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
+    model = model_factory.from_config(config, mesh=mesh, rngs=rngs)
     init_params = nnx.state(model, nnx.Param)
 
   is_nnx = isinstance(init_params, nnx.State)
@@ -144,6 +146,6 @@ def stitch_and_save_checkpoints(
       use_ocdbt=config.checkpoint_storage_use_ocdbt,
       use_zarr3=config.checkpoint_storage_use_zarr3,
   )
-  total_params = max_utils.calculate_num_params_from_pytree(final_params)
+  total_params = pytree.calculate_num_params_from_pytree(final_params)
   max_logging.log(f"Total Stitched Model Parameters: {total_params:,} (~{total_params/1e9:.3f}B)")
   max_logging.log("Checkpoint stitching complete!")

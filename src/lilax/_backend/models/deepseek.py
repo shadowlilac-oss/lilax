@@ -31,16 +31,23 @@ from lilax._backend.layers import initializers
 from lilax._backend.layers import linears
 from lilax._backend.layers import mhc
 from lilax._backend.layers import moe
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.aqt import AqtQuantization
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.linears import Dropout
 from lilax._backend.layers.engram import Engram
 from lilax._backend.layers.engram import NgramHashMapping
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.models import deepseek_batchsplit
-from lilax._backend.models import deepseek_batchsplit_microbatch
-from lilax._backend.models import deepseek_batchsplit_weights
-from lilax._backend.models import deepseek_batchsplit_fp8
-from lilax._backend.utils import max_utils
+from lilax._backend.models.deepseek_batchsplit import microbatch as deepseek_batchsplit_microbatch
+from lilax._backend.models.deepseek_batchsplit.attention import rope as deepseek_batchsplit_rope
+from lilax._backend.models.deepseek_batchsplit.attention import splash as deepseek_batchsplit_splash
+from lilax._backend.models.deepseek_batchsplit.moe import unroute_stage as deepseek_batchsplit_unroute_stage
+from lilax._backend.models.deepseek_batchsplit.schedule import decoder_layer as deepseek_batchsplit_decoder_layer
+from lilax._backend.models.deepseek_batchsplit.weights import fetch as deepseek_batchsplit_weight_fetch
+from lilax._backend.models.deepseek_batchsplit.weights import gather as deepseek_batchsplit_weight_gather
+from lilax._backend.models.deepseek_batchsplit_fp8 import microbatch as deepseek_batchsplit_fp8_microbatch
+from lilax._backend.models.deepseek_batchsplit_fp8 import schedule as deepseek_batchsplit_fp8_schedule
+from lilax._backend.models.deepseek_batchsplit_fp8.weights import fetch as deepseek_batchsplit_fp8_weight_fetch
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding
 from lilax._backend.utils.sharding import maybe_shard_with_logical
 from lilax._backend.utils.sharding import get_logical_axis_rules
@@ -65,7 +72,7 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       layer_idx: int = -1,
   ) -> None:
     self.config = config
@@ -77,7 +84,7 @@ class DeepSeekGenericLayer(nnx.Module):
     self.layer_idx = layer_idx
     self.is_engram_enabled = config.engram_layers and layer_idx in config.engram_layers
 
-    batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
+    batch_size, sequence_length = model_mode_shapes.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
 
     self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=get_logical_axis_rules())
@@ -159,7 +166,7 @@ class DeepSeekGenericLayer(nnx.Module):
           dropout_rate=self.config.dropout_rate,
           name="self_attention",
           quant=quant,
-          kv_quant=quantizations.configure_kv_quant(self.config),
+          kv_quant=configure_kv_quant(self.config),
           q_lora_rank=self.config.q_lora_rank,
           kv_lora_rank=self.config.kv_lora_rank,
           qk_nope_head_dim=self.config.qk_nope_head_dim,
@@ -331,7 +338,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       layer_idx: int = -1,
   ) -> None:
     super().__init__(config, model_mode, mesh, rngs, quant, layer_idx)
@@ -415,7 +422,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       layer_idx: int = -1,
   ) -> None:
     super().__init__(config, model_mode, mesh, rngs, quant, layer_idx)
@@ -462,19 +469,19 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )
         inputs = jax.shard_map(
             functools.partial(
-                deepseek_batchsplit_fp8.split,
+                deepseek_batchsplit_fp8_microbatch.split,
                 split_factor=self.config.batch_split_factor,
             ),
             mesh=self.mesh,
             in_specs=activation_pspec,
             out_specs=[activation_pspec] * self.config.batch_split_factor,
         )(inputs)
-        dpos = deepseek_batchsplit_fp8.split(decoder_positions, self.config.batch_split_factor)
-        dseg = deepseek_batchsplit_fp8.split(decoder_segment_ids, self.config.batch_split_factor)
-        weights = deepseek_batchsplit_fp8.fetch_weights(
+        dpos = deepseek_batchsplit_fp8_microbatch.split(decoder_positions, self.config.batch_split_factor)
+        dseg = deepseek_batchsplit_fp8_microbatch.split(decoder_segment_ids, self.config.batch_split_factor)
+        weights = deepseek_batchsplit_fp8_weight_fetch.fetch_weights(
             nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar))), self.config.dtype
         )
-        outputs = deepseek_batchsplit_fp8.batch_split_schedule(
+        outputs = deepseek_batchsplit_fp8_schedule.batch_split_schedule(
             inputs,
             weights,
             dpos,
@@ -486,7 +493,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         )
         outputs = jax.shard_map(
             functools.partial(
-                deepseek_batchsplit_fp8.merge,
+                deepseek_batchsplit_fp8_microbatch.merge,
                 split_factor=self.config.batch_split_factor,
             ),
             mesh=self.mesh,
@@ -505,7 +512,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           None,
       )
       inputs = jax.reshard(inputs, jax.sharding.NamedSharding(self.mesh, activation_pspec))
-      yarn_freqs = deepseek_batchsplit.initialize_yarn_freqs(
+      yarn_freqs = deepseek_batchsplit_rope.initialize_yarn_freqs(
           decoder_positions,
           embedding_dims=self.config.qk_rope_head_dim,
           rope_theta=self.config.rope_max_timescale,
@@ -517,8 +524,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           mesh=self.mesh,
           activation_pspec=activation_pspec,
       )
-      yarn_mask = deepseek_batchsplit.initialize_yarn_mask(self.config.qk_rope_head_dim)
-      splash_kernel = deepseek_batchsplit.init_splash_kernel(self.config)
+      yarn_mask = deepseek_batchsplit_rope.initialize_yarn_mask(self.config.qk_rope_head_dim)
+      splash_kernel = deepseek_batchsplit_splash.init_splash_kernel(self.config)
       inputs = jax.shard_map(
           functools.partial(
               deepseek_batchsplit_microbatch.split,
@@ -541,11 +548,11 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           )
         return x
 
-      weights = deepseek_batchsplit_weights.fetch_weights(
+      weights = deepseek_batchsplit_weight_fetch.fetch_weights(
           nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn), self.config.dtype
       )
-      weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
-      outputs, _ = deepseek_batchsplit.batch_split_schedule(
+      weights = deepseek_batchsplit_weight_gather.gather_weights(weights, self.mesh)
+      outputs, _ = deepseek_batchsplit_decoder_layer.batch_split_schedule(
           inputs,
           weights,
           yarn_freqs,
@@ -556,7 +563,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           pairwise_swap_and_negate_mask=yarn_mask,
       )
       moe_inputs, routed_expert_out, shared_expert_out, selected_experts = outputs[1]
-      outputs[1], _ = deepseek_batchsplit.unroute_ubatch_shard_mapped(
+      outputs[1], _ = deepseek_batchsplit_unroute_stage.unroute_ubatch_shard_mapped(
           moe_inputs,
           routed_expert_out,
           shared_expert_out,

@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 import optax
 
-from lilax._backend.configs import types
+from lilax._backend.configs.optimizer_fields import LearningRateScheduleType, WsdDecayStyle
 
 
 def create_learning_rate_schedule(config):
@@ -31,7 +31,7 @@ def create_learning_rate_schedule(config):
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
 
-  if config.lr_schedule_type == types.LearningRateScheduleType.COSINE:
+  if config.lr_schedule_type == LearningRateScheduleType.COSINE:
     cos_steps = config.learning_rate_schedule_steps - warmup_steps
     if cos_steps > 0:
       cos_schedule = make_cos_schedule(lr, final_lr, cos_steps)
@@ -46,7 +46,7 @@ def create_learning_rate_schedule(config):
       pieces.append(stable_schedule)
       boundaries.append(warmup_steps + stable_steps)
     if decay_steps > 0:
-      if config.wsd_decay_style == types.WsdDecayStyle.LINEAR:
+      if config.wsd_decay_style == WsdDecayStyle.LINEAR:
         decay_schedule = optax.linear_schedule(init_value=lr, end_value=final_lr, transition_steps=decay_steps - 1)
       else:
         decay_schedule = make_cos_schedule(lr, final_lr, decay_steps)

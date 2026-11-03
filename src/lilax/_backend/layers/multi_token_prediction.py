@@ -13,10 +13,10 @@ from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.nnx_decoders import NNXDecoderLayer
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.models import deepseek4
-from lilax._backend.models import deepseek_batchsplit
-from lilax._backend.utils import max_utils
+from lilax._backend.models.deepseek_batchsplit.schedule import single_layer as deepseek_batchsplit_single_layer
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import sharding
+from lilax._backend.utils.context_parallel import sequence_reorder
 from lilax._backend.utils.globals import EPS
 
 
@@ -254,7 +254,7 @@ class MultiTokenPredictionLayer(nnx.Module):
           )
         return x
 
-      output = deepseek_batchsplit.batch_split_layer(
+      output = deepseek_batchsplit_single_layer.batch_split_layer(
           inputs=projected_features,
           positions=position_ids,
           params=nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn)[
@@ -336,7 +336,7 @@ class MultiTokenPredictionBlock(nnx.Module):
     if target_ids is None:
       target_ids = jnp.ones_like(input_ids, dtype=jnp.int32)
 
-    if max_utils.reordered_cp_size(cfg, self.mesh) > 1:
+    if sequence_reorder.reordered_cp_size(cfg, self.mesh) > 1:
       raise ValueError(
           "MTP does not support context_parallel_load_balance. "
           "DUAL_CHUNK_SWAP reorder breaks the ppermute-based neighbor "

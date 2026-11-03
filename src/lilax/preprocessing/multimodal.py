@@ -13,7 +13,8 @@ from lilax._backend.multimodal.processor import (
     reformat_prompt,
     reformat_response,
 )
-from lilax._backend.multimodal.processor_qwen3_omni import Qwen3OmniPreprocessorOutput, get_rope_index
+from lilax._backend.multimodal.processor_qwen3_omni import Qwen3OmniPreprocessorOutput
+from lilax._backend.multimodal.qwen3_omni.positions import get_rope_index
 from lilax._backend.multimodal.utils import PreprocessorOutput
 
 __all__ = [

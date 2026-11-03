@@ -34,8 +34,8 @@ from lilax._backend.training_engine import state_placement
 from lilax._backend.training_engine import step_kernels
 from lilax._backend.training_engine import weight_sync
 from lilax._backend.training_engine import zero1
-from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import train_utils
+from lilax._backend.utils.model_creation import pretrained
 
 EMPTY_METRICS_BUFFER_ID = -1
 
@@ -101,7 +101,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._weight_sync = weight_sync.WeightSyncStager(self._config)
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
-    model_or_model_mesh_pair = model_creation_utils.from_pretrained(
+    model_or_model_mesh_pair = pretrained.from_pretrained(
         config=self._config,
         mesh=self._mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,

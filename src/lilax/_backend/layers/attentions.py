@@ -38,20 +38,20 @@ from lilax._backend.common.common_types import (
     AttentionType,
 )
 from lilax._backend.layers.attention_op import AttentionOp, _resolve_attention_type
-from lilax._backend.layers.embeddings import (
+from lilax._backend.layers.position_embeddings.llama_vision_rotary import LlamaVisionRotaryEmbedding
+from lilax._backend.layers.position_embeddings.multimodal_rotary import Qwen3OmniMoeThinkerTextRotaryEmbedding
+from lilax._backend.layers.position_embeddings.qwen3_omni_vision_rotary import Qwen3OmniMoeVisionRotaryEmbedding
+from lilax._backend.layers.position_embeddings.rotary import (
     LLaMARotaryEmbedding,
-    LlamaVisionRotaryEmbedding,
-    Qwen3OmniMoeThinkerTextRotaryEmbedding,
-    Qwen3OmniMoeVisionRotaryEmbedding,
     RotaryEmbedding,
-    YarnRotaryEmbedding,
     PartialRotaryEmbedding,
     Gemma4PartialRotaryEmbedding,
 )
+from lilax._backend.layers.position_embeddings.yarn_rotary import YarnRotaryEmbedding
 from lilax._backend.layers.initializers import nd_dense_init, NdInitializer, default_bias_init
 from lilax._backend.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from lilax._backend.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.inference import kvcache
 from lilax._backend.inference.kvcache import KVQuant
 from lilax._backend.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes

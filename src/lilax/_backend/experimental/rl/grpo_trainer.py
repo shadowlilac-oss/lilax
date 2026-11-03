@@ -60,7 +60,7 @@ from lilax._backend.common.goodput import goodput as _goodput_module
 GoodputRecorder = _goodput_module.GoodputRecorder
 
 from lilax._backend.utils.globals import EPS
-from lilax._backend.trainers.pre_train.train import get_first_step
+from lilax._backend.trainers.pre_train.start_step import get_first_step
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import profiler
 from lilax._backend.common.data_loader import DataLoader
@@ -81,13 +81,14 @@ from lilax._backend.utils import device_mesh
 from lilax._backend.utils import exceptions
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils_nnx
-from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import sharding
 from lilax._backend.utils import state_abstraction
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 from lilax._backend.utils.training import state_setup
+from lilax._backend.utils.tree_ops import numerics
 from lilax._backend.utils import train_utils
 
 # pylint: disable=too-many-positional-arguments
@@ -351,10 +352,10 @@ def _train_step_nnx(model_graphdef, config, state_mesh_shardings, state, data):
   # These norms pull host-resident tensors back to device, defeating the offload,
   # so skip them when offloading (matches the Linen GRPO path).
   if not config.optimizer_memory_host_offload:
-    scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-    scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+    scalar_metrics["learning/grad_norm"] = numerics.l2norm_pytree(grads)
+    scalar_metrics["learning/raw_grad_norm"] = numerics.l2norm_pytree(raw_grads)
     new_policy_params = nnx.state(new_state.model, nnx.Param)
-    scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(new_policy_params)
+    scalar_metrics["learning/param_norm"] = numerics.l2norm_pytree(new_policy_params)
   metrics = {"scalar": scalar_metrics, "scalars": {}}
 
   return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
@@ -479,21 +480,21 @@ def setup_train_loop(
 
     training_mesh = device_mesh.get_mesh_from_config(config, devices=training_devices)
     training_rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = model_creation_utils.from_config(config, devices=training_devices, mesh=training_mesh, rngs=training_rngs)
+    model = model_factory.from_config(config, devices=training_devices, mesh=training_mesh, rngs=training_rngs)
     mesh = model.mesh
 
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
     inference_mesh_obj = device_mesh.get_mesh_from_config(config_inference, devices=inference_devices)
     inference_rngs = maxtext_utils_nnx.create_nnx_rngs(config_inference, rng_key=init_rng)
-    inference_model = model_creation_utils.from_config(
+    inference_model = model_factory.from_config(
         config_inference, devices=inference_devices, mesh=inference_mesh_obj, rngs=inference_rngs
     )
     inference_mesh = inference_model.mesh
 
     learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
 
-    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh, devices=training_devices)
+    _create_model_partial, _ = nnx_abstract_model.create_nnx_abstract_model(config, mesh, devices=training_devices)
 
     def init_state_fn():
       nnx_model = _create_model_partial()
@@ -517,7 +518,7 @@ def setup_train_loop(
       state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
     state = nnx.merge(state_graphdef, state)
 
-  _create_inference_partial, _ = model_creation_utils.create_nnx_abstract_model(
+  _create_inference_partial, _ = nnx_abstract_model.create_nnx_abstract_model(
       config_inference, inference_mesh, devices=inference_devices
   )
 
@@ -856,7 +857,7 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
       prof.maybe_deactivate_profiler(step, state)
 
       if step == start_step:
-        max_utils.print_mem_stats("After params initialized")
+        pytree.print_mem_stats("After params initialized")
 
       last_step_completion = datetime.datetime.now()
       metric_logger.buffer_and_write_metrics(metrics, step, step_time_delta)

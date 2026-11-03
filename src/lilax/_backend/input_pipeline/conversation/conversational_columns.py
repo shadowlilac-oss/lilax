@@ -1,0 +1,36 @@
+"""Detection and combination of conversational dataset columns."""
+
+import datasets
+
+
+def combine_columns(example, columns, data_column):
+  """Combine columns such as 'prompt' and 'completion' for sft training"""
+  assert len(columns) > 1
+  combined = []
+  for i in range(len(example[columns[0]])):
+    for c in columns:
+      combined.append(example[c][i])
+  example[data_column] = combined
+  return example
+
+
+def is_conversational(features, data_columns):
+  """Check if data is in a conversational format.
+  Examples:
+
+  features = {'prompt': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}],
+              'completion': [{'content': Value(dtype='string', id=None), 'role': Value(dtype='string', id=None)}]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) return True.
+
+  features = {'prompt': [Value(dtype='string', id=None)], 'completion': [Value(dtype='string', id=None)]}
+  data_columns = ["prompt", "completion"]
+  is_conversational(features, data_columns) returns False.
+  """
+  for column in data_columns:
+    messages = features[column]
+    if isinstance(messages, datasets.Sequence):
+      if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:
+        return True
+
+  return False

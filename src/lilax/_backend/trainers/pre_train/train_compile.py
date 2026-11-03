@@ -16,10 +16,12 @@ from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
-from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import accelerator_to_spec_map, device_mesh, gcs_utils, max_utils, maxtext_utils
-from lilax._backend.utils import maxtext_utils_nnx, model_creation_utils, sharding, state_abstraction
-from lilax._backend.utils.diagnostics import jaxpr_dump, sharding_report
+from lilax._backend.trainers.pre_train.steps import train_step as pre_train_step
+from lilax._backend.utils import accelerator_to_spec_map, device_mesh, gcs_utils, maxtext_utils
+from lilax._backend.utils import maxtext_utils_nnx, sharding, state_abstraction
+from lilax._backend.utils.diagnostics import jaxpr_dump, mesh_report, sharding_report, system_info
+from lilax._backend.utils.xla_options import libtpu_flags
+from lilax._backend.utils.model_creation import nnx_abstract_model
 
 
 def validate_config(config):
@@ -73,7 +75,7 @@ def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
 
 
 def get_shaped_inputs(topology_mesh, config):
-  create_model, model = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
+  create_model, model = nnx_abstract_model.create_nnx_abstract_model(config, topology_mesh)
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=topology_mesh)
 
@@ -105,7 +107,7 @@ def jit_and_compile(
     )
     jaxpr_dump.maybe_dump_jaxpr(config, jitted, func_input_args)
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
-  compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+  compiler_options = libtpu_flags.parse_libtpu_flags_to_dict(config.compile_xla_flags)
   return lowered.compile(compiler_options=compiler_options)
 
 
@@ -118,13 +120,13 @@ def save_compiled(compiled, save_name):
 def is_oom(config) -> bool:
   validate_config(config)
   topology_mesh = get_topology_mesh(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   shaped_args, shaped_kwargs, state_shardings, _, model = get_shaped_inputs(topology_mesh, config)
   params_shardings, state_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_shardings)
   input_shardings = sharding.build_zero1_input_state_mesh_shardings(config, state_shardings, params_shardings)
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
   func, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-      train.train_step, data_sharding, input_shardings, model, config, params_shardings
+      pre_train_step.train_step, data_sharding, input_shardings, model, config, params_shardings
   )
   try:
     jit_and_compile(
@@ -144,7 +146,7 @@ def compile_train_step(config):
   jax.config.update("jax_default_prng_impl", config.prng_impl)
   validate_config(config)
   topology_mesh = get_topology_mesh(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   shaped_args, shaped_kwargs, state_shardings, logical_annotations, model = get_shaped_inputs(topology_mesh, config)
   params_shardings, state_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_shardings)
   input_shardings = sharding.build_zero1_input_state_mesh_shardings(config, state_shardings, params_shardings)
@@ -155,7 +157,7 @@ def compile_train_step(config):
     )
     shaped_rng = shaped_args[2] if len(shaped_args) > 2 else None
     shaped_args = (diloco_state, shaped_args[1], shaped_rng)
-    train_step = functools.partial(train.train_step, model, config, inner_shardings, params_shardings)
+    train_step = functools.partial(pre_train_step.train_step, model, config, inner_shardings, params_shardings)
     func = diloco.build_diloco_train_step(config, train_step, outer_params_shardings=state_shardings.params)
     func.__name__ = "train_step"
     in_shard = (state_shardings, data_sharding, None)
@@ -163,10 +165,10 @@ def compile_train_step(config):
     static_argnums, donate_argnums = (), 0
   else:
     func, in_shard, out_shard, static_argnums, donate_argnums = maxtext_utils.get_functional_train_with_signature(
-        train.train_step, data_sharding, input_shardings, model, config, params_shardings
+        pre_train_step.train_step, data_sharding, input_shardings, model, config, params_shardings
     )
   if config.debug_sharding:
-    max_utils.print_non_trivial_mesh_axis(topology_mesh)
+    mesh_report.print_non_trivial_mesh_axis(topology_mesh)
     sharding_report.print_shardings_params(shaped_args[0], state_shardings, topology_mesh, logical_annotations)
   print("Jitting and compiling train step...", flush=True)
   compiled = jit_and_compile(

@@ -9,7 +9,7 @@ from flax import nnx
 
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.layers.moe import load_balance_updates_from_counts
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.xla_options import loop_unrolling
 from lilax._backend.utils.sharding import maybe_shard_with_name
 
 
@@ -56,7 +56,7 @@ def gradient_accumulation_loss_and_grad(_loss_fn, config, model, params, params_
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    loop_unroll_ctx = max_utils.model_loop_unroll_context(config)
+    loop_unroll_ctx = loop_unrolling.model_loop_unroll_context(config)
     if is_nnx:
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
       with loop_unroll_ctx:

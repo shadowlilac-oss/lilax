@@ -9,7 +9,8 @@ import jax
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from lilax._backend.inference.maxengine import maxengine
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.diagnostics import system_info
 
 
 def save_parameter_context(config, hf_model_config, agent_directory):
@@ -18,7 +19,7 @@ def save_parameter_context(config, hf_model_config, agent_directory):
   assert config.load_full_state_path == "", (
       "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
   )
-  max_utils.print_system_information()
+  system_info.print_system_information()
   engine = maxengine.MaxEngine(config)
   rng, rng_load_params = jax.random.split(jax.random.PRNGKey(1234))
   params = nnx.to_pure_dict(engine.load_params(rng=rng_load_params))

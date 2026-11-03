@@ -30,7 +30,18 @@ from grain.experimental import ElasticIterator
 from huggingface_hub import HfFileSystem
 
 from lilax._backend.input_pipeline import data_processing_utils
-from lilax._backend.input_pipeline import input_pipeline_utils
+from lilax._backend.input_pipeline.sources import record_file_datasets
+from lilax._backend.input_pipeline.sources import host_sharding
+from lilax._backend.input_pipeline.conversation import chat_template_formatting
+from lilax._backend.input_pipeline.sft import pad_token_remap
+from lilax._backend.input_pipeline.sft import sft_masking
+from lilax._backend.input_pipeline.multimodal import sft_preprocessing
+from lilax._backend.input_pipeline.multimodal import batch_transforms
+from lilax._backend.input_pipeline.multimodal import qwen3_omni_position_transform
+from lilax._backend.input_pipeline.transforms import feature_transforms
+from lilax._backend.input_pipeline.transforms import pad_or_trim
+from lilax._backend.input_pipeline.transforms import target_shift
+from lilax._backend.input_pipeline.mmap import eod_segmentation
 from lilax._backend.input_pipeline import grain_tokenizer
 from lilax._backend.input_pipeline import dpo_utils
 from lilax._backend.input_pipeline import multihost_dataloading
@@ -264,7 +275,7 @@ def get_datasets(
       return dataset
   elif data_file_type in ("tfrecord", "parquet"):
     data_files = find_data_files(data_file_pattern, hf_access_token=hf_access_token)
-    file_slice, files_per_host, row_shard = input_pipeline_utils.compute_file_sharding(
+    file_slice, files_per_host, row_shard = host_sharding.compute_file_sharding(
         len(data_files), dataloading_host_index, dataloading_host_count
     )
     if len(data_files) < dataloading_host_count:
@@ -285,18 +296,18 @@ def get_datasets(
     dataset = dataset.repeat(num_epoch)
     dataset = dataset[file_slice]
     if data_file_type == "tfrecord":
-      dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
+      dataset = dataset.map(record_file_datasets.make_tfrecord_iter_dataset)  # pyrefly: ignore[missing-attribute]
     else:
       dataset = dataset.map(  # pyrefly: ignore[missing-attribute]
           functools.partial(
-              input_pipeline_utils.make_parquet_iter_dataset,
+              record_file_datasets.make_parquet_iter_dataset,
               hf_access_token=hf_access_token,
           )
       )
     cycle_length = min(files_per_host, grain_num_threads)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=cycle_length)
     if row_shard is not None:
-      dataset = input_pipeline_utils.IndexShardIterDataset(dataset, host_index=row_shard[0], host_count=row_shard[1])
+      dataset = host_sharding.IndexShardIterDataset(dataset, host_index=row_shard[0], host_count=row_shard[1])
     if shuffle:
       dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
     return dataset
@@ -363,25 +374,25 @@ def _mmap_pretrain_pipeline(
     # MegatronNpyDataSource returns seq_length+1 tokens; split into
     # inputs[:-1] / targets[1:] with EOD-aware segmentation.
     dataset = dataset.map(
-        input_pipeline_utils.MegatronSplitInputsTargets(
+        eod_segmentation.MegatronSplitInputsTargets(
             eod_id=eod_id,
             reset_attention_mask=config.reset_attention_mask,
             eod_mask_loss=config.eod_mask_loss,
-            min_segment_length=input_pipeline_utils.megatron_min_segment_length(config),
+            min_segment_length=eod_segmentation.megatron_min_segment_length(config),
         )
     )
   else:
     data_columns = ("inputs", "targets")
     rekey_dict = {col: text_column for col in data_columns}
-    dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+    dataset = dataset.map(feature_transforms.Rekey(rekey_dict))
     # Samples are already exactly max_target_length with EOD tokens between
     # documents.  Generate doc-boundary-aware segmentation, skip packing.
     dataset = dataset.map(
-        input_pipeline_utils.GenerateDocSegmentIds(
+        eod_segmentation.GenerateDocSegmentIds(
             eod_id=eod_id,
             reset_attention_mask=config.reset_attention_mask,
             eod_mask_loss=config.eod_mask_loss,
-            min_segment_length=input_pipeline_utils.megatron_min_segment_length(config),
+            min_segment_length=eod_segmentation.megatron_min_segment_length(config),
         )
     )
 
@@ -409,7 +420,7 @@ def _mmap_pretrain_pipeline(
           "at all EOD positions, effectively masking EOD from loss regardless "
           "of eod_mask_loss. Use mmap_npy mode for correct eod_mask_loss=False behavior."
       )
-    dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[eod_id], axis=1))
+    dataset = dataset.map(target_shift.ShiftData(ignored_ids=[eod_id], axis=1))
     dataset = dataset.mp_prefetch(mp_options)
 
   return dataset
@@ -453,7 +464,7 @@ def pretrain_preprocessing_pipeline(
   pipeline_columns = ["inputs", "targets"]
   rekey_dict = {col: text_column for col in pipeline_columns}
 
-  dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict, keep_old_keys=is_offline))
+  dataset = dataset.map(feature_transforms.Rekey(rekey_dict, keep_old_keys=is_offline))
 
   if is_offline:
     pipeline_columns.extend(["top_k_logits", "top_k_indices"])
@@ -537,7 +548,7 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model, model_na
   # Assign the standardized messages back to the primary column
   element[data_columns[0]] = messages
 
-  return input_pipeline_utils.apply_chat_template(
+  return chat_template_formatting.apply_chat_template(
       element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0], model_name=model_name
   )
 
@@ -566,7 +577,7 @@ def sft_preprocessing_pipeline(
   base_tokenizer_model = tokenizer_model
 
   tokenizer_model = getattr(tokenizer_model, "tokenizer", tokenizer_model)
-  if input_pipeline_utils.fix_pad_token_if_needed(tokenizer_model):
+  if pad_token_remap.fix_pad_token_if_needed(tokenizer_model):
     pad_id = tokenizer_model.pad_token_id
     if hasattr(base_tokenizer_model, "pad_id"):
       base_tokenizer_model.pad_id = pad_id
@@ -594,7 +605,7 @@ def sft_preprocessing_pipeline(
     )
 
   dataset = dataset.map(
-      input_pipeline_utils.SFTPromptMasking(
+      sft_masking.SFTPromptMasking(
           text_column_name=data_columns[0],
           completion_only=config.sft_train_on_completion_only,
           max_target_length=config.max_target_length,
@@ -645,18 +656,18 @@ def vision_sft_preprocessing_pipeline(
   if isinstance(image_column, (list, tuple)):
     dataset = dataset.map(
         functools.partial(
-            input_pipeline_utils.merge_image_columns,
+            sft_preprocessing.merge_image_columns,
             image_columns=list(image_column),
             max_num_images_per_example=config.max_num_images_per_example,
         )
     )
     image_column = "images"
   elif image_column != "images":
-    dataset = dataset.map(input_pipeline_utils.Rekey({"images": image_column}))
+    dataset = dataset.map(feature_transforms.Rekey({"images": image_column}))
 
   dataset = dataset.map(
       functools.partial(
-          input_pipeline_utils.reformat_prompt,
+          sft_preprocessing.reformat_prompt,
           column=text_columns[0],
           image_placeholder=config.image_placeholder,
           model_name=config.model_name,
@@ -664,7 +675,7 @@ def vision_sft_preprocessing_pipeline(
   )
   dataset = dataset.map(
       functools.partial(
-          input_pipeline_utils.reformat_response,
+          sft_preprocessing.reformat_response,
           column=text_columns[1],
           model_name=config.model_name,
       )
@@ -672,7 +683,7 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(
       functools.partial(
-          input_pipeline_utils.pre_process_image_sft,
+          sft_preprocessing.pre_process_image_sft,
           image_column="images",
           config=config,
       )
@@ -687,14 +698,14 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(
       functools.partial(
-          input_pipeline_utils.prepare_text_for_image_fusion,
+          sft_preprocessing.prepare_text_for_image_fusion,
           column_name=text_columns[0],
           config=config,
       )
   )
 
   dataset = dataset.map(
-      input_pipeline_utils.SFTPromptMaskingVision(
+      sft_masking.SFTPromptMaskingVision(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
@@ -703,7 +714,7 @@ def vision_sft_preprocessing_pipeline(
   )
 
   dataset = dataset.map(
-      input_pipeline_utils.PadOrTrimToMaxLength(
+      pad_or_trim.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
           config=config,
@@ -711,17 +722,17 @@ def vision_sft_preprocessing_pipeline(
       )
   )
 
-  dataset = dataset.map(input_pipeline_utils.ExtractImagesAndMasks())
+  dataset = dataset.map(batch_transforms.ExtractImagesAndMasks())
 
   batch_size = data_processing_utils.get_local_batch_size(config)
   if config.use_tunix_gradient_accumulation:
     batch_size = batch_size // config.gradient_accumulation_steps
 
   dataset = dataset.batch(batch_size, drop_remainder=True)
-  dataset = dataset.map(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  dataset = dataset.map(batch_transforms.FoldImagesIntoBatch(model_name=config.model_name))
   if config.use_mrope:
     dataset = dataset.map(
-        input_pipeline_utils.ComputeQwen3OmniPositions(
+        qwen3_omni_position_transform.ComputeQwen3OmniPositions(
             data_column="inputs",
             spatial_merge_size=config.spatial_merge_size_for_vit,
             position_id_per_seconds=config.position_id_per_seconds,
@@ -734,7 +745,7 @@ def vision_sft_preprocessing_pipeline(
   if hasattr(dataset, "to_iter_dataset"):
     dataset = dataset.to_iter_dataset()
 
-  dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+  dataset = dataset.map(target_shift.ShiftData(ignored_ids=[pad_id], axis=1))
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )

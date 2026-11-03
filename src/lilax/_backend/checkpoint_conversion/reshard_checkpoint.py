@@ -18,18 +18,20 @@ from lilax._backend.checkpoint_conversion.utils.utils import print_peak_memory
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
-from lilax._backend.layers import quantizations
-from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx, model_creation_utils, sharding
+from lilax._backend.layers.quantization.configure import configure_quantization
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, sharding
+from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 
 
 def create_abstract_params(config, mesh: Mesh) -> nnx.State:
   if not (config.quantization and config.use_qwix_quantization):
-    _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+    _, abstract_model = nnx_abstract_model.create_nnx_abstract_model(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
   else:
     def _create_model():
       rngs = maxtext_utils_nnx.create_nnx_rngs(config, model_mode=MODEL_MODE_TRAIN)
-      quant = quantizations.configure_quantization(config)
-      return model_creation_utils.get_transformer_model(config, mesh, quant, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+      quant = configure_quantization(config)
+      return model_factory.get_transformer_model(config, mesh, quant, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
 
     with logical_axis_rules(config.logical_axis_rules):
       graphdef, abstract_state = nnx.split(nnx.eval_shape(_create_model))
@@ -195,7 +197,7 @@ def reshard_checkpoint(config, simulated_cpu_devices_count=16):
 
 
 def _reshard_checkpoint(config):
-  max_utils.print_system_information()
+  system_info.print_system_information()
   max_logging.log(
       f"Reshard checkpoint with weight dtype: {config.weight_dtype},"
       f" moe_flat_fsdp_weights: {config.moe_flat_fsdp_weights}"

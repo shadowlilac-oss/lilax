@@ -3,7 +3,7 @@
 import numpy as np
 
 from lilax._backend.multimodal.processor_gemma3 import GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE
-from lilax._backend.multimodal.qwen3_omni_tokens import QWEN_SPECIAL_TOKEN_CONFIGS
+from lilax._backend.multimodal.qwen3_omni.tokens import QWEN_SPECIAL_TOKEN_CONFIGS
 from lilax._backend.utils import max_logging
 
 VISION_TOKENS_PER_IMAGE = {"gemma3": GEMMA_NUM_PLACEHOLDER_TOKENS_PER_IMAGE}

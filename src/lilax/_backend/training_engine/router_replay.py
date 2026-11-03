@@ -9,7 +9,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
-from lilax._backend.trainers.pre_train import train as maxtext_train
+from lilax._backend.trainers.pre_train.steps import loss as maxtext_loss
 from lilax._backend.training_engine import abstract_engine
 import numpy as np
 
@@ -106,6 +106,6 @@ def make_router_replay_loss_fn(
     }
     if forced_routed_experts is not None:
       data["forced_routed_experts"] = forced_routed_experts
-    return maxtext_train.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
+    return maxtext_loss.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
 
   return router_replay_loss_fn

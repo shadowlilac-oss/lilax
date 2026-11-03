@@ -13,7 +13,8 @@ from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.multimodal import utils as mm_utils
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.diagnostics import system_info
 from lilax.configuration import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime
 
@@ -59,7 +60,7 @@ def decode(config):
     config = resolve_runtime_config(config)
   _validate_config(config)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  max_utils.print_system_information()
+  system_info.print_system_information()
 
   engine = maxengine.MaxEngine(config, devices=devices)
   rng = jax.random.PRNGKey(1234)

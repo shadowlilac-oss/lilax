@@ -15,8 +15,10 @@ from transformers import AutoTokenizer
 
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.multimodal import processor as mm_processor
-from lilax._backend.utils import device_mesh, max_logging, max_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
+from lilax._backend.utils.model_creation import model_factory
+from lilax._backend.utils.tree_ops import partitioning
 from lilax.configuration import MaxTextConfig
 from lilax.runtime import Runtime
 
@@ -53,7 +55,7 @@ def load_omni_config(checkpoint_path, config_path=None, *, devices=None):
 def initialize_model_and_weights(config, checkpoint_path, mesh):
   """Instantiate an Omni model and restore its checkpoint parameters."""
   with jax.set_mesh(mesh):
-    model = model_creation_utils.from_config(config, mesh=mesh)
+    model = model_factory.from_config(config, mesh=mesh)
     with model.mesh, logical_axis_rules(config.logical_axis_rules):
       key = jax.random.PRNGKey(0)
       input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
@@ -67,7 +69,7 @@ def initialize_model_and_weights(config, checkpoint_path, mesh):
         encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
         encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
     )
-    target_params = max_utils.unbox_logicallypartioned(abstract_vars["params"])
+    target_params = partitioning.unbox_logicallypartioned(abstract_vars["params"])
     max_logging.log(f"Checkpoint parameters path: {checkpoint_path}")
     restored = checkpointing.load_params_from_path(
         checkpoint_path, {"params": target_params}, config.checkpoint_storage_concurrent_gb,

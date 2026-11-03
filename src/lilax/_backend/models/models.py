@@ -17,7 +17,7 @@ from lilax._backend.layers import nnx_wrappers
 from lilax._backend.layers.embeddings import Embed
 from lilax._backend.layers.encoders import AudioEncoder, VisionEncoder
 from lilax._backend.layers.multi_token_prediction import MultiTokenPredictionBlock
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import sharding

@@ -6,7 +6,7 @@ from collections.abc import Callable
 import dataclasses
 from typing import Any
 
-from lilax._backend.trainers.pre_train import train as maxtext_train
+from lilax._backend.trainers.pre_train.steps import loss as maxtext_loss
 from lilax._backend.training_engine import abstract_engine
 
 
@@ -53,7 +53,7 @@ class LossSpec:
     return loss_callable(model, config, inputs, None, None, is_train=is_train)
 
   def resolve(self) -> Callable[..., Any]:
-    return self.fn if self.fn is not None else maxtext_train.loss_fn
+    return self.fn if self.fn is not None else maxtext_loss.loss_fn
 
   def normalize(self, out: Any) -> abstract_engine.LossOutput:
     return _normalize_loss_output(out, self.has_aux)

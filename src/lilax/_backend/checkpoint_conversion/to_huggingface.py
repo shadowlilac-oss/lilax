@@ -20,10 +20,11 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
     print_peak_memory,
     save_adapter_files,
 )
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.diagnostics import system_info
 from lilax._backend.utils.globals import HF_IDS
 from lilax._backend.utils.lora_utils import sync_lora_metadata
-from lilax._backend.utils.model_creation_utils import verify_and_sync_scan_layers
+from lilax._backend.utils.model_creation.scan_layers_sync import verify_and_sync_scan_layers
 
 
 def _get_lora_delta(key, lora_state_dict, lora_scaling):
@@ -277,7 +278,7 @@ def convert_to_huggingface(config, *, override_model_architecture=False, hf_mode
     config = config.model_copy(update={"scan_layers": temp_config.scan_layers})
   else:
     config = verify_and_sync_scan_layers(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   overall_start = time.time()
 
   lora_restore_path = config.lora.lora_restore_path

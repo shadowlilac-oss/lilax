@@ -13,11 +13,11 @@ from lilax._backend.layers import attentions
 from lilax._backend.layers import initializers
 from lilax._backend.layers import linears
 from lilax._backend.layers import moe
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
-from lilax._backend.utils import max_utils
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 GPT_OSS_ATTENTION_PATTERN = (
@@ -50,7 +50,7 @@ class GptOssDecoderLayer(nnx.Module):
     self.attention_type = attention_type
     self.quant = quant
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
@@ -98,7 +98,7 @@ class GptOssDecoderLayer(nnx.Module):
         weight_dtype=config.weight_dtype,
         dropout_rate=config.dropout_rate,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         use_bias_in_projections=config.attention_bias,
         attention_type=self.attention_type,
         sliding_window_size=config.sliding_window_size,

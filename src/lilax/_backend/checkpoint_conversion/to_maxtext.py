@@ -26,8 +26,9 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
 )
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs.types import DType
-from lilax._backend.utils import device_mesh, max_logging, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging
 from lilax._backend.utils.globals import HF_IDS
+from lilax._backend.utils.model_creation import nnx_abstract_model
 
 
 def resolve_scale_key(key: str, container) -> str:
@@ -122,7 +123,7 @@ def get_maxtext_model_info(config):
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   max_logging.log("Initializing MaxText abstract model...")
-  _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  _, abstract_model = nnx_abstract_model.create_nnx_abstract_model(config, mesh)
 
   abstract_params_tree = {}
   for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):

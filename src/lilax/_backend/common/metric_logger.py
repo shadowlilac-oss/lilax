@@ -37,10 +37,11 @@ from lilax._backend.utils import exceptions
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils.diagnostics import config_summary
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.tensorboard_logging import summary_writing
 from collections import defaultdict
 
 
@@ -116,7 +117,7 @@ class MetricLogger:
   """
 
   def __init__(self, config, learning_rate_schedule, start_step=0, reporter=None):
-    self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
+    self.writer = summary_writing.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self.config = config
     self.reporter = reporter
     self.metadata = {}
@@ -421,14 +422,14 @@ class MetricLogger:
 
   def write_setup_info_to_tensorboard(self, params):
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
-    num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
+    num_model_parameters = pytree.calculate_num_params_from_pytree(params)
     self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = training_flops.calculate_tflops_training_per_device(self.config)
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = flops.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     if self.writer is None:
       return
-    max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self.writer)
+    summary_writing.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)
+    summary_writing.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self.writer)
     config_summary.add_config_to_summary_writer(self.config, self.writer)
 
   def get_performance_metric_queue(self, config):
@@ -590,7 +591,7 @@ class MetricLogger:
       self.buffered_metrics = []
 
       mllog_utils.sync_log(force=True)
-      max_utils.close_summary_writer(self.writer)
+      summary_writing.close_summary_writer(self.writer)
     finally:
       if self.reporter is not None and jax.process_index() == 0:
         self.reporter.close()

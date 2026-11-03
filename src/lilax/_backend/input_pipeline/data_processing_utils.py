@@ -6,18 +6,25 @@ import jax
 from grain.experimental import BestFitPackIterDataset, pick_performance_config
 import grain.python as grain
 
-from lilax._backend.input_pipeline import input_pipeline_utils
+import datasets
+from grain._src.python.dataset.sources import tfrecord_dataset
+from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
+from lilax._backend.input_pipeline import encoding_dsv4
 from lilax._backend.input_pipeline import tokenizer
+from lilax._backend.input_pipeline.sources import example_parsing
+from lilax._backend.input_pipeline.transforms import feature_transforms
+from lilax._backend.input_pipeline.transforms import pad_or_trim
+from lilax._backend.input_pipeline.transforms import target_shift
 from lilax._backend.utils import elastic_utils
 
 
 def parse_and_keep_features(dataset, config, data_columns, tokenize):
   """Parse arrayrecord features or keep specified columns for other formats."""
   if config.grain_file_type in ("arrayrecord", "tfrecord"):
-    dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
+    dataset = dataset.map(example_parsing.ParseFeatures(data_columns, tokenize))
+    dataset = dataset.map(feature_transforms.NormalizeFeatures(data_columns, tokenize))
   else:
-    dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=data_columns, tokenize=tokenize))
+    dataset = dataset.map(feature_transforms.KeepFeatures(feature_names=data_columns, tokenize=tokenize))
   return dataset
 
 
@@ -87,17 +94,17 @@ def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenize
         "targets_position": "targets_positions",
         "inputs_position": "inputs_positions",
     }
-    dataset = dataset.map(input_pipeline_utils.Rekey(rekey_dict))
+    dataset = dataset.map(feature_transforms.Rekey(rekey_dict))
   else:
-    dataset = dataset.map(input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id))
+    dataset = dataset.map(pad_or_trim.PadOrTrimToMaxLength(config.max_target_length, pad_id))
   if config.grain_use_elastic_iterator:
     if shift:
-      dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=0))
+      dataset = dataset.map(target_shift.ShiftData(ignored_ids=[pad_id], axis=0))
     return dataset
   batch_fn = functools.partial(grain.experimental.batch_and_pad, batch_size=batch_size, pad_value=pad_id)
   dataset = dataset.batch(batch_size, batch_fn=batch_fn)
   if shift:
-    dataset = dataset.map(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+    dataset = dataset.map(target_shift.ShiftData(ignored_ids=[pad_id], axis=1))
   return dataset
 
 

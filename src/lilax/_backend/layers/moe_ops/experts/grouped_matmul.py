@@ -8,8 +8,8 @@ import jax
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from lilax._backend.kernels import megablox as mblx
-from lilax._backend.layers import quantizations
-from lilax._backend.utils import max_utils
+from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization
+from lilax._backend.utils.kernel_tiling import eval_tiles, tile_padding
 import qwix.pallas as qpl
 import tokamax
 
@@ -18,7 +18,7 @@ set_xla_metadata = xla_metadata.set_xla_metadata
 
 def forward_tile(config, name):
   """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
-  return getattr(config, f"eval_{name}" if max_utils.is_eval(config) else name)
+  return getattr(config, f"eval_{name}" if eval_tiles.is_eval(config) else name)
 
 
 def _extract_vma(tensor):
@@ -106,7 +106,7 @@ class GroupedMatmul:
     # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
     # dtype they quantize to. Under qwix there is no quantization object here at all, and
     # the gmm takes its rule from the qwix rule instead.
-    if self.quant is not None and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
+    if self.quant is not None and not isinstance(self.quant, ServeFp8WeightQuantization):
       quant_dg = getattr(self.quant, "quant_dg", None)
       if quant_dg is not None:
         return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
@@ -209,10 +209,10 @@ class GroupedMatmul:
     orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
     # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
     if isinstance(inputs, qpl.QArray):
-      padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, forward_tile(self.config, "wi_tile_fwd_batch_seq"))
+      padded_qval, padding_amount = tile_padding.maybe_pad(inputs.qvalue, forward_tile(self.config, "wi_tile_fwd_batch_seq"))
       inputs = dataclasses.replace(inputs, qvalue=padded_qval)
     else:
-      inputs, padding_amount = max_utils.maybe_pad(inputs, forward_tile(self.config, "wi_tile_fwd_batch_seq"))
+      inputs, padding_amount = tile_padding.maybe_pad(inputs, forward_tile(self.config, "wi_tile_fwd_batch_seq"))
     if padding_amount > 0 and partial_sum is not None:
       partial_sum = jnp.pad(partial_sum, ((0, padding_amount),) + ((0, 0),) * (partial_sum.ndim - 1))
     if not isinstance(inputs, qpl.QArray):

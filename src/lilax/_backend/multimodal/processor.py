@@ -355,7 +355,7 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
 
     bidirectional_mask_vision = decoder_input_tokens == LLAMA4_PATCH_TOKEN
   elif decoder_block in ["qwen3", "qwen3_moe", "qwen3_5"]:
-    from lilax._backend.multimodal.qwen3_omni_tokens import QwenTokens  # pylint: disable=import-outside-toplevel
+    from lilax._backend.multimodal.qwen3_omni.tokens import QwenTokens  # pylint: disable=import-outside-toplevel
 
     tokens = QwenTokens(config)
 
@@ -370,7 +370,7 @@ def get_bidirectional_mask_audio(config, decoder_input_tokens):
   """Get the bidirectional mask for specific models."""
   bidirectional_mask_audio = None
   if config.model_name in ["qwen3-omni-30b-a3b"]:
-    from lilax._backend.multimodal.qwen3_omni_tokens import QwenTokens  # pylint: disable=import-outside-toplevel
+    from lilax._backend.multimodal.qwen3_omni.tokens import QwenTokens  # pylint: disable=import-outside-toplevel
 
     tokens = QwenTokens(config)
 
@@ -388,7 +388,7 @@ def downsample_video_mask_to_tokens(video_mask, config):
   if video_mask is None:
     return None
   if config.model_name.startswith(("qwen3", "weaver")):
-    from lilax._backend.multimodal.qwen3_omni_video_grid import (  # pylint: disable=import-outside-toplevel
+    from lilax._backend.multimodal.qwen3_omni.video.grid import (  # pylint: disable=import-outside-toplevel
         downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
     )
 

@@ -7,8 +7,8 @@ from flax.core.spmd import logical_axis_rules
 from lilax._backend.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import maxtext_utils_nnx
-from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import sharding
+from lilax._backend.utils.model_creation import pretrained
 
 
 def initialize_model_state(model, mesh, create_model_fn):
@@ -36,7 +36,7 @@ def reshard_params(model, config, mesh, params):
 def load_checkpoint(config, mesh, quant_mode_str, rest_state):
   max_logging.log("Loading NNX params via from_pretrained")
   with mesh:
-    nnx_model = model_creation_utils.from_pretrained(
+    nnx_model = pretrained.from_pretrained(
         config,
         mesh=mesh,
         model_mode=MODEL_MODE_AUTOREGRESSIVE,

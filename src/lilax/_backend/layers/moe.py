@@ -25,14 +25,28 @@ from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from lilax._backend.layers import attentions, linears, nnx_wrappers, quantizations
+from lilax._backend.layers import attentions, linears, nnx_wrappers
 from lilax._backend.layers.moe_ops import routing as moe_routing
 from lilax._backend.layers.moe_ops.dispatch import capacity, combine, expert_parallel, sorting
 from lilax._backend.layers.moe_ops.experts import activation as expert_activation
 from lilax._backend.layers.moe_ops.experts import grouped_matmul, up_projection
 from lilax._backend.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
+from lilax._backend.layers.quantization.aqt import AqtQuantization
+from lilax._backend.layers.quantization.fused_moe import (
+    get_fused_moe_rule,
+    prepare_fused_gmm_scale,
+    quantize_weight_for_fused_moe,
+    without_qwix_interception,
+)
+from lilax._backend.layers.quantization.gpu_fp8 import Fp8Quantization, NANOOFp8Quantization
+from lilax._backend.layers.quantization.modes import in_serve_mode
+from lilax._backend.layers.quantization.nnx_ops import apply_einsum_in_nnx, create_fp8_einsum, make_dot_general
+from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization, infer_scale_granularity
+from lilax._backend.layers.quantization.weights import WeightQuantConfig, dequantize_weight, get_weight_quant_config
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.kernel_tiling import eval_tiles
+from lilax._backend.utils.te_integration import moe_bootstrap
+from lilax._backend.utils.tree_ops import partitioning
 from lilax._backend.utils.sharding import (
     CompoundLogicalAxis,
     create_sharding,
@@ -366,7 +380,7 @@ def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
   layers, instead of the kernel's dynamic per-row, per-K-block scale. Returns {} (dynamic
   scaling, the kernel default) otherwise.
   """
-  if not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+  if not isinstance(quant, ServeFp8WeightQuantization):
     return {}
   scale = quant.static_act_scale()
   if scale is None:
@@ -405,7 +419,7 @@ class GateLogit(nnx.Module):
       use_bias: bool = False,
       bias_dtype: Optional[ctypes.DType] = None,
       score_func: str = "",
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
   ):
@@ -429,7 +443,7 @@ class GateLogit(nnx.Module):
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
     """
-    if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not ctypes.is_fp8_dtype(weight_dtype):
+    if isinstance(quant, ServeFp8WeightQuantization) and not ctypes.is_fp8_dtype(weight_dtype):
       quant = None
     self.in_features_shape = linears.canonicalize_tuple(in_features_shape)
     self.out_features_shape = linears.canonicalize_tuple(out_features_shape)
@@ -452,7 +466,7 @@ class GateLogit(nnx.Module):
     kernel_in_axis = np.arange(len(self.axis))
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
-    if not quantizations.in_serve_mode(self.quant):
+    if not in_serve_mode(self.quant):
       self.kernel = nnx.Param(
           self.kernel_init(
               rngs.params(),
@@ -481,8 +495,8 @@ class GateLogit(nnx.Module):
     else:
       self.bias = None
 
-    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
-      self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
+    if quant and not isinstance(quant, ServeFp8WeightQuantization):
+      self._quant_dot_general_name, quant_dot_general = make_dot_general(quant, kernel_axes, rngs)
       setattr(self, self._quant_dot_general_name, quant_dot_general)
       # See the matching comments in linears.py.
       if isinstance(quant_dot_general, nnx_wrappers.ToNNX):
@@ -504,7 +518,7 @@ class GateLogit(nnx.Module):
     inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
 
-    if quantizations.in_serve_mode(self.quant):
+    if in_serve_mode(self.quant):
       kernel_shape = self.in_features_shape + self.out_features_shape
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
@@ -634,10 +648,10 @@ class RoutedMoE(nnx.Module):
       intermediate_dim: int = 2048,
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       is_hash_routing: bool = False,
       force_dropless: bool = False,
-      weight_quant: Optional[quantizations.WeightQuantConfig] = None,
+      weight_quant: Optional[WeightQuantConfig] = None,
   ):
     """Initializes the RoutedMoE module.
 
@@ -756,12 +770,12 @@ class RoutedMoE(nnx.Module):
           "Launch with one GPU per rank (e.g. tools/orchestration/gpu_per_device_run.sh)."
       )
 
-    if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
+    if isinstance(self.quant, (Fp8Quantization, NANOOFp8Quantization)):
       einsum_names = [WI_0, WI_1, WO]
       if self.config.capacity_factor > 0:
         einsum_names += [DISPATCH, COMBINE]
       self.quant_einsums = nnx.Dict(
-          {name: quantizations.create_fp8_einsum(self.quant, self.dtype, self.rngs) for name in einsum_names}
+          {name: create_fp8_einsum(self.quant, self.dtype, self.rngs) for name in einsum_names}
       )
     else:
       self.quant_einsums = None
@@ -828,7 +842,7 @@ class RoutedMoE(nnx.Module):
         self.config.padded_base_moe_mlp_dim if self.config.padded_base_moe_mlp_dim is not None else self.intermediate_dim
     )
 
-    if quantizations.in_serve_mode(self.quant):
+    if in_serve_mode(self.quant):
       # During aqt convert state we delete kernel weight from params to save
       # memory. Instead they are retrieved from the tensors stored in the 'aqt'
       # collection.
@@ -913,11 +927,11 @@ class RoutedMoE(nnx.Module):
     else:
       self.per_expert_scale = None
 
-    if not quantizations.in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
+    if not in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
       resolved_weight_quant = (
           self.weight_quant
           if self.weight_quant is not None
-          else quantizations.get_weight_quant_config(self.config, "routed_experts")
+          else get_weight_quant_config(self.config, "routed_experts")
       )
       scale_dtype = resolved_weight_quant.scale_dtype if resolved_weight_quant is not None else jnp.float32
       block_size = (
@@ -1435,7 +1449,7 @@ class RoutedMoE(nnx.Module):
     override = getattr(self, "ragged_buffer_factor_override", None)
     if override is not None and override > 0:
       return override
-    if max_utils.is_eval(self.config):
+    if eval_tiles.is_eval(self.config):
       return self.config.eval_ragged_buffer_factor
     return self.config.ragged_buffer_factor
 
@@ -3060,7 +3074,7 @@ class RoutedMoE(nnx.Module):
     ):
       return jnp.einsum
 
-    if self.quant and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
+    if self.quant and not isinstance(self.quant, ServeFp8WeightQuantization):
       op_id = einsum_name if einsum_name is not None else "einsum"
 
       def quant_einsum(*args, **kwargs):
@@ -3072,7 +3086,7 @@ class RoutedMoE(nnx.Module):
             )
           return self.quant_einsums[op_id](*args)
         einsum = self.quant.einsum(mesh_axes=rhs_mesh_axes)
-        return quantizations.apply_einsum_in_nnx(self, op_id, einsum, ["aqt"], *args)
+        return apply_einsum_in_nnx(self, op_id, einsum, ["aqt"], *args)
 
       einsum_op = quant_einsum
     else:
@@ -3497,13 +3511,13 @@ class RoutedMoE(nnx.Module):
       # qwix's interception: qwix only guards pallas_call, while the kernel is launched
       # through pl.kernel, so under a QtProvider its tiled matmuls would otherwise be
       # fake-quantized into fp8 x fp8 with a bf16 accumulator, which Mosaic rejects.
-      rule = quantizations.get_fused_moe_rule()
-      quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
-      quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+      rule = get_fused_moe_rule()
+      quantized_w1, w1_scale = quantize_weight_for_fused_moe(fused_kernel, rule)
+      quantized_w2, w2_scale = quantize_weight_for_fused_moe(wo_kernel, rule)
     # serve_fp8_weight with a fixed act_quantization_calibration_method: the experts use the
     # same static activation scale as the dense layers ({} keeps the kernel's dynamic scale).
     lhs_scale_kwargs = fused_moe_lhs_scale_kwargs(getattr(self, "quant", None), fused_moe_func)
-    fused_moe = quantizations.without_qwix_interception(fused_moe_func)
+    fused_moe = without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
         hidden_states=hidden_states,
@@ -3580,9 +3594,9 @@ class RoutedMoE(nnx.Module):
     w1_kernel = self.variables["aqt"]["AqtEinsum_1"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
     wo_kernel = self.variables["aqt"]["AqtEinsum_2"]["AqtDotGeneral_0"]["qrhs"]["frozen"]
 
-    w0_kernel = max_utils.unbox_logicallypartioned(w0_kernel)
-    w1_kernel = max_utils.unbox_logicallypartioned(w1_kernel)
-    wo_kernel = max_utils.unbox_logicallypartioned(wo_kernel)
+    w0_kernel = partitioning.unbox_logicallypartioned(w0_kernel)
+    w1_kernel = partitioning.unbox_logicallypartioned(w1_kernel)
+    wo_kernel = partitioning.unbox_logicallypartioned(wo_kernel)
     return w0_kernel, w1_kernel, wo_kernel
 
   def _te_moe_block(
@@ -3661,12 +3675,12 @@ class RoutedMoE(nnx.Module):
         wi_kernel_axes=self.wi_kernel_axes,
         wo_kernel_axes=self.wo_kernel_axes,
         dtype=self.dtype,
-        recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
+        recv_capacity_per_rank=moe_bootstrap.get_te_moe_recv_capacity_per_rank(),
         quant_before_fsdp_ag=self.config.te_moe_quantize_before_fsdp_all_gather,
         **cudnn_gmm_fusion_kwargs,
         **checkpoint_kwargs,
     )
-    recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
+    recv_capacity_per_rank = moe_bootstrap.get_te_moe_recv_capacity_per_rank()
     output = output.astype(self.dtype)
     if lb_loss is not None:
       lb_loss = lb_loss.astype(self.dtype)
@@ -3700,7 +3714,7 @@ class RoutedMoE(nnx.Module):
 
     if cfg.te_moe_block and gate_inputs is not None:
       raise ValueError("te_moe_block=True does not support separate gate_inputs.")
-    if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
+    if cfg.te_moe_block and in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
 
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
@@ -3734,18 +3748,18 @@ class RoutedMoE(nnx.Module):
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 
     native_gmm = (
-        isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+        isinstance(self.quant, ServeFp8WeightQuantization)
         and cfg.sparse_matmul
         and cfg.use_gmm_v2
         and not is_fused_moe_path
     )
-    is_kernel_quantized = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and is_fused_moe_path
+    is_kernel_quantized = isinstance(self.quant, ServeFp8WeightQuantization) and is_fused_moe_path
 
     def _maybe_native_gmm_weight(kernel, scale):
       """Non-fused (gmm_v2) path: a qpl.QArray wrapping kernel+scale when
       native_gmm applies, else the plain dequantized kernel."""
       if native_gmm and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
-        scheme, channel_axis = quantizations.infer_scale_granularity(scale.shape[1:])
+        scheme, channel_axis = infer_scale_granularity(scale.shape[1:])
         if scheme == "per_tensor":
           per_expert_scale = jnp.max(scale.reshape(scale.shape[0], -1), axis=1).reshape(-1, 1, 1)
           return qpl.QArray(qvalue=kernel, scale=per_expert_scale)
@@ -3753,7 +3767,7 @@ class RoutedMoE(nnx.Module):
           # gmm_v2 only natively broadcasts per-output-channel (N-axis) scales.
           per_channel_scale = scale.reshape(scale.shape[0], 1, -1)
           return qpl.QArray(qvalue=kernel, scale=per_channel_scale)
-      return linears.dequantize_weight(kernel, scale, self.dtype)
+      return dequantize_weight(kernel, scale, self.dtype)
 
     def _maybe_native_fused_weight(kernel, scale):
       """Fused (tpu_inference) path: returns (kernel, native_scale). Native
@@ -3761,8 +3775,8 @@ class RoutedMoE(nnx.Module):
       scale is expanded to gmm_v2's rhs_scale layout. Otherwise: kernel is
       dequantized and native_scale is None."""
       if is_kernel_quantized and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
-        return kernel, quantizations.prepare_fused_gmm_scale(scale, kernel.shape)
-      return linears.dequantize_weight(kernel, scale, self.dtype), None
+        return kernel, prepare_fused_gmm_scale(scale, kernel.shape)
+      return dequantize_weight(kernel, scale, self.dtype), None
 
     wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
     if is_fused_moe_path:
@@ -3779,7 +3793,7 @@ class RoutedMoE(nnx.Module):
       fused_kernel, wi_native_scale = _maybe_native_fused_weight(self.wi[...], wi_scale)
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
-      wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
+      wi = dequantize_weight(self.wi[...], wi_scale, self.dtype)
       n = wi.shape[-1] // 2
       w0_kernel = wi[..., :n]
       w1_kernel = wi[..., n:]
@@ -3836,7 +3850,7 @@ class RoutedMoE(nnx.Module):
           native_w2_scale=wo_native_scale,
       )
     elif cfg.sparse_matmul:
-      if quantizations.in_serve_mode(self.quant):
+      if in_serve_mode(self.quant):
         w0_kernel, w1_kernel, wo_kernel = self.retrieve_quantized_weight(
             inputs,
             gate_logits,
@@ -3890,7 +3904,7 @@ class RoutedAndSharedMoE(nnx.Module):
       rngs: nnx.Rngs,
       weight_dtype: ctypes.DType = jnp.float32,
       dtype: ctypes.DType = jnp.float32,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       is_hash_routing: bool = False,
   ):
     """Initializes the RoutedAndSharedMoE module.

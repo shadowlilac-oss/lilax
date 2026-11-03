@@ -39,17 +39,18 @@ from lilax._backend.common.checkpoints.emergency_checkpointing import (
     create_replicator_checkpoint_manager,
 )
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.trainers.pre_train.train import get_first_step
+from lilax._backend.trainers.pre_train.start_step import get_first_step
 from lilax._backend.training_engine.checkpointing import (
     CheckpointManager as EngineCheckpointManager,
     CheckpointRestoreError as EngineCheckpointRestoreError,
     CheckpointState as EngineCheckpointState,
 )
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, train_utils
 from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.generate_param_only_checkpoint import generate_decode_checkpoint as _generate_decode_checkpoint
 from lilax._backend.utils.layerwise_quantization import quantize_checkpoint as _quantize_checkpoint
-from lilax._backend.utils.model_creation_utils import from_config
+from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.utils.model_creation.model_factory import from_config
 from lilax.configuration import MaxTextConfig, RLConfig
 
 
@@ -90,7 +91,7 @@ def checkpoint_loop(config):
   rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
   model = from_config(config, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(config, model)
-  create_model, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  create_model, _ = nnx_abstract_model.create_nnx_abstract_model(config, mesh)
 
   def init_state_fn():
     nnx_model = create_model()

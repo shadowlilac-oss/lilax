@@ -21,7 +21,7 @@ from lilax._backend.inference.maxengine.maxengine import MaxEngine
 from lilax._backend.input_pipeline.packing.prefill_packing import PrefillProcessor
 from lilax._backend.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.mesh_topology import mesh_axes
 
 DecodeState = Any
 Params = Any
@@ -483,7 +483,7 @@ class OfflineEngine:
 
   @staticmethod
   def create_mesh(devices, config):
-    ici_parallelism = max_utils.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
+    ici_parallelism = mesh_axes.fill_unspecified_mesh_axes(config.ici_parallelism.copy(), len(devices), "ICI")
     devices_array = mesh_utils.create_device_mesh(
         ici_parallelism, devices, contiguous_submeshes=False,
         allow_split_physical_axes=config.allow_split_physical_axes or False,

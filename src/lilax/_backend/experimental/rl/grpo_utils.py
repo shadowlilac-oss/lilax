@@ -26,7 +26,7 @@ from flax import nnx
 from lilax._backend.inference.offline_engine import InputData
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.training import param_scanning
 
 from pathwaysutils.experimental import reshard as experimental_reshard
 from pathwaysutils.experimental import split_by_mesh_axis
@@ -295,7 +295,7 @@ def pathways_reshard(config, inference_engine, params, source_shardings, source_
     layer_groups = [("layers", config.base_num_decoder_layers)]
   if not config.scan_layers:
     params_to_reshard = jax.tree_util.tree_map(lambda x: x, params)
-    max_utils.unscan_train_state_params(
+    param_scanning.unscan_train_state_params(
         params_to_reshard,
         source_shardings,
         source_mesh,

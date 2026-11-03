@@ -13,9 +13,11 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import elastic_utils, gpu_collective_overlap_pass, max_logging, max_utils
+from lilax._backend.utils import elastic_utils, gpu_collective_overlap_pass, max_logging
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
+from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.utils.te_integration import cgemm, mesh_context
 from lilax.configuration import MaxTextConfig
 from lilax.runtime import Runtime
 import tensorflow as tf
@@ -41,7 +43,7 @@ def train_sft_omni(config_path, *, devices=None, **overrides):
     runtime = Runtime(MaxTextConfig(base_config=config_path, **options), devices=devices)
     runtime.resolve_config()
     config = runtime.config
-    max_utils.print_system_information()
+    system_info.print_system_information()
     train_utils.validate_train_config(config)
     gpu_collective_overlap_pass.register()
     jax.config.update("jax_default_prng_impl", config.prng_impl)
@@ -52,7 +54,7 @@ def train_sft_omni(config_path, *, devices=None, **overrides):
     if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
       vertex_tensorboard_manager.configure_vertex_tensorboard(config)
     if config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
-      max_utils.bootstrap_transformer_engine_cgemm(config)
+      cgemm.bootstrap_transformer_engine_cgemm(config)
     mllog_utils.init_start(config)
     return runtime, create_goodput_recorder(config)
 
@@ -63,7 +65,7 @@ def train_sft_omni(config_path, *, devices=None, **overrides):
 
   def run_attempt(attempt_runtime, attempt_recorder):
     attempt_config = attempt_runtime.config
-    with max_utils.maybe_get_transformer_engine_context(attempt_config), profiler.nnx_named_scope_context():
+    with mesh_context.maybe_get_transformer_engine_context(attempt_config), profiler.nnx_named_scope_context():
       setup = train_utils.setup_train_loop(
           attempt_config, attempt_recorder, elastic_retry_cache=retry_cache, runtime=attempt_runtime,
       )

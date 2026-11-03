@@ -30,7 +30,7 @@ from lilax._backend.common.goodput import (
 )
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
 from lilax._backend.configs.pyconfig import _lists_to_tuples
-from lilax._backend.configs import types
+from lilax._backend.configs.rl_fields import RL
 from lilax._backend.input_pipeline.instruction_data_processing import load_chat_template_from_file, load_data_template_from_file
 from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.integration.vllm import maxtext_vllm_adapter
@@ -39,7 +39,7 @@ from lilax._backend.trainers.post_train.checkpoint_selection import restore_trai
 from lilax._backend.trainers.post_train.rl import utils_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import evaluate
 from lilax._backend.utils import device_mesh, max_logging
-from lilax._backend.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
+from lilax._backend.utils.rl_setup.rollout_parallelism import get_rollout_kwargs_for_parallelism
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from lilax.configuration.loading import load_config_values
 
@@ -239,7 +239,7 @@ def build_rl_profiler_config(trainer_config: Any) -> rl_cluster_lib.RLProfileCon
   if trainer_config.profiler != "xplane":
     return None
   rl_cfg = getattr(trainer_config, "rl", None)
-  rl_fields = getattr(types.RL, "model_fields")
+  rl_fields = getattr(RL, "model_fields")
   start_invocation = getattr(rl_cfg, "profiler_start_invocation", getattr(
       trainer_config, "skip_first_n_steps_for_profiler", rl_fields["profiler_start_invocation"].default
   ))

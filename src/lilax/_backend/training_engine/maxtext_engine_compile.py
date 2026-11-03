@@ -11,7 +11,9 @@ from lilax._backend.configs import pyconfig
 from lilax._backend.trainers.pre_train import train_compile as pre_train_compile
 from lilax._backend.training_engine import kernel_compilation
 from lilax._backend.training_engine import maxtext_engine
-from lilax._backend.utils import gcs_utils, max_utils, maxtext_utils, model_creation_utils
+from lilax._backend.utils import gcs_utils, maxtext_utils
+from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.utils.model_creation import nnx_abstract_model, scan_layers_sync
 
 KERNEL_NAMES = kernel_compilation.KERNEL_NAMES
 HLO_DUMP_DEFAULTS = {
@@ -47,8 +49,8 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     del wrap_with_tunix_adapter, tokenizer_pad_id
-    _, abstract_model = model_creation_utils.create_nnx_abstract_model(
-        model_creation_utils.verify_and_sync_scan_layers(self._config),
+    _, abstract_model = nnx_abstract_model.create_nnx_abstract_model(
+        scan_layers_sync.verify_and_sync_scan_layers(self._config),
         self._mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
         rng_key=self._init_rng,
@@ -137,7 +139,7 @@ def compile_engine(config: pyconfig.HyperParameters, *, model: nnx.Module | None
         "numbers reported would describe a different computation."
     )
   topology_mesh = pre_train_compile.get_topology_mesh(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   print("Jitting and compiling the engine's kernels...", flush=True)
   compiled = compile_engine_kernels(config, topology_mesh, model=model)
   print("Jitting and compilation complete!", flush=True)

@@ -43,13 +43,14 @@ from lilax._backend.common.common_types import (
 from lilax._backend.inference import kvcache
 from lilax._backend.layers import initializers
 from lilax._backend.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers import linears
 from lilax._backend.layers.attentions import AttentionOp, KVQuant
 from lilax._backend.layers.initializers import Initializer, NdInitializer, nd_dense_init
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils import model_mode_shapes
+from lilax._backend.utils.device_memory import memory_kinds
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, truncate_out_sharding
 
 # -----------------------------------------
@@ -110,7 +111,7 @@ class Gpt3LayerNorm(nnx.Module):
     # Move scale to device if parameter offloading is enabled
     if self.parameter_memory_host_offload:
       max_logging.log("gpt3.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
+      scale = jax.device_put(scale, memory_kinds.device_space())
 
     scale = jnp.asarray(scale, self.dtype)
 
@@ -400,7 +401,7 @@ class Gpt3DecoderLayer(nnx.Module):
     self.quant = quant
     self.rngs = rngs
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
@@ -461,7 +462,7 @@ class Gpt3DecoderLayer(nnx.Module):
         fused_qkv=config.fused_qkv,
         use_bias=True,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         model_mode=model_mode,
         rngs=self.rngs,
     )

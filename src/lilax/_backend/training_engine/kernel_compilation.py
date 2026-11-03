@@ -7,7 +7,7 @@ import dataclasses
 from typing import Any
 
 import jax
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.xla_options import libtpu_flags
 
 KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
 
@@ -20,7 +20,7 @@ def to_aval(value: Any) -> Any:
 
 def xla_options(config: Any, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
   if compiler_options is None and getattr(config, "compile_xla_flags", ""):
-    return max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
+    return libtpu_flags.parse_libtpu_flags_to_dict(config.compile_xla_flags)
   return compiler_options
 
 

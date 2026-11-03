@@ -12,7 +12,7 @@ from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as g
 from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from lilax._backend.kernels.megablox import quantization_rule as gmm_quantization_rule
 from lilax._backend.kernels.ragged import ragged_sort_tc
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.static_scale import get_static_scale, is_static_calibration, manual_quantize
 import qwix
 import qwix.pallas as qpl
 import tokamax
@@ -373,7 +373,7 @@ def _fwd_quantize_activation_and_weight(
           calibration_method=quantization_rule.weight_calibration_method,
       )
     else:
-      rhs = quantizations.manual_quantize(
+      rhs = manual_quantize(
           rhs,
           quantization_rule.weight_qtype,
           calibration_method=quantization_rule.weight_calibration_method,
@@ -480,7 +480,7 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array |
   if method is None or qtype is None or not method.lower().startswith("fixed"):
     return None
 
-  scale_val = quantizations.get_static_scale(qtype, method)
+  scale_val = get_static_scale(qtype, method)
 
   return jnp.full((1, 1), scale_val, jnp.float32)
 
@@ -793,7 +793,7 @@ def _check_tc_unsort_bwd_supported(
       quantization_rule.act_qtype
       and not isinstance(lhs, qpl.QArray)
       and not quantization_rule.disable_channelwise_axes
-      and not quantizations.is_static_calibration(quantization_rule.act_calibration_method)
+      and not is_static_calibration(quantization_rule.act_calibration_method)
   ):
     raise NotImplementedError("tc_unsort_cfg requires a per-tensor act scale (fixed or disable_channelwise_axes).")
   if tc_unsort_cfg.combine_rs_cfg is not None:
@@ -804,11 +804,11 @@ def _check_tc_unsort_bwd_supported(
         ("act", quantization_rule.act_qtype, quantization_rule.act_calibration_method),
         ("bwd", quantization_rule.bwd_qtype, quantization_rule.bwd_calibration_method),
     ):
-      if qtype and not quantizations.is_static_calibration(method):
+      if qtype and not is_static_calibration(method):
         raise NotImplementedError(
             f"tc_unsort_cfg with combine_rs_cfg requires a fixed {name}_calibration_method, got {method!r}."
         )
-  if not quantization_rule.bwd_qtype or quantizations.is_static_calibration(quantization_rule.bwd_calibration_method):
+  if not quantization_rule.bwd_qtype or is_static_calibration(quantization_rule.bwd_calibration_method):
     return
   # A dynamic per-row cotangent scale would be in token order, so it can't be gathered like the qvalue.
   if not quantization_rule.disable_channelwise_axes:
@@ -831,7 +831,7 @@ def _lhs_rhs_share_fixed_scale(
       isinstance(rhs, qpl.QArray)
       and quantization_rule is not None
       and quantization_rule.weight_qtype == quantization_rule.act_qtype
-      and quantizations.is_static_calibration(quantization_rule.weight_calibration_method)
+      and is_static_calibration(quantization_rule.weight_calibration_method)
       and quantization_rule.weight_calibration_method == quantization_rule.act_calibration_method
       and lhs.scale.size == 1
       and rhs.scale.size == 1
@@ -902,7 +902,7 @@ def _bwd_quantize_gradient(
   """Applies backward quantization to incoming gradients."""
   if quantization_rule.bwd_qtype:
     bwd_cal = quantization_rule.bwd_calibration_method
-    share_quantized_grad = dlhs_dout is drhs_dout and quantizations.is_static_calibration(bwd_cal)
+    share_quantized_grad = dlhs_dout is drhs_dout and is_static_calibration(bwd_cal)
     dlhs_dout = qpl.quantize(
         # pyrefly: ignore[bad-argument-type]
         dlhs_dout,

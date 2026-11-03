@@ -8,12 +8,12 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from lilax._backend.common.common_types import Config
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import Dropout, MlpBlock
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
-from lilax._backend.utils import max_utils
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
@@ -25,7 +25,7 @@ class MistralDecoderLayer(nnx.Module):
     self.mesh = mesh
     self.quant = quant
     self.rngs = rngs
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.mlp_activation_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
@@ -45,7 +45,7 @@ class MistralDecoderLayer(nnx.Module):
         inputs_q_shape=dummy_inputs_shape, inputs_kv_shape=dummy_inputs_shape, mesh=mesh,
         dtype=config.dtype, weight_dtype=config.weight_dtype, dropout_rate=config.dropout_rate,
         float32_qk_product=config.float32_qk_product, float32_logits=config.float32_logits,
-        quant=self.quant, kv_quant=quantizations.configure_kv_quant(config),
+        quant=self.quant, kv_quant=configure_kv_quant(config),
         prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
         ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))), reshape_q=config.reshape_q,

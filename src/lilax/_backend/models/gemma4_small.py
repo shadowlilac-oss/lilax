@@ -24,12 +24,12 @@ import jax.numpy as jnp
 from flax import nnx
 
 from lilax._backend.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import DenseGeneral, MlpBlock
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
-from lilax._backend.utils import max_utils
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
 
 
@@ -337,7 +337,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         rngs=rngs,
     )
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.self_attention = Attention(
@@ -357,7 +357,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         float32_qk_product=config.float32_qk_product,
         float32_logits=config.float32_logits,
         quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         attention_type=attention_type,
         sliding_window_size=config.sliding_window_size,
         attn_logits_soft_cap=config.attn_logits_soft_cap,

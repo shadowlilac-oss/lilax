@@ -14,8 +14,10 @@ from omegaconf import OmegaConf
 
 from lilax._backend.common.common_types import DecoderBlockType, ShardMode
 from lilax._backend.configs import types
+from lilax._backend.configs.multimodal_fields import Multimodal
 from lilax._backend.inference.inference_utils import str2bool
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
+from lilax._backend.utils.jax_distributed import initialization
 from lilax._backend.utils.globals import HF_IDS, MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 
 
@@ -215,7 +217,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
 
   for key, value in raw_keys.items():
     if not _check_for_invalid_keys(key, valid_fields):
-      if not use_multimodal and key in types.Multimodal.model_fields:
+      if not use_multimodal and key in Multimodal.model_fields:
         logger.warning("Ignoring multimodal field %s because use_multimodal is False.", repr(key))
         continue
       logger.warning("Ignoring invalid/unsupported field from YAML/CLI: %s", repr(key))
@@ -323,7 +325,7 @@ def _resolve_native_config(
   if prepared.get("jax_debug_log_modules"):
     jax.config.update("jax_debug_log_modules", prepared["jax_debug_log_modules"])
   if "pytest" not in sys.modules:
-    max_utils.maybe_initialize_jax_distributed_system(prepared)
+    initialization.maybe_initialize_jax_distributed_system(prepared)
   if prepared.get("jax_cache_dir"):
     if prepared.get("dump_hlo"):
       max_logging.warning("JAX compilation cache is disabled because dump_hlo is True. HLO dumping requires recompilation.")

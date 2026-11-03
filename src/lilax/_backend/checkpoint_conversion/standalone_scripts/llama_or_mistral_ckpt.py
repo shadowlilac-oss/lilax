@@ -16,10 +16,10 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
+from lilax._backend.checkpoint_conversion.utils import rope_permutation
 from lilax._backend.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
 
 
 MODEL_PARAMS_DICT = {
@@ -723,8 +723,8 @@ def _convert_huggingface_to_jax_weights(
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
     if model_size[:8] == "llama3.1":
-      wq = max_utils.permute_to_match_maxtext_rope(wq)
-      wk = max_utils.permute_to_match_maxtext_rope(wk)
+      wq = rope_permutation.permute_to_match_maxtext_rope(wq)
+      wk = rope_permutation.permute_to_match_maxtext_rope(wk)
 
     w_post = chkpt_vars[f"layers.{layer_idx}.attention.wo.weight"].to(torch.float32).numpy().astype(CAST_DTYPE)
 

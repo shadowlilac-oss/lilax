@@ -19,7 +19,7 @@ from lilax._backend.checkpoint_conversion.utils import load_dynamic
 from lilax._backend.common.checkpoints import checkpoint_context, emergency_checkpointing, grain_utility, snapshotting
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.weights import dequantize_weight
 from lilax._backend.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
 from lilax._backend.utils import elastic_utils, exceptions, gcs_utils
 from lilax._backend.utils import globals as maxtext_globals
@@ -659,7 +659,7 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
     if scale_key in scales_to_drop:
       target_param = expected_dict.get(key)
       target_dtype = getattr(target_param, "dtype", jnp.bfloat16)
-      out[key] = quantizations.dequantize_weight(value, restored_weights[scale_key], compute_dtype=target_dtype)
+      out[key] = dequantize_weight(value, restored_weights[scale_key], compute_dtype=target_dtype)
     elif isinstance(value, dict):
       out[key] = maybe_dequantize_restored_params(value, expected_dict.get(key))
     else:

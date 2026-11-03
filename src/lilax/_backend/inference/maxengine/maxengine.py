@@ -23,7 +23,7 @@ from flax.core.spmd import logical_axis_rules
 from jetstream.engine import engine_api, token_utils
 from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType
 
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_quantization
 from lilax._backend.inference import inference_utils
 from lilax._backend.inference.maxengine import maxengine_adapters
 from lilax._backend.inference.maxengine import maxengine_cache_sharding
@@ -38,9 +38,10 @@ from lilax._backend.inference.maxengine import maxengine_prefill_cache
 from lilax._backend.inference.maxengine import maxengine_tokenizer
 from lilax._backend.utils import device_mesh
 from lilax._backend.utils import lora_utils
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import model_creation_utils
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.model_creation import model_factory
+from lilax._backend.utils.tree_ops import partitioning
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 
 _DEEPSEEK_V4_CACHE_KEYS = maxengine_insertion.DEEPSEEK_V4_CACHE_KEYS
@@ -93,12 +94,12 @@ class MaxEngine(engine_api.Engine):
     devices_array = device_mesh.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
-    quant = quantizations.configure_quantization(config)
+    quant = configure_quantization(config)
     nnx_quant_mode_str = "serve" if (quant is not None and config.checkpoint_is_quantized) else "train"
-    _create_model = model_creation_utils.get_nnx_create_model_fn(
+    _create_model = model_factory.get_nnx_create_model_fn(
         config, mesh=self._mesh, model_mode=MODEL_MODE_PREFILL, quant_mode_str=nnx_quant_mode_str
     )
-    _create_model_ar = model_creation_utils.get_nnx_create_model_fn(
+    _create_model_ar = model_factory.get_nnx_create_model_fn(
         config, mesh=self._mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE, quant_mode_str=nnx_quant_mode_str
     )
     self._nnx_quant_mode_str = nnx_quant_mode_str
@@ -130,8 +131,8 @@ class MaxEngine(engine_api.Engine):
     self._compiled_init_cache_fn = None
 
   def print_stats(self, label: str):
-    max_utils.print_mem_stats(label)
-    max_utils.print_cpu_ram_stats(label)
+    pytree.print_mem_stats(label)
+    pytree.print_cpu_ram_stats(label)
 
   def _abstract_model_for_mode(self, mode: str):
     """Pick the abstract NNX model whose cache vars match the requested mode."""
@@ -879,7 +880,7 @@ class MaxEngine(engine_api.Engine):
         nucleus_topp=nucleus_topp,
         temperature=temperature,
     )
-    return max_utils.unbox_logicallypartioned(new_state), result
+    return partitioning.unbox_logicallypartioned(new_state), result
 
   @functools.partial(
       jax.jit, static_argnums=(0,), donate_argnums=(2,), static_argnames=("algorithm", "topk", "nucleus_topp")
@@ -918,7 +919,7 @@ class MaxEngine(engine_api.Engine):
       slots: list[int],
   ) -> DecodeState:
     """Insert a single computed prefill cache into multiple slots in KV cache."""
-    unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    unboxed_prefix = partitioning.unbox_logicallypartioned(prefix)
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
@@ -1060,7 +1061,7 @@ class MaxEngine(engine_api.Engine):
       request_id: uuid.UUID | None = None,
   ) -> DecodeState:
     """Insert a single computed prefill cache into KV cache."""
-    unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
+    unboxed_prefix = partitioning.unbox_logicallypartioned(prefix)
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
@@ -1144,8 +1145,8 @@ class MaxEngine(engine_api.Engine):
       seq_len: int,
   ) -> DecodeState:
     """Insert into KV cache"""
-    unboxed_prefix = max_utils.unbox_logicallypartioned(prefix)
-    cache_unboxed = max_utils.unbox_logicallypartioned(cache)
+    unboxed_prefix = partitioning.unbox_logicallypartioned(prefix)
+    cache_unboxed = partitioning.unbox_logicallypartioned(cache)
     cache_unboxed = self._maybe_unstack_prefill_result_cache(cache_unboxed)
     start_idx = 0
     slot = slots[0]

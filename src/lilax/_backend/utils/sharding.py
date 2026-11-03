@@ -13,7 +13,7 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P, reshard
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.diagnostics import pytree
 from orbax.checkpoint._src.arrays.sharding import construct_maximal_shardings
 
 _LOGGED_ACTIVATION_SHARDINGS = set()
@@ -499,7 +499,7 @@ def _raise_if_unsharded_exceeds_tolerance(unsharded_size, total_size, tolerance,
 
 def assert_params_sufficiently_sharded(params, mesh, tolerance):
   """Assert replicated parameters remain within the configured tolerance."""
-  total_num_params = max_utils.calculate_bytes_from_pytree(params)
+  total_num_params = pytree.calculate_bytes_from_pytree(params)
   valid_target_mesh_axes = _get_nontrival_mesh_axes(mesh)
   if not valid_target_mesh_axes:
     return

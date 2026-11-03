@@ -12,10 +12,12 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
-from lilax._backend.trainers.pre_train import train as native_train
-from lilax._backend.utils import gpu_collective_overlap_pass, max_utils
+from lilax._backend.trainers.pre_train import run as native_run
+from lilax._backend.utils import gpu_collective_overlap_pass
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
+from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.utils.te_integration import cgemm
 
 
 def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
@@ -42,7 +44,7 @@ def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
       )
     overrides = {"run_name": run_name} if run_name is not None else None
     native_config = resolve_runtime_config(config, overrides=overrides)
-    max_utils.print_system_information()
+    system_info.print_system_information()
     train_utils.validate_train_config(native_config)
     gpu_collective_overlap_pass.register()
     jax.config.update("jax_default_prng_impl", native_config.prng_impl)
@@ -53,7 +55,7 @@ def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
     if native_config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
       vertex_tensorboard_manager.configure_vertex_tensorboard(native_config)
     if native_config.te_comm_gemm_overlap != TeCommGemmOverlapPolicy.DISABLED:
-      max_utils.bootstrap_transformer_engine_cgemm(native_config)
+      cgemm.bootstrap_transformer_engine_cgemm(native_config)
     mllog_utils.init_start(native_config)
     return native_config, create_goodput_recorder(native_config)
 
@@ -73,7 +75,7 @@ def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
 
   record_goodput(recorder, RECORD_JOB_START_TIME)
   with maybe_monitor_goodput(native_config):
-    return native_train.run_elastic(
+    return native_run.run_elastic(
         native_config, recorder, setup_fn=setup_attempt, reinitialize=initialize, reinitialize_first=True,
     )
 

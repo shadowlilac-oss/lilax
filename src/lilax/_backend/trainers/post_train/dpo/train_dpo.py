@@ -16,7 +16,7 @@ from lilax._backend.trainers.post_train.checkpoint_selection import restore_trai
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.utils import device_mesh
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import model_creation_utils
+from lilax._backend.utils.model_creation import pretrained
 
 
 def get_tunix_config(mt_config, report_to=None) -> DPOTrainingConfig:
@@ -61,11 +61,11 @@ def setup_trainer_state(
     )
     if model is None:
       if mesh is None:
-        model, mesh = model_creation_utils.from_pretrained(
+        model, mesh = pretrained.from_pretrained(
             mt_config, wrap_with_tunix_adapter=True, tokenizer_pad_id=tok.pad_id
         )
       else:
-        model = model_creation_utils.from_pretrained(
+        model = pretrained.from_pretrained(
             mt_config, mesh=mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=tok.pad_id
         )
     else:

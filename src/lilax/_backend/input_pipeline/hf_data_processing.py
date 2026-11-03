@@ -10,7 +10,20 @@ import grain.python as grain
 
 from lilax._backend.input_pipeline import data_processing_utils
 from lilax._backend.input_pipeline import dpo_utils
-from lilax._backend.input_pipeline import input_pipeline_utils
+from lilax._backend.input_pipeline.sources import hf_data_source
+from lilax._backend.input_pipeline.transforms import block_diffusion_transform
+from lilax._backend.input_pipeline.conversation import chat_template_formatting
+from lilax._backend.input_pipeline.conversation import conversational_columns
+from lilax._backend.input_pipeline.transforms import hf_tokenization
+from lilax._backend.input_pipeline.sft import pad_token_remap
+from lilax._backend.input_pipeline.sft import sft_masking
+from lilax._backend.input_pipeline.multimodal import sft_preprocessing
+from lilax._backend.input_pipeline.multimodal import batch_transforms
+from lilax._backend.input_pipeline.multimodal import qwen3_omni_position_transform
+from lilax._backend.input_pipeline.transforms import feature_transforms
+from lilax._backend.input_pipeline.transforms import pad_or_trim
+from lilax._backend.input_pipeline.transforms import target_shift
+from lilax._backend.input_pipeline.packing import reformat_packing
 from lilax._backend.input_pipeline import instruction_data_processing
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.utils import elastic_utils
@@ -49,7 +62,7 @@ def _get_training_objective_transform(
     packing: bool,
     pad_id: int,
     bos_token_id: int | None,
-) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
+) -> target_shift.ShiftData | block_diffusion_transform.BlockDiffusionCorruption | None:
   """Selects target preparation for causal or block-diffusion training."""
   objective = getattr(config, "training_objective", "causal_lm")
   if objective == "block_diffusion":
@@ -58,7 +71,7 @@ def _get_training_objective_transform(
       raise ValueError("Block-diffusion training is not compatible with DPO.")
     if packing:
       raise ValueError("Block-diffusion training requires packing=False.")
-    return input_pipeline_utils.BlockDiffusionCorruption(
+    return block_diffusion_transform.BlockDiffusionCorruption(
         block_size=config.causal_block_size,
         mask_id=config.block_diffusion_mask_id,
         min_noise=config.block_diffusion_min_noise,
@@ -70,7 +83,7 @@ def _get_training_objective_transform(
   if objective != "causal_lm":
     raise ValueError(f"Unsupported training objective: {objective}")
   if shift and not use_dpo:
-    return input_pipeline_utils.ShiftData(ignored_ids=[pad_id, bos_token_id], axis=1)
+    return target_shift.ShiftData(ignored_ids=[pad_id, bos_token_id], axis=1)
   return None
 
 
@@ -147,7 +160,7 @@ def vision_sft_preprocessing_pipeline(
 
   if isinstance(image_column, list):
     dataset = dataset.map(
-        input_pipeline_utils.merge_image_columns,
+        sft_preprocessing.merge_image_columns,
         fn_kwargs={
             "image_columns": image_column,
             "max_num_images_per_example": config.max_num_images_per_example,
@@ -162,7 +175,7 @@ def vision_sft_preprocessing_pipeline(
     dataset = dataset.rename_column(image_column, "images")
 
   dataset = dataset.map(
-      input_pipeline_utils.reformat_prompt,
+      sft_preprocessing.reformat_prompt,
       fn_kwargs={
           "column": text_columns[0],
           "image_placeholder": config.image_placeholder,
@@ -171,11 +184,11 @@ def vision_sft_preprocessing_pipeline(
       },
   )
   dataset = dataset.map(
-      input_pipeline_utils.reformat_response,
+      sft_preprocessing.reformat_response,
       fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
   )
   dataset = dataset.map(
-      input_pipeline_utils.pre_process_image_sft,
+      sft_preprocessing.pre_process_image_sft,
       fn_kwargs={"image_column": "images", "config": config},
   )
   if processing_class is None:
@@ -191,7 +204,7 @@ def vision_sft_preprocessing_pipeline(
     tokenizer = processing_class.tokenizer if isinstance(processing_class, transformers.ProcessorMixin) else processing_class
   pad_id = _get_pad_id(tokenizer)
   dataset = dataset.map(
-      input_pipeline_utils.tokenization,
+      hf_tokenization.tokenization,
       batched=True,
       batch_size=global_batch_size,
       fn_kwargs={
@@ -202,10 +215,10 @@ def vision_sft_preprocessing_pipeline(
       },
   )
   dataset = dataset.map(
-      input_pipeline_utils.prepare_text_for_image_fusion,
+      sft_preprocessing.prepare_text_for_image_fusion,
       fn_kwargs={"column_name": text_columns[0], "config": config},
   )
-  dataset = input_pipeline_utils.HFDataSource(
+  dataset = hf_data_source.HFDataSource(
       dataset=dataset,
       dataloading_host_index=dataloading_host_index,
       dataloading_host_count=dataloading_host_count,
@@ -215,7 +228,7 @@ def vision_sft_preprocessing_pipeline(
   )
   operations = []
   operations.append(
-      input_pipeline_utils.SFTPromptMaskingVision(
+      sft_masking.SFTPromptMaskingVision(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
@@ -223,19 +236,19 @@ def vision_sft_preprocessing_pipeline(
       )
   )
   operations.append(
-      input_pipeline_utils.PadOrTrimToMaxLength(
+      pad_or_trim.PadOrTrimToMaxLength(
           config.max_target_length,
           pad_id,
           config=config,
           max_num_images_per_example=config.max_num_images_per_example,
       )
   )
-  operations.append(input_pipeline_utils.ExtractImagesAndMasks())
+  operations.append(batch_transforms.ExtractImagesAndMasks())
   operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
-  operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  operations.append(batch_transforms.FoldImagesIntoBatch(model_name=config.model_name))
   if config.use_mrope:
     operations.append(
-        input_pipeline_utils.ComputeQwen3OmniPositions(
+        qwen3_omni_position_transform.ComputeQwen3OmniPositions(
             data_column="inputs",
             spatial_merge_size=config.spatial_merge_size_for_vit,
             position_id_per_seconds=config.position_id_per_seconds,
@@ -244,7 +257,7 @@ def vision_sft_preprocessing_pipeline(
             keep_aux_fields=False,
         )
     )
-  operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+  operations.append(target_shift.ShiftData(ignored_ids=[pad_id], axis=1))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
       num_epochs=1,
@@ -340,7 +353,7 @@ def preprocessing_pipeline(
     data_column_names = ["inputs", "top_k_logits", "top_k_indices"]
   dataset = dataset.select_columns(data_column_names)
   if use_sft and not is_offline:
-    input_pipeline_utils.fix_pad_token_if_needed(tokenizer)
+    pad_token_remap.fix_pad_token_if_needed(tokenizer)
     if not chat_template:
       chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
     data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
@@ -350,7 +363,7 @@ def preprocessing_pipeline(
         formatting_func_path=formatting_func_path,
         formatting_func_kwargs=formatting_func_kwargs,
     )
-    assert input_pipeline_utils.is_conversational(
+    assert conversational_columns.is_conversational(
         dataset.features, data_column_names
     ), "Dataset is not in conversational format."
     if len(data_column_names) > 1:
@@ -359,14 +372,14 @@ def preprocessing_pipeline(
           {combined_column_name: [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
       )
       dataset = dataset.map(
-          input_pipeline_utils.combine_columns,
+          conversational_columns.combine_columns,
           fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
           remove_columns=data_column_names,
           features=dataset_features,
       )
     data_column_names = list(dataset.features.keys())
     dataset = dataset.map(
-        input_pipeline_utils.apply_chat_template,
+        chat_template_formatting.apply_chat_template,
         fn_kwargs={
             "tokenizer_model": tokenizer,
             "data_column_name": data_column_names[0],
@@ -379,7 +392,7 @@ def preprocessing_pipeline(
     pad_id = 0
   if tokenize and not is_offline:
     dataset = dataset.map(
-        input_pipeline_utils.tokenization,
+        hf_tokenization.tokenization,
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
@@ -391,7 +404,7 @@ def preprocessing_pipeline(
   if is_offline and isinstance(dataset, datasets.IterableDataset):
     num_threads = 1
     grain_worker_count = 0
-  dataset = input_pipeline_utils.HFDataSource(
+  dataset = hf_data_source.HFDataSource(
       dataset,
       dataloading_host_index,
       dataloading_host_count,
@@ -401,11 +414,11 @@ def preprocessing_pipeline(
   )
   operations = []
   if is_offline:
-    operations.append(input_pipeline_utils.HFNormalizeFeatures("inputs", is_offline_distillation=True))
+    operations.append(feature_transforms.HFNormalizeFeatures("inputs", is_offline_distillation=True))
     data_column_names = ("inputs", "targets", "top_k_logits", "top_k_indices")
   elif use_sft:
     operations.append(
-        input_pipeline_utils.SFTPromptMasking(
+        sft_masking.SFTPromptMasking(
             text_column_name=data_column_names[0],
             completion_only=sft_train_on_completion_only,
             max_target_length=max_target_length,
@@ -416,7 +429,7 @@ def preprocessing_pipeline(
     data_column_names = ("inputs", "targets")
   elif not use_dpo:
     assert len(data_column_names) == 1
-    operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
+    operations.append(feature_transforms.HFNormalizeFeatures(data_column_names[0]))
     data_column_names = ("inputs", "targets")
 
   if packing:
@@ -431,17 +444,17 @@ def preprocessing_pipeline(
             max_sequences_per_bin=max_segments,
         )
     )
-    operations.append(input_pipeline_utils.ReformatPacking(data_column_names))
+    operations.append(reformat_packing.ReformatPacking(data_column_names))
   else:
     if use_dpo and not is_offline:
       max_prompt_length = config.dpo.max_prompt_length
       operations.append(dpo_utils.DPODataFormatting(pad_id, max_target_length, data_column_names, max_prompt_length))
     else:
-      operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id, config=config))
+      operations.append(pad_or_trim.PadOrTrimToMaxLength(max_target_length, pad_id, config=config))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
 
   if is_offline:
-    target_transform = input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1) if shift else None
+    target_transform = target_shift.ShiftData(ignored_ids=[pad_id], axis=1) if shift else None
   else:
     target_transform = _get_training_objective_transform(
         config,

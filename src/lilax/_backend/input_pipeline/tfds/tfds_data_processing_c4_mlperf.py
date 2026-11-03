@@ -18,7 +18,15 @@ except ImportError as error:
   ) from error
 
 from lilax._backend.input_pipeline import multihost_dataloading
-from lilax._backend.input_pipeline.input_pipeline_utils import get_tokenizer, TokenizeOp
+import datasets
+import grain.python as grain
+from grain._src.python.dataset.sources import tfrecord_dataset
+from grain.experimental import TFRecordIterDataset
+from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
+from lilax._backend.input_pipeline import encoding_dsv4
+from lilax._backend.input_pipeline.tfds.tfds_operations import get_tokenizer, TokenizeOp
+from lilax._backend.input_pipeline.protos import example_pb2
+from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.input_pipeline.packing import sequence_packing
 from lilax._backend.utils import max_logging
 from lilax._backend.utils.sharding import remove_size_one_mesh_axis

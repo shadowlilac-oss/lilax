@@ -14,7 +14,9 @@ from lilax._backend.common.goodput import (
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.input_pipeline import input_pipeline_interface
 from lilax._backend.input_pipeline.hf_data_processing import make_hf_eval_iterator
-from lilax._backend.trainers.pre_train import train as native_train
+from lilax._backend.trainers.pre_train import run as native_run
+from lilax._backend.trainers.pre_train.moe import graphdefs as native_graphdefs
+from lilax._backend.trainers.pre_train.steps import eval_step as native_eval_step
 from lilax._backend.utils import sharding, train_utils
 from lilax._backend.utils.globals import EPS
 from lilax.configuration import QwixQATConfig
@@ -157,7 +159,7 @@ class Trainer(_PostTrainer):
         self._reject_qat_checkpointing()
         config = self._with_model_config(config, self.model)
         self.config = config
-      self.state = native_train.run_elastic(
+      self.state = native_run.run_elastic(
           config, recorder, setup=setup, setup_fn=setup_attempt if setup is None else None,
           reinitialize=reinitialize, reporter_factory=reporter_factory,
           launch_xprof=self.args.launch_xprof if self.args is not None else False,
@@ -193,15 +195,15 @@ class Trainer(_PostTrainer):
     graphdef = self._graphdef
     state_shardings = self._setup[2]
     if not config.enable_diloco:
-      graphdef = native_train.build_eval_graphdef(config, graphdef, self.state) or graphdef
+      graphdef = native_graphdefs.build_eval_graphdef(config, graphdef, self.state) or graphdef
       _, state_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_shardings)
     data_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
-    eval_step = train_utils.jit_eval_step(config, graphdef, state_shardings, data_sharding, native_train.eval_step)
+    eval_step = train_utils.jit_eval_step(config, graphdef, state_shardings, data_sharding, native_eval_step.eval_step)
     dropless_step = None
     if not config.enable_diloco and config.moe_dropless_fallback == "step":
-      dropless_graphdef = native_train.build_dropless_graphdef(config, self._graphdef, self.state)
+      dropless_graphdef = native_graphdefs.build_dropless_graphdef(config, self._graphdef, self.state)
       dropless_step = train_utils.jit_eval_step(
-          config, dropless_graphdef, state_shardings, data_sharding, native_train.eval_step
+          config, dropless_graphdef, state_shardings, data_sharding, native_eval_step.eval_step
       )
     totals = {}
     count = 0

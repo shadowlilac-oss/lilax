@@ -18,8 +18,9 @@ from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.kernels.tokamax_splash_attention import ring_attention_kernel
 from lilax._backend.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from lilax._backend.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import sharding
+from lilax._backend.utils.context_parallel import mask_reorder
+from lilax._backend.utils.kernel_tiling import eval_tiles
 
 
 def is_context_parallel_ring_requested(config: Any) -> bool:
@@ -204,7 +205,7 @@ def build_splash_config(
   dq_reduction_steps = config.dq_reduction_steps
   q_seq_len_per_shard = q_seq_len // context_parallel_size
   kv_seq_len_per_shard = kv_seq_len // context_parallel_size
-  is_eval = max_utils.is_eval(config)
+  is_eval = eval_tiles.is_eval(config)
   if is_eval:
     sa_block_q = config.eval_sa_block_q
     sa_block_kv = config.eval_sa_block_kv
@@ -273,7 +274,7 @@ def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int, *, loa
     raise ValueError("context_parallel_size must be > 1 for ring attention.")
   mask = tokamax_splash_mask.CausalMask(shape=shape, shard_count=context_parallel_size)
   if load_balanced:
-    sequence_indices = max_utils.reorder_mask_load_balancing(
+    sequence_indices = mask_reorder.reorder_mask_load_balancing(
         np.arange(shape[0], dtype=np.int32), context_parallel_size, 0
     )
     mask.q_sequence = sequence_indices

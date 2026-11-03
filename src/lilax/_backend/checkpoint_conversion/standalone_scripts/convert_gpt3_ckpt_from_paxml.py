@@ -13,10 +13,12 @@ import tensorstore as ts
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig, types
-from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx
+from lilax._backend.utils.diagnostics import pytree
 from lilax._backend.utils.training import state_setup
-from lilax._backend.utils import model_creation_utils, train_utils
+from lilax._backend.utils import train_utils
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
+from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 
 
 def fmt_size(num_bytes: int) -> str:
@@ -52,9 +54,9 @@ def convert(paxml_ckpt_path, config):
   init_rng, _ = random.split(random.PRNGKey(cfg.init_weights_seed), 2)
   mesh = Mesh(device_mesh.create_device_mesh(cfg), cfg.mesh_axes)
   rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=init_rng)
-  model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs)
+  model = model_factory.from_config(cfg, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(cfg, model)
-  create_model, _ = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+  create_model, _ = nnx_abstract_model.create_nnx_abstract_model(cfg, mesh)
 
   def init_state_fn():
     nnx_model = create_model()
@@ -69,7 +71,7 @@ def convert(paxml_ckpt_path, config):
   state.pop("nnx_aux", None)
 
   max_logging.log("start")
-  max_utils.print_mem_stats("After params initialized")
+  pytree.print_mem_stats("After params initialized")
 
   axis = cfg.param_scan_axis
   move = lambda x: np.moveaxis(x, 0, axis)
@@ -140,12 +142,12 @@ def convert(paxml_ckpt_path, config):
     del arr
     gc.collect()
     max_logging.log(f"{key} finished")
-    max_utils.print_mem_stats("After params conversion")
+    pytree.print_mem_stats("After params conversion")
     return result
 
   converted = jax.tree_util.tree_map_with_path(load, state)
   max_logging.log("converted state finished")
-  max_utils.print_mem_stats("converted state finished")
+  pytree.print_mem_stats("converted state finished")
   step = int(converted["step"]) if isinstance(converted, dict) else int(converted.step)
   if checkpointing.save_checkpoint(manager, step, converted, config=cfg):
     max_logging.log(f"Saved a checkpoint at step {step}.")

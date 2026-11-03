@@ -7,7 +7,7 @@ from jax.sharding import Mesh
 
 from flax import nnx
 from lilax._backend.common.common_types import Config, ShardMode
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.aqt import AqtQuantization
 from lilax._backend.utils.sharding import create_sharding
 
 
@@ -20,7 +20,7 @@ class SimpleDecoderLayer(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
   ) -> None:
     self.config = config
     self.mesh = mesh
@@ -56,7 +56,7 @@ class SimpleMlpDecoderLayer(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
   ) -> None:
     self.config = config
     self.mesh = mesh

@@ -17,8 +17,9 @@ from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.sft import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
-from lilax._backend.trainers.pre_train.train import loss_fn
-from lilax._backend.utils import device_mesh, lora_utils, max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.trainers.pre_train.steps.loss import loss_fn
+from lilax._backend.utils import device_mesh, lora_utils, max_logging, maxtext_utils
+from lilax._backend.utils.model_creation import pretrained
 
 
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
@@ -171,9 +172,9 @@ def setup_trainer_state(
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     if model is None:
       if mesh is None:
-        model, mesh = model_creation_utils.from_pretrained(mt_config)
+        model, mesh = pretrained.from_pretrained(mt_config)
       else:
-        model = model_creation_utils.from_pretrained(mt_config, mesh=mesh)
+        model = pretrained.from_pretrained(mt_config, mesh=mesh)
     elif mesh is None:
       mesh = device_mesh.get_mesh_from_config(mt_config, None)
   with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):

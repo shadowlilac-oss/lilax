@@ -10,7 +10,7 @@ from jetstream.engine import chunked_prefill
 
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.inference.maxengine import maxengine
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.diagnostics import system_info
 from lilax.configuration import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime
 
@@ -148,7 +148,7 @@ def prepare_setting(config):
     config = config.config
   elif isinstance(config, (MaxTextConfig, RLConfig)):
     config = resolve_runtime_config(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   prefix_caching_hbm_byte = config.prefix_caching_hbm_byte
   prefix_caching_dram_byte = config.prefix_caching_dram_byte
   max_prefill_length = config.max_prefill_predict_length

@@ -18,7 +18,17 @@ from dataclasses import dataclass, field
 
 import datasets
 
-from lilax._backend.input_pipeline import input_pipeline_utils
+import grain.python as grain
+import numpy as np
+from grain._src.python.dataset.sources import tfrecord_dataset
+from grain.experimental import TFRecordIterDataset
+from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
+from lilax._backend.input_pipeline import encoding_dsv4
+from lilax._backend.input_pipeline import tokenizer as input_tokenizer
+from lilax._backend.input_pipeline.protos import example_pb2
+from lilax._backend.multimodal import processor as mm_processor
+from lilax._backend.input_pipeline.conversation import conversational_columns
+from lilax._backend.input_pipeline.transforms import hf_tokenization
 from lilax._backend.utils import max_logging
 
 
@@ -53,7 +63,7 @@ def process_dataset(dataset, data_columns):
   assert any(
       set(data_columns) == set(supported) for supported in supported_columns
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_columns}"
-  assert input_pipeline_utils.is_conversational(dataset.features, data_columns), "Dataset is not in conversational format."
+  assert conversational_columns.is_conversational(dataset.features, data_columns), "Dataset is not in conversational format."
 
   if "messages" in data_columns:
     dataset = dataset.map(map_to_prompt_completion, remove_columns=data_columns)
@@ -79,7 +89,7 @@ def filter_dataset(dataset, tokenizer, max_target_length, max_prefill_length, us
     max_output_tokens = min(max_output_length, len(tokenizer.encode(actual_completion)))
     if use_chat_template:
       message = [{"role": "user", "content": prompt}]
-      prompt_token_ids = input_pipeline_utils.extract_token_ids(
+      prompt_token_ids = hf_tokenization.extract_token_ids(
           tokenizer.apply_chat_template(message, add_generation_prompt=True, tokenize=True)
       )
     else:

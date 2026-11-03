@@ -36,7 +36,7 @@ class VisionEncoder(nnx.Module):
       setattr(self, encoder_name, llama4.Llama4VisionModel(config=self.config, mesh=self.mesh, rngs=self.rngs))
       setattr(self, projector_name, llama4.Llama4MultiModalProjector(config=self.config, mesh=self.mesh, rngs=self.rngs))
     elif self.vision_encoder_block == VisionEncoderBlockType.QWEN3_OMNI:
-      from lilax._backend.models import qwen3_omni_vision  # pylint: disable=import-outside-toplevel
+      from lilax._backend.models.qwen3_omni import vision as qwen3_omni_vision  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3OmniMoeVisionEncoder_0"
       projector_name = "Qwen3OmniMoeVisionProjector_0"
@@ -190,7 +190,7 @@ class AudioEncoder(nnx.Module):
   def _setup_audio_encoder_layers(self):
     """Setup audio encoder layers specific to the model, instantiate NNX modules."""
     if self.config.model_name in ["qwen3-omni-30b-a3b"]:
-      from lilax._backend.models import qwen3_omni_audio  # pylint: disable=import-outside-toplevel
+      from lilax._backend.models.qwen3_omni import audio as qwen3_omni_audio  # pylint: disable=import-outside-toplevel
 
       encoder_name = "Qwen3OmniAudioEncoder_0"
       projector_name = "Qwen3OmniAudioProjector_0"

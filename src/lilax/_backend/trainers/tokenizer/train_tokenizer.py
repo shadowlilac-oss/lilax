@@ -13,7 +13,16 @@ import grain.python as grain
 import jax
 from sentencepiece import SentencePieceTrainer
 
-from lilax._backend.input_pipeline import input_pipeline_utils
+import datasets
+from grain._src.python.dataset.sources import tfrecord_dataset
+from grain.experimental import TFRecordIterDataset
+from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
+from lilax._backend.input_pipeline import encoding_dsv4
+from lilax._backend.input_pipeline import tokenizer
+from lilax._backend.input_pipeline.sources import example_parsing
+from lilax._backend.multimodal import processor as mm_processor
+from lilax._backend.input_pipeline.sources import record_file_datasets
+from lilax._backend.input_pipeline.transforms import feature_transforms
 from lilax._backend.utils import gcs_utils
 
 
@@ -31,20 +40,20 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
     dataset = grain.MapDataset.source(data_files)
     dataset = dataset.map(grain.experimental.ParquetIterDataset)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))
-    dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=list(data_keys)))
+    dataset = dataset.map(feature_transforms.KeepFeatures(feature_names=list(data_keys)))
     return iter(dataset)
   elif data_file_type == "arrayrecord":
     source = grain.ArrayRecordDataSource(data_files)
     dataset = grain.MapDataset.source(source)
-    dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(example_parsing.ParseFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(feature_transforms.NormalizeFeatures(list(data_keys), tokenize=True))
     return iter(dataset)
   elif data_file_type == "tfrecord":
     dataset = grain.MapDataset.source(data_files)
-    dataset = dataset.map(input_pipeline_utils.make_tfrecord_iter_dataset)
+    dataset = dataset.map(record_file_datasets.make_tfrecord_iter_dataset)
     dataset = grain.experimental.InterleaveIterDataset(dataset, cycle_length=len(data_files))
-    dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
-    dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(example_parsing.ParseFeatures(list(data_keys), tokenize=True))
+    dataset = dataset.map(feature_transforms.NormalizeFeatures(list(data_keys), tokenize=True))
     return iter(dataset)
   else:
     raise ValueError(f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet', 'arrayrecord', or 'tfrecord'.")

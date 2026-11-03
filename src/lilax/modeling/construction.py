@@ -1,6 +1,6 @@
 """Prepare native model construction from runtime configuration."""
 
-from lilax._backend.utils import model_creation_utils
+from lilax._backend.utils.model_creation import model_factory
 from lilax.runtime import Runtime
 
 
@@ -13,7 +13,7 @@ def from_config_linen(config, *, runtime=None, model_mode="train", quant_mode_st
     raise ValueError("Runtime must be initialized before constructing a model.")
   if runtime.config.use_m3_model:
     raise ValueError("The native M3 factory does not construct a Linen model.")
-  return model_creation_utils.from_config(
+  return model_factory.from_config(
       runtime.config, mesh=runtime.mesh, model_mode=model_mode, quant_mode_str=quant_mode_str
   )
 

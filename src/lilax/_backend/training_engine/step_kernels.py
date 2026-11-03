@@ -10,8 +10,8 @@ import jax.numpy as jnp
 from lilax._backend.training_engine import gradient_sharding
 from lilax._backend.training_engine import loss_invocation
 from lilax._backend.training_engine import zero1
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
+from lilax._backend.utils.tree_ops import numerics
 
 
 def fwd_bwd_kernel(
@@ -76,7 +76,7 @@ def update_kernel(
       lambda grad: jnp.where(has_weights, grad / safe_denominator.astype(grad.dtype), jnp.zeros_like(grad)),
       accumulated_grads,
   )
-  grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda grad: grad.astype(jnp.float32), grads))
+  grad_norm = numerics.l2norm_pytree(jax.tree.map(lambda grad: grad.astype(jnp.float32), grads))
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(grads, None, config.gradient_clipping_threshold)
   local_state = nnx.merge(state_graphdef, state_pure, copy=True)

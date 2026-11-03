@@ -7,7 +7,8 @@ import jax
 from flax.core.spmd import logical_axis_rules
 
 from lilax._backend.configs.runtime import resolve_initialized_config, resolve_runtime_config
-from lilax._backend.utils import device_mesh, elastic_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, elastic_utils
+from lilax._backend.utils.rl_setup import device_allocation
 from lilax.configuration.schema import RLConfig
 
 
@@ -28,7 +29,7 @@ class Runtime:
       raise TypeError("RL runtime configuration must be an inert RLConfig.")
     native_config = resolve_runtime_config(config)
     trainer_config, sampler_config, trainer_devices, sampler_devices = (
-        model_creation_utils.setup_configs_and_devices_from_config(
+        device_allocation.setup_configs_and_devices_from_config(
             native_config, resolve_config=lambda overrides: resolve_runtime_config(config, overrides=overrides),
             devices=devices,
         )

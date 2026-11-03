@@ -16,7 +16,8 @@ import orbax.checkpoint as ocp
 from lilax._backend.configs.pyconfig import HyperParameters
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
 from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggingface
-from lilax._backend.utils import maxtext_utils_nnx, model_creation_utils
+from lilax._backend.utils import maxtext_utils_nnx
+from lilax._backend.utils.model_creation import model_factory, pretrained, scan_layers_sync
 from lilax.configuration import AutoConfig, QwixQATConfig
 from lilax.generation.engine import generate as generate_tokens
 from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
@@ -116,7 +117,7 @@ class MaxTextModel:
       rngs = options["rngs"]
       if rngs is None:
         rngs = maxtext_utils_nnx.create_nnx_rngs(runtime.config, model_mode=options["model_mode"])
-      model = model_creation_utils.from_config(
+      model = model_factory.from_config(
           runtime.config, mesh=runtime.mesh, model_mode=options["model_mode"], rngs=rngs,
           quant_mode_str=options["quant_mode_str"],
       )
@@ -146,9 +147,9 @@ class MaxTextModel:
         )
     )
     if source_qat_config is not None:
-      native_config = model_creation_utils.verify_and_sync_scan_layers(native_config)
+      native_config = scan_layers_sync.verify_and_sync_scan_layers(native_config)
       native_config = HyperParameters(native_config._pydantic_config.model_copy(update={"load_parameters_path": ""}))
-    model, config = model_creation_utils.from_pretrained(
+    model, config = pretrained.from_pretrained(
         native_config, mesh=runtime.mesh, model_mode=checkpoint["model_mode"], rng_key=checkpoint["rng_key"],
         wrap_with_tunix_adapter=checkpoint["wrap_with_tunix_adapter"],
         tokenizer_pad_id=checkpoint["tokenizer_pad_id"], quant_mode_str=checkpoint["quant_mode_str"],

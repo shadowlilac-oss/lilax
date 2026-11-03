@@ -15,7 +15,7 @@ from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.multimodal import utils as mm_utils
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.diagnostics import system_info
 from lilax.configuration import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime
 
@@ -74,7 +74,7 @@ class MaxTextGenerator:
     self.logger.info("System information:")
     old_stdout = sys.stdout
     sys.stdout = captured_stdout = StringIO()
-    max_utils.print_system_information()
+    system_info.print_system_information()
     sys.stdout = old_stdout
     self.logger.info(captured_stdout.getvalue())
     self.engine = maxengine.MaxEngine(config, devices=devices)

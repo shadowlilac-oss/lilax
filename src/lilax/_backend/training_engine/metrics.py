@@ -12,8 +12,10 @@ import jax
 import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
 from lilax._backend.training_engine import abstract_engine
-from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils import max_logging
 from lilax._backend.utils.diagnostics import config_summary
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.tensorboard_logging import summary_writing
 import numpy as np
 
 _METRICS_TO_LOG = ["learning_rate", "loss", "perplexity", "total_weights", "gradient_norm", "step_skipped", "step_time", "tflops"]
@@ -189,16 +191,16 @@ class MetricsLogger:
   def __init__(self, config: pyconfig.HyperParameters) -> None:
     self._tb_writer = None
     if config.enable_tensorboard:
-      self._tb_writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
+      self._tb_writer = summary_writing.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self._config = config
 
   def write_setup_info_to_tensorboard(self, params: Any) -> None:
-    num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
+    num_model_parameters = pytree.calculate_num_params_from_pytree(params)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     if self._tb_writer is None:
       return
-    max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self._tb_writer)
-    max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
+    summary_writing.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self._tb_writer)
+    summary_writing.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
     config_summary.add_config_to_summary_writer(self._config, self._tb_writer)
 
   def _log_metrics(self, step: int, metrics: dict[str, Any], mode: Mode) -> None:
@@ -259,4 +261,4 @@ class MetricsLogger:
 
   def cleanup(self) -> None:
     if self._tb_writer is not None:
-      max_utils.close_summary_writer(self._tb_writer)
+      summary_writing.close_summary_writer(self._tb_writer)

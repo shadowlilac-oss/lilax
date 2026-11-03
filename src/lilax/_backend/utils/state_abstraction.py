@@ -9,7 +9,8 @@ import jax
 from jax.sharding import NamedSharding
 
 from lilax._backend.common import state_initialization
-from lilax._backend.utils import max_utils, maxtext_utils_nnx, sharding
+from lilax._backend.utils import maxtext_utils_nnx, sharding
+from lilax._backend.utils.tree_ops import partitioning
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
@@ -19,7 +20,7 @@ def get_abstract_state(config, mesh, init_state_fn, is_training=True):
       logical_annotations = get_partition_spec(abstract_state)
       state_mesh_annotations = sharding.logical_to_mesh(logical_annotations, mesh)
       state_mesh_shardings = sharding.logical_to_mesh_sharding(logical_annotations, mesh)
-      unboxed_abstract_state = max_utils.unbox_logicallypartioned(abstract_state)
+      unboxed_abstract_state = partitioning.unbox_logicallypartioned(abstract_state)
     return unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings
   return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
 

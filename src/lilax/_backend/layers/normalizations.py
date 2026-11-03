@@ -10,7 +10,7 @@ from jax.sharding import NamedSharding
 from lilax._backend.common.common_types import Array, DType, ShardMode, is_fp8_dtype
 from lilax._backend.layers.initializers import Initializer
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.device_memory import memory_kinds
 from lilax._backend.utils.sharding import truncate_out_sharding
 
 
@@ -77,7 +77,7 @@ class RMSNorm(nnx.Module):
     scale = self.scale.get_value()
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
-      scale = jax.device_put(scale, max_utils.device_space())
+      scale = jax.device_put(scale, memory_kinds.device_space())
 
     scale_fp32 = jnp.asarray(scale, jnp.float32)
     effective_scale = scale_fp32 + self.scale_offset

@@ -4,7 +4,7 @@ import jax
 import trackio
 import wandb
 
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.tensorboard_logging import summary_writing
 from ._profile_artifacts import log_profile_artifacts
 
 
@@ -17,7 +17,7 @@ class MetricReporter:
       return
     try:
       if tensorboard and "tensorboard" in report_to:
-        self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, True)
+        self.writer = summary_writing.initialize_summary_writer(config.tensorboard_dir, config.run_name, True)
       if "trackio" in report_to:
         trackio.init(project=config.wandb_project_name, name=config.run_name, resume="allow")
         self.trackio = True
@@ -57,4 +57,4 @@ class MetricReporter:
       finally:
         if self.writer is not None:
           writer, self.writer = self.writer, None
-          max_utils.close_summary_writer(writer)
+          summary_writing.close_summary_writer(writer)

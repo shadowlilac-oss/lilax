@@ -7,7 +7,8 @@ import numpy as np
 
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.experimental.lineage import lineage_adapter
-from lilax._backend.utils import elastic_utils, max_logging, max_utils
+from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils.mesh_topology import custom_mesh, mesh_axes, tpu_v6e
 
 
 def create_device_mesh(config, devices=None):
@@ -37,29 +38,29 @@ def create_device_mesh(config, devices=None):
   num_slices = 1 if getattr(config, "inference_benchmark_test", False) else num_slices
   num_devices_per_slice = num_devices // num_slices
   ici_parallelism = config.ici_parallelism.copy()
-  ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+  ici_parallelism = mesh_axes.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
   if getattr(config, "use_lineage", False):
     dcn_parallelism = (
-        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+        mesh_axes.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
     )
     mesh = lineage_adapter.create_device_mesh(
         ici_parallelism, devices, dcn_parallelism=dcn_parallelism, allow_split_physical_axes=allow_split_physical_axes
     )
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
-    dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
-    if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
-      mesh = max_utils.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
+    dcn_parallelism = mesh_axes.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
+    if custom_mesh.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+      mesh = custom_mesh.create_custom_device_mesh(ici_parallelism, dcn_parallelism, devices, config.custom_mesh)
     else:
       mesh = mesh_utils.create_hybrid_device_mesh(
           ici_parallelism, dcn_parallelism, devices, allow_split_physical_axes=allow_split_physical_axes
       )
   elif allow_split_physical_axes:
-    if max_utils.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
+    if custom_mesh.is_valid_custom_mesh(ici_parallelism, config.custom_mesh):
       mesh = mesh_utils.create_device_mesh([16, 16], devices, contiguous_submeshes=False, allow_split_physical_axes=False)
-      mesh = max_utils.reshape_mesh_to_rings(mesh, config.custom_mesh)
+      mesh = custom_mesh.reshape_mesh_to_rings(mesh, config.custom_mesh)
       mesh = np.reshape(mesh, ici_parallelism)
     else:
       mesh = mesh_utils.create_device_mesh(
@@ -68,7 +69,7 @@ def create_device_mesh(config, devices=None):
   else:
     mesh = mesh_utils.create_device_mesh(ici_parallelism, devices)
     if config.optimize_mesh_for_tpu_v6e:
-      mesh = max_utils.optimize_mesh_for_tpu_v6e(mesh, devices)
+      mesh = tpu_v6e.optimize_mesh_for_tpu_v6e(mesh, devices)
 
   max_logging.log(f"Num_devices: {num_devices}, shape {mesh.shape}")
   return mesh

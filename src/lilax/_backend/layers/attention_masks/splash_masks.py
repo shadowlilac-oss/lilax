@@ -3,7 +3,7 @@
 from typing import Optional
 
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.context_parallel import mask_reorder
 import numpy as np
 
 
@@ -248,7 +248,7 @@ class HCAStaticMask(splash_attention_mask.Mask):
 def _load_balanced_q_sequence(shape: tuple[int, int], cp_size: int):
   """Reorders query positions the same way as load-balanced input tokens."""
   arr = np.arange(shape[0])
-  return max_utils.reorder_mask_load_balancing(arr, cp_size, 0)
+  return mask_reorder.reorder_mask_load_balancing(arr, cp_size, 0)
 
 
 class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):

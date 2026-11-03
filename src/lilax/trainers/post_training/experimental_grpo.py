@@ -15,7 +15,8 @@ from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.experimental.rl import grpo_trainer
-from lilax._backend.utils import max_utils, train_utils
+from lilax._backend.utils import train_utils
+from lilax._backend.utils.diagnostics import system_info
 from ..telemetry.reporting import MetricReporter
 from ..arguments.training_args import TrainingArguments
 
@@ -50,7 +51,7 @@ def train_grpo(config, inference_config, *, report_to=None, launch_xprof=False, 
   if config.per_device_batch_size < 1.0 or inference_config.per_device_batch_size < 1.0:
     raise ValueError("GRPO does not support setting per_device_batch_size < 1.0")
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   train_utils.validate_train_config(config)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path
   vertex_tensorboard_manager = VertexTensorboardManager()

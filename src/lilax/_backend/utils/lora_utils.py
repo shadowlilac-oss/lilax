@@ -18,8 +18,10 @@ import qwix
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
-from lilax._backend.utils import device_mesh, gcs_utils, max_logging, max_utils, model_creation_utils, state_abstraction
+from lilax._backend.utils import device_mesh, gcs_utils, max_logging, state_abstraction
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
+from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.utils.tree_ops import partitioning
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
@@ -102,7 +104,7 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
   lora_config = None
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+    create_model_partial, _ = nnx_abstract_model.create_nnx_abstract_model(config, mesh)
 
     def create_train_state_fn():
       nnx_model = create_model_partial()
@@ -130,7 +132,7 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
       if restored_lora:
         raise NotImplementedError("This codepath is not implemented for LoRA adapters yet.")
       lora_state = lora_state.replace(params=raw_lora_params)
-      lora_state = max_utils.unbox_logicallypartioned(lora_state)
+      lora_state = partitioning.unbox_logicallypartioned(lora_state)
   return lora_config, lora_state, lora_state_annotations
 
 

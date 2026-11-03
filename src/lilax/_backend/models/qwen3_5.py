@@ -6,11 +6,11 @@ from lilax._backend.layers.linears import MlpBlock
 from lilax._backend.models.qwen3 import (
     Qwen3NextDecoderLayer,
     Qwen3NextFullAttention,
-    Qwen3NextGatedDeltaNet,
     Qwen3NextScannableBlock,
     Qwen3NextSparseMoeBlock,
 )
-from lilax._backend.utils import max_utils
+from lilax._backend.models.qwen3_next.gated_delta_net import Qwen3NextGatedDeltaNet
+from lilax._backend.utils import model_mode_shapes
 
 
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
@@ -66,7 +66,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
   def _make_linear_attention(self, *, rngs: nnx.Rngs):
     cfg = self.config
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, self.model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(cfg, self.model_mode)
     dummy_inputs_shape = (batch_size, seq_len, cfg.emb_dim)
     return Qwen3_5GatedDeltaNet(
         config=cfg,

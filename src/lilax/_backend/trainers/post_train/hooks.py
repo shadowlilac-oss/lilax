@@ -13,7 +13,8 @@ from lilax._backend.input_pipeline.input_pipeline_interface import create_data_i
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import GoodputEvent, record_goodput
 from lilax._backend.common.metric_logger import MetricLogger, MetadataKey
-from lilax._backend.utils import exceptions, gcs_utils, max_logging, max_utils, sharding
+from lilax._backend.utils import exceptions, gcs_utils, max_logging, sharding
+from lilax._backend.utils.diagnostics import pytree
 
 
 class GoodputTrainingHooks(TrainingHooks):
@@ -98,7 +99,7 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
         "BaseTrainingHooks.on_train_step_start() must be called before BaseTrainingHooks.on_train_step_end()"
     )
     if self.metadata["first_train_step"] == train_step - 1:
-      max_utils.print_mem_stats("After params initialized")
+      pytree.print_mem_stats("After params initialized")
     current_time = time.perf_counter()
     step_time = current_time - self.step_start_time
     self.step_start_time = current_time

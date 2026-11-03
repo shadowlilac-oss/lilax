@@ -67,7 +67,7 @@ from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.initializers import nd_dense_init, NdInitializer
 from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.inference import kvcache
 from lilax._backend.inference.kvcache import KVQuant
 from lilax._backend.utils.sharding import create_sharding

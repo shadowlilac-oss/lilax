@@ -28,12 +28,14 @@ from lilax._backend.utils import diloco_sharding
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import sharding
 from lilax._backend.utils import state_abstraction
+from lilax._backend.utils.context_parallel import sequence_reorder
+from lilax._backend.utils.diagnostics import mesh_report
 from lilax._backend.utils.diagnostics import sharding_report
+from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.utils.te_integration import moe_bootstrap
 from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
 from lilax._backend.utils.training.rampup_batch import create_rampup_manager
@@ -240,7 +242,7 @@ def setup_train_loop(
     if model is None:
       create_model, model = elastic_utils.get_or_build(
           elastic_retry_cache, "abstract_model",
-          functools.partial(model_creation_utils.create_nnx_abstract_model, config, mesh, devices),
+          functools.partial(nnx_abstract_model.create_nnx_abstract_model, config, mesh, devices),
       )
     else:
       def create_model():
@@ -293,7 +295,7 @@ def setup_train_loop(
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
     data_iterator_for_loader = data_iterator
-    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
+    reorder_cp_size = sequence_reorder.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
       if reorder_cp_size > 1:
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -313,7 +315,7 @@ def setup_train_loop(
 
     data_loader = create_dataloader(config, mesh, data_iterator_for_loader, recorder, rampup_manager)
     shaped_batch = maxtext_utils.get_shaped_batch(config)
-    max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
+    moe_bootstrap.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
     snapshotter = None if elastic_retry_cache is None else elastic_retry_cache.snapshotter
     state, _, state_mesh_shardings, data_iterator, _ = state_setup.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=snapshotter, step=checkpoint_step,
@@ -361,7 +363,7 @@ def setup_train_loop(
       sharding.assert_params_sufficiently_sharded(state_params, mesh, config.sharding_tolerance)
     if config.debug_sharding:
       logical_annotations_params = None
-      max_utils.print_non_trivial_mesh_axis(model.mesh)
+      mesh_report.print_non_trivial_mesh_axis(model.mesh)
       sharding_report.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.enable_diloco:

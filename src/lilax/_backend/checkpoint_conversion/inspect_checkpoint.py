@@ -13,8 +13,9 @@ import torch
 
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import param_key_parts_from_path
-from lilax._backend.utils import device_mesh, max_utils
-from lilax._backend.utils.model_creation_utils import create_nnx_abstract_model
+from lilax._backend.utils import device_mesh
+from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.utils.model_creation.nnx_abstract_model import create_nnx_abstract_model
 
 
 def natural_sort_key(s: str):
@@ -69,7 +70,7 @@ def _inspect_maxtext(config, check_dtype=False, output_file=""):
   mesh = jax.sharding.Mesh(device_mesh.create_device_mesh(config), config.mesh_axes)
   _, abstract_model = create_nnx_abstract_model(config, mesh=mesh)
   _, abstract_param, _ = nnx.split(abstract_model, nnx.Param, ...)
-  num_params = max_utils.calculate_num_params_from_pytree(abstract_param)
+  num_params = pytree.calculate_num_params_from_pytree(abstract_param)
   print(f"\nTotal Parameters: {num_params} (~{num_params/1e9:.2f} B)")
   flattened, _ = jax.tree_util.tree_flatten_with_path(abstract_param)
   params = {}

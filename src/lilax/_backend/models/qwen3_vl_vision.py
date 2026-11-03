@@ -1,6 +1,6 @@
 """Qwen3 VL Vision model tower NNX subclasses."""
 
-from lilax._backend.models.qwen3_omni_vision import Qwen3OmniMoeVisionEncoder, Qwen3OmniMoeVisionProjector
+from lilax._backend.models.qwen3_omni.vision import Qwen3OmniMoeVisionEncoder, Qwen3OmniMoeVisionProjector
 
 
 class Qwen3VLVisionEncoder(Qwen3OmniMoeVisionEncoder):

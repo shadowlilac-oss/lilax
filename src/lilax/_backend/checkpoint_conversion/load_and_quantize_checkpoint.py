@@ -3,7 +3,7 @@
 import jax
 
 from lilax._backend.inference.maxengine import maxengine
-from lilax._backend.utils import max_utils
+from lilax._backend.utils.diagnostics import system_info
 
 
 def validate_config(config):
@@ -13,7 +13,7 @@ def validate_config(config):
 def load_and_quantize_checkpoint(config):
   jax.config.update("jax_default_prng_impl", "unsafe_rbg")
   validate_config(config)
-  max_utils.print_system_information()
+  system_info.print_system_information()
   engine = maxengine.MaxEngine(config)
   rng = jax.random.PRNGKey(1234)
   _, rng_load_params = jax.random.split(rng)

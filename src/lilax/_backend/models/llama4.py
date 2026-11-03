@@ -28,14 +28,14 @@ from lilax._backend.common.common_types import Array, AttentionType, Config, MOD
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL
 from lilax._backend.layers import initializers
 from lilax._backend.layers import linears
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import Dropout
 from lilax._backend.layers.linears import MlpBlock
 from lilax._backend.layers.moe import RoutedAndSharedMoE
 from lilax._backend.layers.normalizations import RMSNorm
-from lilax._backend.layers.quantizations import AqtQuantization as Quant
-from lilax._backend.utils import max_utils
+from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
+from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 #### Multi modal model implementation
@@ -326,7 +326,7 @@ class Llama4DecoderLayer(nnx.Module):
     self.is_nope_layer = is_nope_layer
     self.is_moe_layer = is_moe_layer
 
-    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    batch_size, seq_len = model_mode_shapes.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     if model_mode == MODEL_MODE_PREFILL:
@@ -376,7 +376,7 @@ class Llama4DecoderLayer(nnx.Module):
         float32_qk_product=config.float32_qk_product,
         float32_logits=config.float32_logits,
         quant=self.quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
         ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
         compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
