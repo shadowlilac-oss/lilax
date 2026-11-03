@@ -7,7 +7,8 @@ from flax.core.spmd import logical_axis_rules
 import jax
 
 from lilax._backend.optimizers.muon import ShardedMuonDimensionNumbers as smdn
-from lilax._backend.utils import maxtext_utils, muon_utils
+from lilax._backend.optimizers.muon_config import dimensions as muon_utils
+from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import sharding as sharding_lib
 
 

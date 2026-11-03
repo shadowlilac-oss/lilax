@@ -9,8 +9,8 @@ from optax.contrib._muon import muon as optax_muon
 
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.optimizers.muon import muon as maxtext_muon
-from lilax._backend.utils.muon_utils import get_muon_weight_dimension_numbers
-from lilax._backend.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
+from lilax._backend.optimizers.muon_config.dimensions import get_muon_weight_dimension_numbers
+from lilax._backend.optimizers.muon_config.maxtext_dimensions import get_maxtext_muon_weight_dimension_numbers
 
 
 def _get_path_mask_fn(patterns, match_returns_true=True):

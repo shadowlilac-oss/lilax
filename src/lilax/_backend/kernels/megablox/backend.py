@@ -13,7 +13,9 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+from lilax._backend.kernels.megablox import gmm_launch
 from lilax._backend.kernels.megablox import metadata_sharding
+from lilax._backend.kernels.megablox import tgmm_launch
 import qwix.pallas as qpl
 
 
@@ -479,43 +481,10 @@ def gmm(
   else:
     rhs_block_spec = pl.BlockSpec((None, tk, tn), rhs_transform_indices)
 
-  lhs_bytes = _calculate_bytes(lhs)
-  if isinstance(rhs, qpl.QArray):
-    rhs_bytes = (k * n) * rhs.qvalue.itemsize  # ignore scale factor as its size marginal.
-  else:
-    rhs_bytes = (k * n) * rhs.itemsize  # We don't read all of rhs
-
-  out_bytes = (m * n) * jnp.dtype(preferred_element_type).itemsize
-  max_active_tiles = group_metadata[1].size
-  bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * max_active_tiles) + out_bytes
-  flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
-  metadata = {
-      "preferred_element_type": jnp.dtype(preferred_element_type).name,
-      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
-      "transpose_rhs": transpose_rhs,
-  }
-  call_gmm = qpl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
-      ),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=2,
-          in_specs=[
-              lhs_block_spec,
-              rhs_block_spec,
-              in_out_block_spec,
-          ],
-          out_specs=out_block_spec,
-          grid=(tiles_n, num_active_tiles, tiles_k),
-          scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
-      ),
-      input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
-      interpret=interpret,
-      cost_estimate=cost_estimate,
-      metadata={"xprof_metadata": json.dumps(metadata)},
+  call_gmm = gmm_launch.make_launch(
+      kernel, lhs, rhs, group_metadata, num_active_tiles, lhs_block_spec, rhs_block_spec, out_block_spec,
+      in_out_block_spec, input_output_aliases, m, k, n, tm, tk, tn, tiles_k, tiles_n,
+      preferred_element_type, transpose_rhs, interpret, varying_axes, _calculate_bytes,
   )
 
   out = call_gmm(
@@ -741,42 +710,10 @@ def tgmm(
   lhs_block_spec = pl.BlockSpec((tm, tk), lhs_transform_indices)
   rhs_block_spec = pl.BlockSpec((tm, tn), rhs_transform_indices)
 
-  lhs_bytes = _calculate_bytes(lhs)
-  rhs_bytes = _calculate_bytes(rhs)
-  out_bytewidth = jnp.dtype(preferred_element_type).itemsize
-  out_bytes = (num_actual_groups * k * n) * out_bytewidth
-  bytes_accessed = (lhs_bytes * tiles_n) + (rhs_bytes * tiles_k) + out_bytes
-  flops = 2 * m * k * n
-  cost_estimate = pl.CostEstimate(flops=flops, bytes_accessed=bytes_accessed, transcendentals=0)
-  lhs = lhs.swapaxes(0, 1)
-  metadata = {
-      "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
-      "prefer_element_type": jnp.dtype(preferred_element_type).name,
-      "num_actual_groups": num_actual_groups,
-  }
-  call_gmm = qpl.pallas_call(
-      kernel,
-      out_shape=jax.ShapeDtypeStruct(
-          (num_actual_groups, k, n),
-          preferred_element_type,
-          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
-      ),
-      grid_spec=pltpu.PrefetchScalarGridSpec(
-          num_scalar_prefetch=2,
-          in_specs=[
-              lhs_block_spec,
-              rhs_block_spec,
-              in_out_block_spec,
-          ],
-          out_specs=out_block_spec,
-          grid=(tiles_n, tiles_k, num_active_tiles),
-          scratch_shapes=[pltpu.VMEM((tk, tn), jnp.float32)],
-      ),
-      input_output_aliases=input_output_aliases,
-      compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
-      interpret=interpret,
-      cost_estimate=cost_estimate,
-      metadata={"xprof_metadata": json.dumps(metadata)},
+  lhs, call_gmm = tgmm_launch.make_launch(
+      kernel, lhs, rhs, num_active_tiles, lhs_block_spec, rhs_block_spec, out_block_spec,
+      in_out_block_spec, input_output_aliases, m, k, n, tm, tk, tn, tiles_k, tiles_n, num_actual_groups,
+      preferred_element_type, interpret, varying_axes, _calculate_bytes,
   )
 
   out = call_gmm(

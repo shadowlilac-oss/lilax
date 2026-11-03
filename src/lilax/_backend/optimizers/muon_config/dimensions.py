@@ -110,7 +110,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=T
 
 if __name__ == "__main__":
   if len(sys.argv) not in (3, 4):
-    print("Usage: python3 -m lilax._backend.utils.muon_utils <model_name> <scan_layers:True/False> [include_routers:True/False]")
+    print("Usage: python3 -m lilax._backend.optimizers.muon_config.dimensions <model_name> <scan_layers:True/False> [include_routers:True/False]")
     sys.exit(1)
   model_name_arg = sys.argv[1]
   scan_layers_arg = sys.argv[2].lower() == "true"

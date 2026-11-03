@@ -5615,7 +5615,7 @@ class MaxTextConfig(
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
-          f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
+          f"`python3 -m lilax._backend.optimizers.muon_config.dimensions {self.model_name} True`"
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
