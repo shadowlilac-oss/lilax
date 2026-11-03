@@ -25,21 +25,15 @@ from dataclasses import dataclass
 
 import numpy as np
 import jax
-import jax.numpy as jnp
 import decord
 from PIL import Image
 
 from lilax._backend.multimodal import utils as mm_utils
+from lilax._backend.multimodal import qwen3_omni_tokens, qwen3_omni_video_grid
+from lilax._backend.multimodal.qwen3_omni_audio import SAMPLE_RATE, pre_process_audio_qwen3_omni
+from lilax._backend.multimodal.qwen3_omni_vision import IMAGE_FACTOR, pre_process_qwen3_image, smart_resize
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
-
-# Image constants.
-IMAGE_MEAN = 127.5  # Mean value for image normalization.
-IMAGE_STD = 127.5  # Standard deviation for image normalization.
-IMAGE_FACTOR = 28  # Resize factor for image dimensions (patch_size).
-MIN_PIXELS = 4 * 28 * 28  # Minimum image pixels: 4 patches × patch_size².
-MAX_PIXELS = 16384 * 28 * 28  # Maximum image pixels: 16384 patches × patch_size².
-MAX_RATIO = 200  # Maximum allowed aspect ratio for images.
 
 # Video constants.
 VIDEO_MIN_PIXELS = 128 * 28 * 28  # Minimum video pixels: 128 patches × patch_size².
@@ -50,65 +44,8 @@ FPS = 2.0  # Default frames per second for video sampling.
 FPS_MIN_FRAMES = 4  # Minimum number of frames to extract from video.
 FPS_MAX_FRAMES = 768  # Maximum number of frames to extract from video.
 
-# Audio constants.
-SAMPLE_RATE = 16000  # Audio sampling rate in Hz.
-N_FFT = 400  # Number of FFT points for spectrogram computation.
-HOP_LENGTH = 160  # Number of samples between successive frames.
-DITHER = 0.0  # Amount of dithering to apply to audio signal.
-
 QWEN3_TEMPORAL_PATCH_SIZE = 2
 QWEN3_OMNI_IMAGE_SIZE = 768
-
-
-QWEN_SPECIAL_TOKEN_CONFIGS = {
-    "qwen3-omni-30b-a3b": {
-        "vision_start": 151652,  # <|vision_start|>
-        "vision_end": 151653,  # <|vision_end|>
-        "image_pad": 151655,  # <|image_pad|>
-        "video_pad": 151656,  # <|video_pad|>
-        "audio_start": 151669,  # <|audio_start|>
-        "audio_end": 151670,  # <|audio_end|>
-        "audio_pad": 151675,  # <|audio_pad|>
-    },
-    "qwen3.5": {
-        "vision_start": 248053,  # <|vision_start|>
-        "vision_end": 248054,  # <|vision_end|>
-        "image_pad": 248056,  # <|image_pad|>
-        "video_pad": 248057,  # <|video_pad|>
-        "audio_start": 248070,  # <|audio_start|>
-        "audio_end": 248071,  # <|audio_end|>
-        "audio_pad": 248076,  # <|audio_pad|>
-    },
-}
-
-
-class QwenTokens:
-  """Helper class to manage special token IDs for Qwen models.
-
-  Token attributes are set dynamically from QWEN_SPECIAL_TOKEN_CONFIGS, so adding a new
-  token type only requires updating that dict — no changes here needed.
-  """
-
-  _DEFAULT_MODEL = "qwen3-omni-30b-a3b"
-
-  vision_start: int | None = None
-  vision_end: int | None = None
-  image_pad: int | None = None
-  video_pad: int | None = None
-  audio_start: int | None = None
-  audio_end: int | None = None
-  audio_pad: int | None = None
-
-  def __init__(self, config=None):
-    # If config is None, will fall back to default Qwen3-Omni tokens.
-    self.model_name = getattr(config, "model_name", None) or self._DEFAULT_MODEL
-    # Match by prefix (e.g. "qwen3.5" covers qwen3.5 family), fall back to default.
-    token_config = next(
-        (v for k, v in QWEN_SPECIAL_TOKEN_CONFIGS.items() if self.model_name.startswith(k)),
-        QWEN_SPECIAL_TOKEN_CONFIGS[self._DEFAULT_MODEL],
-    )
-    # Sets model-specific token attributes from QWEN_SPECIAL_TOKEN_CONFIGS above.
-    self.__dict__.update(token_config)
 
 
 @dataclass
@@ -134,208 +71,6 @@ class Qwen3OmniPreprocessorOutput(mm_utils.PreprocessorOutput):
   audio_values: None | np.ndarray = None
   audio_mask: None | np.ndarray = None
   audio_lengths: None | np.ndarray = None
-
-
-def maybe_pad_video_values_to_max_grid(
-    video_values: np.ndarray,
-    video_grid_thw: np.ndarray,
-    config,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-  """Pad Qwen3-Omni video pixels to configured static grid limits when enabled.
-
-  Args:
-    video_values: Video pixels of shape (batch, channels, T*tps, H*patch, W*patch).
-    video_grid_thw: Actual video grid with shape (1, 3), in Qwen grid units.
-    config: Config carrying video_max_grid_t/h/w and ViT patch sizes.
-
-  Returns:
-    Tuple of:
-    - padded video pixels, or the input when no max grid is configured
-    - input grid_thw
-    - pixel-level mask of shape (batch, 1, max_T*tps, max_H*patch, max_W*patch), or None
-  """
-  max_grid = (
-      getattr(config, "video_max_grid_t", None),
-      getattr(config, "video_max_grid_h", None),
-      getattr(config, "video_max_grid_w", None),
-  )
-  if all(dim is None for dim in max_grid):
-    return video_values, video_grid_thw, None
-  if any(dim is None for dim in max_grid):
-    raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
-  if video_values.ndim != 5:
-    raise ValueError(f"video_values must have shape (batch, channels, time, height, width), got {video_values.shape}.")
-
-  max_t, max_h, max_w = (int(dim) for dim in max_grid)  # pyrefly: ignore[bad-argument-type]
-  actual_t, actual_h, actual_w = (int(dim) for dim in video_grid_thw[0])
-  if actual_t > max_t or actual_h > max_h or actual_w > max_w:
-    raise ValueError(
-        f"video grid {video_grid_thw[0].tolist()} exceeds max grid {(max_t, max_h, max_w)}. "
-        "Scale or resize the video before padding."
-    )
-
-  temporal_patch_size = config.temporal_patch_size_for_vit
-  patch_size = config.patch_size_for_vit
-  max_t_px = max_t * temporal_patch_size
-  max_h_px = max_h * patch_size
-  max_w_px = max_w * patch_size
-
-  padded_video_values = np.zeros(
-      (video_values.shape[0], video_values.shape[1], max_t_px, max_h_px, max_w_px),
-      dtype=video_values.dtype,
-  )
-  patch_elements = video_values.shape[1] * temporal_patch_size * patch_size * patch_size
-  valid_patches = actual_t * actual_h * actual_w
-  padded_video_values.reshape((video_values.shape[0], -1, patch_elements))[:, :valid_patches] = video_values.reshape(
-      (video_values.shape[0], valid_patches, patch_elements)
-  )
-
-  video_mask = np.zeros((video_values.shape[0], 1, max_t_px, max_h_px, max_w_px), dtype=np.int32)
-  mask_patch_elements = temporal_patch_size * patch_size * patch_size
-  video_mask.reshape((video_values.shape[0], -1, mask_patch_elements))[:, :valid_patches] = 1
-
-  return padded_video_values, video_grid_thw, video_mask
-
-
-def downsample_video_mask_to_tokens(video_mask, config):
-  """Reduces a Qwen3 pixel mask to the post-projector video-token mask.
-
-  Example: with patch size `(2, 16, 16)`, spatial merge size `2`, and padded
-  grid `(3, 4, 4)`, a pixel mask `[1, 1, 6, 64, 64]` becomes 48 patch-mask
-  values and then 12 projected-token-mask values. A valid grid `(2, 2, 4)`
-  marks the first `2 * 2 * 4 / 2**2 = 4` projected tokens as valid.
-  """
-  if video_mask is None:
-    return None
-
-  patch_elements = config.temporal_patch_size_for_vit * config.patch_size_for_vit**2
-  patch_mask = video_mask.reshape(video_mask.shape[0], -1, patch_elements).max(axis=-1)
-  merge_elements = config.spatial_merge_size_for_vit**2
-  if patch_mask.shape[-1] % merge_elements:
-    raise ValueError(
-        f"Video patch-mask length {patch_mask.shape[-1]} must be divisible by spatial merge area {merge_elements}."
-    )
-  return patch_mask.reshape(patch_mask.shape[0], -1, merge_elements).max(axis=-1).astype(jnp.int32)
-
-
-def smart_resize(
-    height: int,
-    width: int,
-    factor: int = 28,
-    min_pixels: int = 56 * 56,
-    max_pixels: int = 14 * 14 * 4 * 1280,
-    max_h_pixels: int | None = None,
-    max_w_pixels: int | None = None,
-):
-  """Rescales the image so that the following conditions are met:
-
-  1. Both dimensions (height and width) are divisible by 'factor'.
-
-  2. The total number of pixels is within the range ['min_pixels', 'max_pixels'].
-
-  3. The aspect ratio of the image is maintained as closely as possible.
-
-  4. (Optional) Neither dimension exceeds max_h_pixels / max_w_pixels. When either
-     cap is exceeded, both dimensions are scaled down proportionally and re-aligned
-     to 'factor'.
-
-  """
-  if max(height, width) / min(height, width) > MAX_RATIO:
-    raise ValueError(
-        f"absolute aspect ratio must be smaller than {MAX_RATIO}, got {max(height, width) / min(height, width)}"
-    )
-  h_bar = round(height / factor) * factor
-  w_bar = round(width / factor) * factor
-  if h_bar * w_bar > max_pixels:
-    beta = math.sqrt((height * width) / max_pixels)
-    h_bar = max(factor, math.floor(height / beta / factor) * factor)
-    w_bar = max(factor, math.floor(width / beta / factor) * factor)
-  elif h_bar * w_bar < min_pixels:
-    beta = math.sqrt(min_pixels / (height * width))
-    h_bar = math.ceil(height * beta / factor) * factor
-    w_bar = math.ceil(width * beta / factor) * factor
-  # Apply per-dimension pixel caps, scaling down proportionally if either is exceeded.
-  if (max_h_pixels is not None and h_bar > max_h_pixels) or (max_w_pixels is not None and w_bar > max_w_pixels):
-    cap_h = max_h_pixels if max_h_pixels is not None else h_bar
-    cap_w = max_w_pixels if max_w_pixels is not None else w_bar
-    scale = min(cap_h / h_bar, cap_w / w_bar)
-    h_bar = min(max(factor, round(h_bar * scale / factor) * factor), (cap_h // factor) * factor)
-    w_bar = min(max(factor, round(w_bar * scale / factor) * factor), (cap_w // factor) * factor)
-  return h_bar, w_bar
-
-
-def pre_process_qwen3_image(image: np.ndarray | list[np.ndarray], config, force_resize=None):
-  """Performs a bi-linear resize (with anti-aliasing) and normalizes the image."""
-  patch_size = config.patch_size_for_vit
-  merge_size = config.spatial_merge_size_for_vit
-  temporal_patch_size = config.temporal_patch_size_for_vit
-  resample_method = Image.BICUBIC
-
-  images_in = [image] if isinstance(image, np.ndarray) else image
-  images_out = []
-  grids_thw = []
-
-  for img in images_in:
-    pil_img = Image.fromarray(img)
-    if force_resize is not None:
-      resized_height_2, resized_width_2 = force_resize
-      resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
-    else:
-      # Qwen3-Omni performs one resize during fetch_image and another resize before patchify.
-      resized_height_1, resized_width_1 = smart_resize(
-          height=img.shape[0],
-          width=img.shape[1],
-          factor=IMAGE_FACTOR,
-          min_pixels=MIN_PIXELS,
-          max_pixels=MAX_PIXELS,
-      )
-      pil_img = pil_img.resize((resized_width_1, resized_height_1))
-      resized_height_2, resized_width_2 = smart_resize(
-          height=resized_height_1,
-          width=resized_width_1,
-          factor=patch_size * merge_size,
-          min_pixels=MIN_PIXELS,
-          max_pixels=MAX_PIXELS,
-      )
-      resized_img_pil = pil_img.resize((resized_width_2, resized_height_2), resample=resample_method)
-    resized_img_np = np.array(resized_img_pil).astype(np.float32)
-
-    img_np = mm_utils.normalize_images(resized_img_np, mean=IMAGE_MEAN, std=IMAGE_STD)
-    img_np = np.permute_dims(img_np, (2, 0, 1))  # HWC to NCHW
-    img_np = np.expand_dims(img_np, axis=(0, 1))  # add batch dimension
-    img_np = np.repeat(img_np, temporal_patch_size, axis=1)  # add temporal dimension
-
-    grid_t = 2 // temporal_patch_size
-    grid_h, grid_w = resized_height_2 // patch_size, resized_width_2 // patch_size
-    batch_size = img_np.shape[0]
-    channel = img_np.shape[2]
-
-    img_np = np.reshape(
-        img_np,
-        (
-            batch_size,
-            grid_t,
-            temporal_patch_size,
-            channel,
-            grid_h // merge_size,
-            merge_size,
-            patch_size,
-            grid_w // merge_size,
-            merge_size,
-            patch_size,
-        ),
-    )
-    img_np = np.permute_dims(img_np, (0, 1, 4, 7, 5, 8, 3, 2, 6, 9))  # HWC to CHW
-    img_np = np.reshape(
-        img_np, (batch_size, grid_t * grid_h * grid_w, channel * temporal_patch_size * patch_size * patch_size)
-    )
-    img_grid_thw = np.asarray([grid_t, grid_h, grid_w], dtype=np.int32)
-    images_out.append(img_np)
-    grids_thw.append(img_grid_thw)
-
-  # Images are concatenated along the sequence dimension e.g. (seq1 + seq2, 1536)
-  concatenated_images = np.concatenate([img[0] for img in images_out], axis=0)
-  return concatenated_images, np.stack(grids_thw)
 
 
 def calculate_video_frame_range(
@@ -594,54 +329,6 @@ def preprocess_video(video, config):
   return resized_video[0, :, :], processed_grid
 
 
-def _np_extract_fbank_features(waveform_batch: np.ndarray) -> np.ndarray:
-  """
-  Compute the log-mel spectrogram of the provided audio, gives similar results to Whisper's original torch
-  implementation with 1e-5 tolerance.
-  """
-  log_spec_batch = []
-  mel_filters = mm_utils.mel_filter_bank(
-      num_frequency_bins=1 + N_FFT // 2,
-      num_mel_filters=128,
-      min_frequency=0.0,
-      max_frequency=8000.0,
-      sampling_rate=SAMPLE_RATE,
-      norm="slaney",
-      mel_scale="slaney",
-  )
-  for waveform in waveform_batch:
-    log_spec = mm_utils.spectrogram(
-        waveform,
-        mm_utils.window_function(N_FFT, "hann"),
-        frame_length=N_FFT,
-        hop_length=HOP_LENGTH,
-        power=2.0,
-        dither=0.0,
-        mel_filters=mel_filters,
-        log_mel="log10",
-    )
-    log_spec = log_spec[:, :-1]
-    log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
-    log_spec = (log_spec + 4.0) / 4.0
-    log_spec_batch.append(log_spec)
-  log_spec_batch = np.array(log_spec_batch)
-  return log_spec_batch
-
-
-def pre_process_audio_qwen3_omni(audio_array):
-  """Preprocess audio for Qwen3-Omni model."""
-  chunk_samples = 16000  # hop_length (160) * chunk_size (100)
-  remainder = len(audio_array) % chunk_samples
-  if remainder > 0:
-    padding_size = chunk_samples - remainder
-    audio_array = np.pad(audio_array, (0, padding_size), mode="constant")
-
-  audio_features = np.expand_dims(audio_array, axis=0)  # Add batch dimension
-  audio_features = _np_extract_fbank_features(audio_features)
-  audio_features_mask = np.ones((audio_features.shape[0], audio_features.shape[2]), dtype=np.int32)
-  return audio_features, audio_features_mask
-
-
 def is_video_file(path):
   if not isinstance(path, str):
     return False
@@ -719,7 +406,9 @@ def preprocess_mm_data_qwen3_omni_for_training(images, config):
             config.patch_size_for_vit * video_grid_thw[0, 2],
         ),
     )
-    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
+    video_values, video_grid_thw, video_mask = qwen3_omni_video_grid.maybe_pad_video_values_to_max_grid(
+        video_values, video_grid_thw, config
+    )
     return Qwen3OmniPreprocessorOutput(
         num_videos=1,
         video_values=video_values,
@@ -790,7 +479,9 @@ def preprocess_mm_data_qwen3_omni(config):
             config.patch_size_for_vit * video_grid_thw[0, 2],
         ),
     )
-    video_values, video_grid_thw, video_mask = maybe_pad_video_values_to_max_grid(video_values, video_grid_thw, config)
+    video_values, video_grid_thw, video_mask = qwen3_omni_video_grid.maybe_pad_video_values_to_max_grid(
+        video_values, video_grid_thw, config
+    )
     processor_outputs.video_values = video_values
     processor_outputs.video_grid_thw = video_grid_thw
     processor_outputs.video_mask = video_mask
@@ -847,7 +538,7 @@ def add_extra_tokens_for_qwen3_omni(tokens, config, processor_output):
   tokens = tokens.flatten()  # Ensure 1D
 
   # Get dynamic tokens based on config
-  qwen_tokens = QwenTokens(config)
+  qwen_tokens = qwen3_omni_tokens.QwenTokens(config)
 
   # Merge lengths for computing number of tokens
   merge_length = spatial_merge_size**2
@@ -1145,7 +836,7 @@ def get_rope_index(
   Raises:
     ValueError: If multimodal tokens are present but grid info is missing.
   """
-  qwen_tokens = QwenTokens(config)
+  qwen_tokens = qwen3_omni_tokens.QwenTokens(config)
   batch_size, seq_len = input_ids.shape
 
   # Handle text-only case (no multimodal content)
