@@ -21,6 +21,7 @@ from lilax._backend.configs.mesh_parallelism import (
     DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, validate_optimizer_sharding,
 )
 from lilax._backend.configs import moe_routing
+from lilax._backend.configs.training_validation import validate_training_objective
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
@@ -5387,39 +5388,7 @@ class MaxTextConfig(
             "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
             "use attention='dot_product' on other hardware."
         )
-    if self.training_objective == "block_diffusion":
-      if self.attention_type != AttentionType.BLOCK_DIFFUSION.value:
-        raise ValueError("`training_objective='block_diffusion'` requires `attention_type='block_diffusion'`.")
-      if self.block_diffusion_mask_id < 0 or self.block_diffusion_mask_id >= self.vocab_size:
-        raise ValueError(
-            f"`block_diffusion_mask_id` ({self.block_diffusion_mask_id}) must satisfy "
-            f"0 <= block_diffusion_mask_id < vocab_size ({self.vocab_size})."
-        )
-      # Block-diffusion attention validation above rejects packing first.
-      if self.packing:  # pragma: no cover
-        raise ValueError("`training_objective='block_diffusion'` requires `packing=False`.")
-      if self.mtp_num_layers > 0:
-        raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
-      if self.num_vocab_tiling > 1:
-        raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
-      if self.dataset_type != "hf":
-        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'.")
-      if self.use_dpo:
-        raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
-      if self.use_multimodal or self.use_audio:
-        raise ValueError("`training_objective='block_diffusion'` currently supports text-only training.")
-      valid_model_contracts = {
-          ("same_position", "all_masked"),
-          ("shifted", "seed_and_mask"),
-      }
-      model_contract = (self.block_diffusion_logit_alignment, self.block_diffusion_canvas_policy)
-      if model_contract not in valid_model_contracts:
-        raise ValueError(
-            "Block-diffusion training supports only `same_position/all_masked` or `shifted/seed_and_mask`; "
-            f"received `{model_contract[0]}/{model_contract[1]}`."
-        )
-      if self.block_diffusion_canvas_policy == "seed_and_mask" and self.causal_block_size < 2:
-        raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
+    validate_training_objective(self)
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if self.mtp_reuse_input_embedding and self.use_multimodal:

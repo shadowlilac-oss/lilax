@@ -13,6 +13,7 @@ from jax import lax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+from lilax._backend.kernels.megablox import metadata_sharding
 import qwix.pallas as qpl
 
 
@@ -205,23 +206,9 @@ def make_group_metadata(
       total_repeat_length=tiles_m + num_groups - 1,
   )
 
-  # Account for sharding.
-  #
-  # Find the start of the groups owned by our shard and shift the group_ids and
-  # m_tile_ids s.t. the metadata for our tiles are at the front of the arrays.
-  #
-  # TODO(tgale): Move this offset into the kernel to avoid these rolls.
-  first_tile_in_shard = (group_ids < start_group).sum()
-  group_ids = jnp.roll(group_ids, shift=-first_tile_in_shard, axis=0)
-  m_tile_ids = jnp.roll(m_tile_ids, shift=-first_tile_in_shard, axis=0)
-
-  # Calculate the number of tiles we need to compute for our shard.
-  #
-  # Remove tile visits that belong to a group not in our shard.
-  iota = jnp.arange(num_groups, dtype=jnp.int32)
-  active_group_mask = jnp.logical_and(iota <= end_group, iota >= start_group)
-  group_tiles = jnp.where(active_group_mask, group_tiles, 0)
-  num_tiles = group_tiles.sum()
+  group_ids, m_tile_ids, num_tiles = metadata_sharding.select_shard(
+      group_ids, m_tile_ids, group_tiles, start_group, end_group, num_groups
+  )
   return (group_offsets, group_ids, m_tile_ids), num_tiles
 
 

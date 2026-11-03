@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from lilax._backend.kernels.megablox import backend
 from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
+from lilax._backend.kernels.megablox import quantization_rule as gmm_quantization_rule
 from lilax._backend.kernels.ragged import ragged_sort_tc
 from lilax._backend.layers import quantizations
 import qwix
@@ -107,27 +108,9 @@ def gmm(
     # internal dynamic_slice VMA) and balloons HBM temporaries. Callers that genuinely
     # run off-TPU (e.g. equiv_chunk_test) pass interpret based on their target mesh.
     interpret = False
-  quantization_rule = None
-  if use_qwix_quantization:
-    # 1. for non-batchsplit, retrieve rule ("gmm") via qwix interception
-    #   get_current_rule has to be called outside of the _gmm_fwd function.
-    # 2. for batchsplit, explicitly pass the rule
-    quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
-    # Only "fp8_full" defines a Qwix rule for GMM.
-    # quantization_rule is None when:
-    # 1. Quantization scheme does not target GMM (e.g., "fp8", "int8").
-    # 2. Module is excluded from quantization (e.g., MTP when quantize_mtp=False).
-    if quantization_rule and not isinstance(quantization_rule, qwix.QtRule):
-      raise ValueError("Expect a QtRule for quantized training.")
-  else:
-    # Handcraft a rule that matches the AQT's behavior.
-    if lhs_quantize_dtype or rhs_quantize_dtype:
-      quantization_rule = qwix.QtRule(
-          weight_qtype=rhs_quantize_dtype,
-          weight_calibration_method="absmax",
-          act_qtype=lhs_quantize_dtype,
-          act_calibration_method="absmax",
-      )
+  quantization_rule = gmm_quantization_rule.select_rule(
+      use_qwix_quantization, qwix_rule, lhs_quantize_dtype, rhs_quantize_dtype
+  )
 
   if return_rhs and not (use_tokamax_backend and use_gmm_v2):
     # The cotangent of the returned rhs is accumulated into drhs via tgmm_v2 partial_sum,
