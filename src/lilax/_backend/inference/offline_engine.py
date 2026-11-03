@@ -16,6 +16,7 @@ import numpy as np
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 
+from lilax._backend.inference.offline_output import completion_logprobs, completion_token_ids
 from lilax._backend.inference.maxengine.maxengine import MaxEngine
 from lilax._backend.input_pipeline.packing.prefill_packing import PrefillProcessor
 from lilax._backend.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
@@ -281,12 +282,8 @@ class InferenceWorker:
         input_id = row.id
         prompt_length = row.true_length
         prompt_tokens = row.tokens[: row.true_length].squeeze()
-        completion_tokens = np.array(
-            [token_output.token for token_output in self.completion_tokens_by_id[input_id]]
-        ).flatten()
-        logprobs = np.array(
-            [token_output.log_prob.flatten() for token_output in self.completion_tokens_by_id[input_id]]
-        ).flatten()
+        completion_tokens = completion_token_ids(self.completion_tokens_by_id[input_id])
+        logprobs = completion_logprobs(self.completion_tokens_by_id[input_id])
         prompt_logprobs = np.array(self.prompt_logprobs_by_id[input_id]).flatten()
         completion_outputs.append(
             CompletionOutput(
