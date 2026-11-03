@@ -11,3 +11,4 @@ class _PostTrainingArguments(TrainingArguments):
       if value is not None and type(value) is not bool:
         raise ValueError(f"{name} must be None or a boolean.")
     self.save_only_lora_params = save_only_lora_params
+    self.restore_only_lora_params = restore_only_lora_params
