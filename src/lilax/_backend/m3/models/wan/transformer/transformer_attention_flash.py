@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 
 from lilax._backend.common import common_types
-from .utils_wan import BlockSizes
+from ..utils_wan import BlockSizes
 
 Array = common_types.Array
 

@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.m3.core.sharding import Sharding
-from .utils_wan import constrain, param_metadata
+from ..utils_wan import constrain, param_metadata
 
 _SPATIAL_NAME = "vae_spatial_activation"
 _SPATIAL_AXES = ("activation_batch", None, None, "activation_length", None)
@@ -65,4 +65,4 @@ class WanCausalConv3d(nnx.Module):
     return self.conv(x_padded)
 
 
-WanCausalConv3d.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
+WanCausalConv3d.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

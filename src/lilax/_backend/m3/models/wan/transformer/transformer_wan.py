@@ -22,7 +22,7 @@ from .transformer_attention_modules import WanAttention
 from .transformer_embedding_modules import FP32LayerNorm, WanRotaryPosEmbed, WanTimeTextImageEmbedding
 from .transformer_embeddings import apply_rope, embed_model_conditioning
 from .transformer_model_execution import combine_conditioning, compute_layer_kv_cache, run_transformer_blocks
-from .utils_wan import (BlockSizes, CONTEXT, CROSS_ATTN_HEAD, CROSS_ATTN_KV_LENGTH, CROSS_ATTN_Q_LENGTH,
+from ..utils_wan import (BlockSizes, CONTEXT, CROSS_ATTN_HEAD, CROSS_ATTN_KV_LENGTH, CROSS_ATTN_Q_LENGTH,
                         SELF_ATTN_HEAD, SELF_ATTN_KV_LENGTH, SELF_ATTN_Q_LENGTH, TpuType, constrain, get_activation,
                         get_tpu_type, param_metadata, safe_getattr, tokamax_splash)
 

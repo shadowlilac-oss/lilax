@@ -12,7 +12,7 @@ from lilax._backend.common import common_types
 from lilax._backend.utils import max_logging
 from .transformer_embeddings import get_1d_rotary_pos_embed, get_sinusoidal_embeddings
 from .transformer_timestep_embedding import TimestepEmbedding
-from .utils_wan import TpuType, get_activation, get_tpu_type, param_metadata, safe_getattr
+from ..utils_wan import TpuType, get_activation, get_tpu_type, param_metadata, safe_getattr
 
 Array = common_types.Array
 

@@ -10,7 +10,7 @@ from lilax._backend.m3.core.sharding import Sharding
 from lilax._backend.utils import max_logging
 from .autoencoder_cache_wan import CACHE_T, RepSentinel, _update_cache
 from .autoencoder_causal_conv_wan import WanCausalConv3d
-from .utils_wan import param_metadata
+from ..utils_wan import param_metadata
 
 
 class WanUpsample(nnx.Module):
@@ -134,7 +134,7 @@ class WanResample(nnx.Module):
     return x, feat_cache, feat_idx
 
 
-WanUpsample.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
-Identity.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
-ZeroPaddedConv2D.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
-WanResample.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
+WanUpsample.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
+Identity.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
+ZeroPaddedConv2D.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
+WanResample.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

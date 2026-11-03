@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.m3.core.sharding import Sharding
-from .utils_wan import get_activation, param_metadata, safe_getattr
+from ..utils_wan import get_activation, param_metadata, safe_getattr
 
 
 class TimestepEmbedding(nnx.Module):

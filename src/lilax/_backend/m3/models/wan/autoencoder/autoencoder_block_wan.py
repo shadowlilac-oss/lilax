@@ -9,7 +9,7 @@ from .autoencoder_cache_wan import CACHE_T, _update_cache
 from .autoencoder_causal_conv_wan import WanCausalConv3d
 from .autoencoder_norm_wan import WanRMS_norm
 from .autoencoder_resample_wan import Identity
-from .utils_wan import get_activation, param_metadata
+from ..utils_wan import get_activation, param_metadata
 
 
 class WanResidualBlock(nnx.Module):
@@ -90,5 +90,5 @@ class WanAttentionBlock(nnx.Module):
     return x + identity, feat_cache, feat_idx
 
 
-WanResidualBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
-WanAttentionBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
+WanResidualBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
+WanAttentionBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

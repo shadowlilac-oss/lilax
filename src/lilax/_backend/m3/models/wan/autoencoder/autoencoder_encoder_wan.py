@@ -11,7 +11,7 @@ from .autoencoder_causal_conv_wan import WanCausalConv3d
 from .autoencoder_norm_wan import WanRMS_norm
 from .autoencoder_resample_wan import WanResample
 from .autoencoder_stage_wan import WanMidBlock
-from .utils_wan import get_activation
+from ..utils_wan import get_activation
 
 
 class WanEncoder3d(nnx.Module):
@@ -83,4 +83,4 @@ class WanEncoder3d(nnx.Module):
     return x, feat_cache, jnp.array(feat_idx, dtype=jnp.int32)
 
 
-WanEncoder3d.__module__ = "lilax._backend.m3.models.wan.autoencoder_kl_wan"
+WanEncoder3d.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

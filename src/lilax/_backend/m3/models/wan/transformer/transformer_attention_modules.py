@@ -15,7 +15,7 @@ from lilax._backend.common import common_types
 from lilax._backend.m3.core.sharding import Sharding, TensorType
 from .transformer_attention_dot_product import _dot_product_attention
 from .transformer_attention_flash import _pad_axis, _splash_block_sizes, unflatten_heads
-from .utils_wan import (BlockSizes, CONTEXT, CROSS_ATTN_HEAD, CROSS_ATTN_KV_LENGTH, CROSS_ATTN_Q_LENGTH,
+from ..utils_wan import (BlockSizes, CONTEXT, CROSS_ATTN_HEAD, CROSS_ATTN_KV_LENGTH, CROSS_ATTN_Q_LENGTH,
                         SELF_ATTN_HEAD, SELF_ATTN_KV_LENGTH, SELF_ATTN_Q_LENGTH, TpuType, get_tpu_type,
                         param_metadata, tokamax_splash)
 
