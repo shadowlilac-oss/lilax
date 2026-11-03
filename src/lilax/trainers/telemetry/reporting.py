@@ -5,7 +5,7 @@ import trackio
 import wandb
 
 from lilax._backend.utils import max_utils
-from lilax.trainers._profile_artifacts import log_profile_artifacts
+from ._profile_artifacts import log_profile_artifacts
 
 
 class MetricReporter:

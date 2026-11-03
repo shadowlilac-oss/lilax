@@ -13,8 +13,8 @@ from lilax._backend.configs import pyconfig
 from lilax._backend.input_pipeline.input_pipeline_interface import create_data_iterator
 from ._post_base_checkpoint import prepare_training_checkpoint
 from ._post_base_precision import check_precision_options, check_precision_overrides
-from .training_args import TFDS_C4_FIELDS
-from .reporting import MetricReporter
+from ..arguments.training_args import TFDS_C4_FIELDS
+from ..telemetry.reporting import MetricReporter
 
 
 class _PostTrainer:

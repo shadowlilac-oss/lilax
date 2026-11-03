@@ -16,8 +16,8 @@ from lilax._backend.common.profiler import xprof_server
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.experimental.rl import grpo_trainer
 from lilax._backend.utils import max_utils, train_utils
-from .reporting import MetricReporter
-from .training_args import TrainingArguments
+from ..telemetry.reporting import MetricReporter
+from ..arguments.training_args import TrainingArguments
 
 
 def train_grpo(config, inference_config, *, report_to=None, launch_xprof=False, xprof_port=8791):

@@ -19,9 +19,9 @@ from lilax._backend.utils import sharding, train_utils
 from lilax._backend.utils.globals import EPS
 from lilax.configuration import QwixQATConfig
 
-from ._base import _PostTrainer
-from ._pretraining_run import train_pretraining
-from .reporting import MetricReporter
+from ..lifecycle._base import _PostTrainer
+from .run import train_pretraining
+from ..telemetry.reporting import MetricReporter
 
 
 class Trainer(_PostTrainer):

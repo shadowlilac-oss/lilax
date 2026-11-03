@@ -5,10 +5,10 @@ try:
 except ImportError:
   pass
 
-from .aot import compile_train_step, is_oom
-from .pre_training import Trainer, train_pretraining
-from .tokenizer import build_grain_iterator, train_tokenizer, train_tokenizer_from_files
-from .training_args import TrainingArguments
+from .compilation.aot import compile_train_step, is_oom
+from .pretraining.trainer import Trainer, train_pretraining
+from lilax.tokenization.training import build_grain_iterator, train_tokenizer, train_tokenizer_from_files
+from .arguments.training_args import TrainingArguments
 
 __all__ = [
     "Trainer", "TrainingArguments", "build_grain_iterator", "train_tokenizer", "train_tokenizer_from_files",

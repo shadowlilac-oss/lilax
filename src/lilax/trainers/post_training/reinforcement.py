@@ -17,8 +17,8 @@ from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime
 from tunix.sft import checkpoint_manager
 
-from .training_args import TrainingArguments
-from .reporting import MetricReporter
+from ..arguments.training_args import TrainingArguments
+from ..telemetry.reporting import MetricReporter
 
 
 class _RLMetricBackend:

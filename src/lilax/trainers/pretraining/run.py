@@ -78,4 +78,3 @@ def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
     )
 
 
-train_pretraining.__module__ = "lilax.trainers.pre_training"

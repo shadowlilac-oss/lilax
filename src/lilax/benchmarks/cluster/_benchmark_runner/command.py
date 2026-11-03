@@ -37,7 +37,7 @@ def build_training_command(workload: WorkloadConfig) -> str:
   payload = json.dumps(settings)
   python = (
       "import json; from lilax import MaxTextConfig; "
-      "from lilax.trainers.pre_training import train_pretraining; "
+      "from lilax.trainers.pretraining.trainer import train_pretraining; "
       f"train_pretraining(MaxTextConfig(**json.loads({payload!r})))"
   )
   commands = []

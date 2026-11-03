@@ -1,6 +1,6 @@
 """Precision validation for shared trainers."""
 
-from .training_args import PRECISION_FIELDS
+from ..arguments.training_args import PRECISION_FIELDS
 
 
 def check_precision_overrides(graph_config, overrides):

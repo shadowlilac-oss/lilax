@@ -13,8 +13,8 @@ from lilax.configuration import MaxTextConfig
 from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime
 
-from .._base import _PostTrainer
-from ..reporting import MetricReporter
+from ..lifecycle._base import _PostTrainer
+from ..telemetry.reporting import MetricReporter
 from .arguments import _PostTrainingArguments
 from .evaluation import _evaluate_tunix
 

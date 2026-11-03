@@ -2,7 +2,7 @@
 
 from lilax._backend.trainers.post_train.dpo import train_dpo
 
-from ..training_args import MMAP_FIELDS
+from ..arguments.training_args import MMAP_FIELDS
 from .arguments import _PostTrainingArguments
 from .data_options import _check_post_training_data_options
 from .managed import _ManagedPostTrainer

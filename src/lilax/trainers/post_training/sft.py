@@ -4,8 +4,8 @@ from lilax._backend.configs.runtime import resolve_initialized_config
 from lilax._backend.trainers.post_train.sft import train_sft, train_sft_native
 from lilax.peft import PeftModel
 
-from ..pre_training import Trainer as _NativeTrainer
-from ..training_args import MMAP_FIELDS
+from ..pretraining.trainer import Trainer as _NativeTrainer
+from ..arguments.training_args import MMAP_FIELDS
 from .arguments import _PostTrainingArguments
 from .data_options import _check_post_training_data_options
 from .managed import _ManagedPostTrainer

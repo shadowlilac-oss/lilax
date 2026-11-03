@@ -1,6 +1,6 @@
 """Shared post-training arguments."""
 
-from ..training_args import TrainingArguments
+from ..arguments.training_args import TrainingArguments
 
 
 class _PostTrainingArguments(TrainingArguments):
