@@ -18,8 +18,8 @@ from lilax._backend.utils.gpu_collective_overlap_pass.registration import (
 )
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
-from lilax._backend.utils.diagnostics import system_info
-from lilax._backend.utils.te_integration import cgemm
+from lilax._backend.observability.diagnostics import system_info
+from lilax._backend.integration.transformer_engine import cgemm
 
 
 def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):

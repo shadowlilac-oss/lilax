@@ -14,7 +14,7 @@ from lilax._backend.kernels.attention import ulysses_attention
 from lilax._backend.kernels.attention import usp_attention
 from lilax._backend.layers.attention_execution.tokamax_splash import tokamax_splash_kernel
 from lilax._backend.layers.attention_execution.tpu_splash_tuning import SplashTuning
-from lilax._backend.utils.context_parallel import sequence_reorder
+from lilax._backend.layers.context_parallel import sequence_reorder
 
 
 def local_flash_attention(

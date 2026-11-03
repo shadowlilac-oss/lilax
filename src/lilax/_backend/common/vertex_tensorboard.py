@@ -7,7 +7,7 @@ from cloud_accelerator_diagnostics import tensorboard, uploader
 
 from lilax._backend.common.cloud import is_decoupled
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.tensorboard_logging import gcloud_project
+from lilax._backend.observability.tensorboard_logging import gcloud_project
 
 
 class VertexTensorboardManager:

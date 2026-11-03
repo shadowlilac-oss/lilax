@@ -12,7 +12,7 @@ from lilax._backend.configs import pyconfig, types
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.trainers.post_train.rl import train_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import generate_responses
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils.model_creation import pretrained
 from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime

@@ -8,7 +8,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from lilax._backend.common import state_initialization
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.utils import max_logging, state_abstraction
-from lilax._backend.utils.tree_ops import partitioning
+from lilax._backend.pytree import partitioning
 
 
 def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):

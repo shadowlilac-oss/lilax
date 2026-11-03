@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.kernel_tiling import eval_tiles
+from lilax._backend.kernels.tiling import eval_tiles
 
 from flax import nnx
 

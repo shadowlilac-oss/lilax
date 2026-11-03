@@ -4,7 +4,7 @@ import jax
 import trackio
 import wandb
 
-from lilax._backend.utils.tensorboard_logging import summary_writing
+from lilax._backend.observability.tensorboard_logging import summary_writing
 from ._profile_artifacts import log_profile_artifacts
 
 

@@ -9,7 +9,7 @@ from lilax._backend.common import profiler
 from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.trainers.pre_train.train import train_loop
 from lilax._backend.utils import elastic_utils
-from lilax._backend.utils.te_integration import mesh_context
+from lilax._backend.integration.transformer_engine import mesh_context
 
 
 def run(config, recorder, elastic_retry_cache=None, *, setup=None, setup_fn=None, reporter_factory=None,

@@ -11,7 +11,7 @@ from lilax._backend.kernels.megablox import backend
 from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from lilax._backend.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from lilax._backend.kernels.megablox import quantization_rule as gmm_quantization_rule
-from lilax._backend.kernels.ragged import ragged_sort_tc
+from lilax._backend.kernels.ragged import sort_tc as ragged_sort_tc
 from lilax._backend.layers.quantization.static_scale import get_static_scale, is_static_calibration, manual_quantize
 import qwix
 import qwix.pallas as qpl

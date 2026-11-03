@@ -20,7 +20,7 @@ from lilax._backend.layers.multi_token_prediction import MultiTokenPredictionBlo
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 
 def transformer_as_linen(

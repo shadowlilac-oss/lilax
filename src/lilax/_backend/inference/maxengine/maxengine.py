@@ -25,23 +25,24 @@ from jetstream.engine.tokenizer_pb2 import TokenizerParameters, TokenizerType
 
 from lilax._backend.layers.quantization.configure import configure_quantization
 from lilax._backend.inference import inference_utils
-from lilax._backend.inference.maxengine import maxengine_adapters
-from lilax._backend.inference.maxengine import maxengine_cache_sharding
-from lilax._backend.inference.maxengine import maxengine_compilation
-from lilax._backend.inference.maxengine import maxengine_decode_state
-from lilax._backend.inference.maxengine import maxengine_generation
-from lilax._backend.inference.maxengine import maxengine_insertion
-from lilax._backend.inference.maxengine import maxengine_model
-from lilax._backend.inference.maxengine import maxengine_model_transfer
-from lilax._backend.inference.maxengine import maxengine_params
-from lilax._backend.inference.maxengine import maxengine_prefill_cache
-from lilax._backend.inference.maxengine import maxengine_tokenizer
-from lilax._backend.utils import device_mesh
+from lilax._backend.inference.maxengine import adapters as maxengine_adapters
+from lilax._backend.inference.maxengine import cache_sharding as maxengine_cache_sharding
+from lilax._backend.inference.maxengine import compilation as maxengine_compilation
+from lilax._backend.inference.maxengine import decode_state as maxengine_decode_state
+from lilax._backend.inference.maxengine import generation as maxengine_generation
+from lilax._backend.inference.maxengine import insertion as maxengine_insertion
+from lilax._backend.inference.maxengine import model as maxengine_model
+from lilax._backend.inference.maxengine import model_transfer as maxengine_model_transfer
+from lilax._backend.inference.maxengine import multimodal as maxengine_multimodal
+from lilax._backend.inference.maxengine import params as maxengine_params
+from lilax._backend.inference.maxengine import prefill_cache as maxengine_prefill_cache
+from lilax._backend.inference.maxengine import tokenizer as maxengine_tokenizer
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.utils.model_creation import model_factory
-from lilax._backend.utils.tree_ops import partitioning
+from lilax._backend.pytree import partitioning
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 
 _DEEPSEEK_V4_CACHE_KEYS = maxengine_insertion.DEEPSEEK_V4_CACHE_KEYS
@@ -60,26 +61,6 @@ class ExistingPrefix:
 
   cache: Any
   common_prefix_tokens: jax.Array
-
-
-class MaxEngineConfig:
-  """Engine specific config class to allow using multiple MaxEngine instances in an inference run.
-  TODO: evaluate the need for this given the restructured pyconfig.py
-  """
-
-  def __init__(self, keys):
-    self.__dict__["keys"] = keys
-
-  def __getattr__(self, attr):
-    if attr not in self.keys:
-      raise ValueError(f"Requested key {attr}, not in config")
-    return self.keys[attr]
-
-  def __setattr__(self, attr, value):
-    raise ValueError
-
-  def get_keys(self):
-    return self.keys
 
 
 class MaxEngine(engine_api.Engine):
@@ -145,15 +126,12 @@ class MaxEngine(engine_api.Engine):
   def _nnx_cache_state_template(self, mode: str = MODEL_MODE_PREFILL) -> Any:
     """Empty nnx.State template for the model's nnx.Cache vars (PREFILL=batch 1, AR=batch N)."""
     src = self._abstract_model_for_mode(mode)
-    _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
-    return cache_state
+    return maxengine_model.cache_state_template(src)
 
   def _nnx_init_cache_dict(self, mode: str = MODEL_MODE_PREFILL) -> dict:
     """Zero-filled pure-dict cache matching the abstract NNX model."""
     src = self._abstract_model_for_mode(mode)
-    _, cache_state, _ = nnx.split(src, nnx.Cache, ...)
-    cache_dict = nnx.to_pure_dict(cache_state)
-    return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict)
+    return maxengine_model.init_cache_dict(src)
 
   def _nnx_run_model(
       self,
@@ -235,9 +213,7 @@ class MaxEngine(engine_api.Engine):
     return (
         generate_executable,
         self._iterated_layout(params, self.param_layouts),
-        jax.jit(self.init_decode_state, in_shardings=(None), out_shardings=self.decode_state_layouts)
-        .lower(rng_shape)
-        .compile(),
+        maxengine_compilation.compile_init_decode_state(self.init_decode_state, self.decode_state_layouts, rng_shape),
     )
 
   def load_params(self, *args, params=None, model=None, rng: PRNGKeyType | None = None, **kwargs) -> Params:
@@ -280,12 +256,7 @@ class MaxEngine(engine_api.Engine):
       self._nnx_rest_state = rest_state
       del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
 
-    self.abstract_params = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
-        if isinstance(x, jax.Array)
-        else None,
-        params_state,
-    )
+    self.abstract_params = maxengine_compilation.abstract_params(params_state)
 
     self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations_nnx(
         self.model, self.config, self._mesh
@@ -450,12 +421,7 @@ class MaxEngine(engine_api.Engine):
       positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     if self.config.use_multimodal and images is not None:
-      if images.ndim == 3:
-        images = images[jnp.newaxis, jnp.newaxis, ...]
-        image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
-      elif images.ndim == 4:
-        images = images[jnp.newaxis, ...]
-        image_masks = image_masks[jnp.newaxis, ...] if image_masks is not None else None
+      images, image_masks = maxengine_multimodal.prepare_images(images, image_masks)
 
     start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
     ones_to_keep = start_to_n < full_true_length
@@ -569,10 +535,7 @@ class MaxEngine(engine_api.Engine):
   ):
     """Public API for prefill that updates page state outside JIT."""
     if video_grid_thw is not None:
-      flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
-      if flat_video_grid.size != 3:
-        raise ValueError(f"Decode currently supports one video grid with 3 values, got shape {video_grid_thw.shape}.")
-      video_grid_thw = tuple(int(dim) for dim in flat_video_grid)
+      video_grid_thw = maxengine_multimodal.prepare_video_grid(video_grid_thw)
 
     if rng is None:
       if self.rng is None:

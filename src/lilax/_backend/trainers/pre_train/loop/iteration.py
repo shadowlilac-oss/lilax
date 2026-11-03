@@ -13,7 +13,7 @@ from lilax._backend.common.goodput import GoodputEvent, maybe_record_goodput
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.trainers.pre_train.loop.evaluation import run_evaluation
 from lilax._backend.utils import elastic_utils, gcs_utils, max_logging
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.observability.diagnostics import pytree
 
 
 def _maybe_log_required_rbf(config, step, metrics, program):

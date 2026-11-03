@@ -18,9 +18,9 @@ from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.kernels.tokamax_splash_attention import ring_attention_kernel
 from lilax._backend.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from lilax._backend.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
-from lilax._backend.utils import sharding
-from lilax._backend.utils.context_parallel import mask_reorder
-from lilax._backend.utils.kernel_tiling import eval_tiles
+from lilax._backend.distributed import sharding
+from lilax._backend.layers.context_parallel import mask_reorder
+from lilax._backend.kernels.tiling import eval_tiles
 
 
 def is_context_parallel_ring_requested(config: Any) -> bool:

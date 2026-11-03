@@ -29,7 +29,7 @@ from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import Qwen3NextRMSNormGated
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.models.qwen3_next.gated_delta_rule import jax_ar_gated_delta_rule, jax_chunk_gated_delta_rule
-from lilax._backend.utils.sharding import (
+from lilax._backend.distributed.sharding import (
     get_logical_axis_rules,
     logical_to_mesh_axes,
     maybe_shard_with_name,

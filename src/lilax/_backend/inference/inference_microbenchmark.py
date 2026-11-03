@@ -11,7 +11,7 @@ from lilax._backend.common import flops, profiler
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.input_pipeline.packing import prefill_packing
 from lilax._backend.utils import gcs_utils
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.observability.diagnostics import pytree
 
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False

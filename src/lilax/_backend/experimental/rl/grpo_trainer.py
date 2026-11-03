@@ -77,18 +77,18 @@ from lilax._backend.experimental.rl import grpo_input_pipeline
 from lilax._backend.experimental.rl import grpo_utils
 from lilax._backend.common.metric_logger import MetricLogger
 from lilax._backend.inference import offline_engine
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import exceptions
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 from lilax._backend.utils import state_abstraction
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 from lilax._backend.utils.training import state_setup
-from lilax._backend.utils.tree_ops import numerics
+from lilax._backend.pytree import numerics
 from lilax._backend.utils import train_utils
 
 # pylint: disable=too-many-positional-arguments

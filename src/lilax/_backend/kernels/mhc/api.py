@@ -16,7 +16,7 @@
 from typing import Literal, Sequence
 import jax
 from lilax._backend.kernels.mhc import common
-from lilax._backend.kernels.mhc import mhc_kernels_fwd
+from lilax._backend.kernels.mhc import forward as mhc_kernels_fwd
 
 type Implementation = Literal["mosaic", "mosaic_tpu", "xla"]
 MhcContext = common.MHCContext

@@ -16,11 +16,13 @@ from orbax.checkpoint import v1 as ocp
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import print_peak_memory
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import flat_moe
 from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.layers.quantization.configure import configure_quantization
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, sharding
-from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.distributed import device_mesh, sharding
+from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.observability.diagnostics import system_info
 from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 
 
@@ -135,7 +137,7 @@ def load_resharded_params(config, mesh: Mesh) -> nnx.State:
   target_weights = nnx.traversals.flatten_mapping(target.to_pure_dict())
   flat_moe_plan = {}
   if config.moe_flat_fsdp_weights:
-    plan = checkpointing._flat_moe_restore_plan(nnx.traversals.unflatten_mapping(target_weights), stored)
+    plan = flat_moe._flat_moe_restore_plan(nnx.traversals.unflatten_mapping(target_weights), stored)
     flat_moe_plan = {tuple(path): value for path, value in plan.items()}
   devices = list(mesh.devices.flat)
   staging, num_aligned = {}, 0

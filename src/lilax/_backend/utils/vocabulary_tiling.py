@@ -7,8 +7,8 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils.losses import cross_entropy
-from lilax._backend.utils.sharding import (
+from lilax._backend.losses import cross_entropy
+from lilax._backend.distributed.sharding import (
     FSDP_MESH_AXES, create_sharding, get_logical_axis_rules, get_physical_spec_without_axes, maybe_shard_with_name,
 )
 

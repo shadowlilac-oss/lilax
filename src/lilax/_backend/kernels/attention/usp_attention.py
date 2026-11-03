@@ -9,7 +9,7 @@ import jax
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.kernels.attention import tokamax_ring_attention
 from lilax._backend.kernels.attention import ulysses_attention
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 
 def is_context_parallel_usp_requested(config: Any) -> bool:

@@ -6,13 +6,13 @@ from etils import epath
 from flax import nnx
 from orbax import checkpoint as ocp
 
-from lilax._backend.common.checkpoints import checkpoint_context, checkpointing
+from lilax._backend.common.checkpoints import checkpoint_context, checkpointing, restore_source_types
 from lilax._backend.experimental.lineage import lineage_adapter
 
 
 def is_maxtext_layout(config):
   """Return whether the checkpoint at load_parameters_path stores MaxText rather than Lineage parameters."""
-  path = epath.Path(checkpointing._normalize_checkpoint_root(config.load_parameters_path))
+  path = epath.Path(restore_source_types._normalize_checkpoint_root(config.load_parameters_path))
   checkpointable_name = "items" if (path / "items").exists() else None
   metadata_context = (
       checkpoint_context.build_context(colocated_python_checkpointing=True)

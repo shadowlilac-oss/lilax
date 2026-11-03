@@ -5,7 +5,7 @@ import jax.numpy as jnp
 
 from lilax._backend.common.metric_logger import record_activation_metrics
 from lilax._backend.utils.globals import EPS
-from lilax._backend.utils.tree_ops import numerics
+from lilax._backend.pytree import numerics
 
 
 def loss_scalar_metrics(loss, aux):

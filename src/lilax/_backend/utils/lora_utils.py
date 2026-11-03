@@ -18,10 +18,11 @@ import qwix
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
-from lilax._backend.utils import device_mesh, gcs_utils, max_logging, state_abstraction
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import gcs_utils, max_logging, state_abstraction
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
 from lilax._backend.utils.model_creation import nnx_abstract_model
-from lilax._backend.utils.tree_ops import partitioning
+from lilax._backend.pytree import partitioning
 
 
 def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):

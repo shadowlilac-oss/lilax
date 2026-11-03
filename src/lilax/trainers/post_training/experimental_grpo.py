@@ -16,7 +16,7 @@ from lilax._backend.common.profiler import xprof_server
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.experimental.rl import grpo_trainer
 from lilax._backend.utils import train_utils
-from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.observability.diagnostics import system_info
 from ..telemetry.reporting import MetricReporter
 from ..arguments.training_args import TrainingArguments
 

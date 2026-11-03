@@ -13,8 +13,8 @@ import torch
 
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import param_key_parts_from_path
-from lilax._backend.utils import device_mesh
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.distributed import device_mesh
+from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.utils.model_creation.nnx_abstract_model import create_nnx_abstract_model
 
 

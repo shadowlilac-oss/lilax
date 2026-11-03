@@ -17,7 +17,7 @@ from lilax._backend.configs import types
 from lilax._backend.configs.multimodal_fields import Multimodal
 from lilax._backend.inference.inference_utils import str2bool
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.jax_distributed import initialization
+from lilax._backend.distributed.jax_distributed import initialization
 from lilax._backend.utils.globals import HF_IDS, MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 
 
@@ -35,7 +35,7 @@ _CONFIG_FILE_MAPPING = {
     "inference.decode_multi": "base.yml",
     "inference.inference_microbenchmark": "base.yml",
     "inference.inference_microbenchmark_sweep": "base.yml",
-    "inference.maxengine.maxengine_server": "base.yml",
+    "inference.maxengine.server": "base.yml",
     "inference.mlperf.microbenchmarks.benchmark_chunked_prefill": "base.yml",
     "inference.vllm_decode": "base.yml",
     "checkpoint_conversion.to_maxtext": "base.yml",

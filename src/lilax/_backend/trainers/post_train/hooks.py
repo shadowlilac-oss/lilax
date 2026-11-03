@@ -13,8 +13,9 @@ from lilax._backend.input_pipeline.input_pipeline_interface import create_data_i
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import GoodputEvent, record_goodput
 from lilax._backend.common.metric_logger import MetricLogger, MetadataKey
-from lilax._backend.utils import exceptions, gcs_utils, max_logging, sharding
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.distributed import sharding
+from lilax._backend.utils import exceptions, gcs_utils, max_logging
+from lilax._backend.observability.diagnostics import pytree
 
 
 class GoodputTrainingHooks(TrainingHooks):

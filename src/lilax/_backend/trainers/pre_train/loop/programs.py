@@ -9,7 +9,9 @@ from lilax._backend.trainers.pre_train.moe.graphdefs import (
 )
 from lilax._backend.trainers.pre_train.steps.eval_step import eval_step
 from lilax._backend.trainers.pre_train.steps.train_step import train_step
-from lilax._backend.utils import elastic_utils, sharding, train_utils
+from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import sharding
+from lilax._backend.utils import train_utils
 
 
 def _split_graphdefs(config, model, state):

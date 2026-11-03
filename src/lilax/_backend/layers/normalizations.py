@@ -10,8 +10,8 @@ from jax.sharding import NamedSharding
 from lilax._backend.common.common_types import Array, DType, ShardMode, is_fp8_dtype
 from lilax._backend.layers.initializers import Initializer
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.device_memory import memory_kinds
-from lilax._backend.utils.sharding import truncate_out_sharding
+from lilax._backend.device_memory import memory_kinds
+from lilax._backend.distributed.sharding import truncate_out_sharding
 
 
 def align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:

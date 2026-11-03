@@ -15,7 +15,7 @@ from aqt.jax.v2.flax import aqt_flax
 
 from lilax._backend.common.common_types import Array, AxisNames, AxisIdxes, Config, CACHE_BATCH_PREFILL, DType, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, CACHE_HEADS_NONE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from lilax._backend.common.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV, CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV
-from lilax._backend.utils.sharding import with_logical_constraint
+from lilax._backend.distributed.sharding import with_logical_constraint
 
 
 MAX_INT8 = 127.5

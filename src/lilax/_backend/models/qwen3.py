@@ -36,7 +36,7 @@ from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.models.qwen3_next.gated_delta_net import Qwen3NextGatedDeltaNet
 from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations

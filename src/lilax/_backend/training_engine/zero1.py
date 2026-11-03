@@ -12,7 +12,7 @@ from lilax._backend.common import common_types
 from lilax._backend.training_engine import pure_state
 from lilax._backend.training_engine import state_placement
 from lilax._backend.training_engine.gradient_sharding import DATA_AXIS
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 _ZERO1_DECLINED_WARNING = (
     "`shard_optimizer_over_data` (Zero-1) is set, but this engine cannot honour it (%s), so the "

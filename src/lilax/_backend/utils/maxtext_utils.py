@@ -13,8 +13,9 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.common_types import ReorderStrategy
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.optimizers.schedules import create_learning_rate_schedule
-from lilax._backend.utils import max_logging, sharding
-from lilax._backend.utils.context_parallel import sequence_reorder
+from lilax._backend.utils import max_logging
+from lilax._backend.distributed import sharding
+from lilax._backend.layers.context_parallel import sequence_reorder
 
 OVERWRITE_WITH_GRADIENT = "_overwrite_with_gradient"
 

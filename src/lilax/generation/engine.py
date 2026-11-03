@@ -4,7 +4,8 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.inference.maxengine.maxengine import ExistingPrefix, MaxEngineConfig
+from lilax._backend.inference.maxengine.engine_config import MaxEngineConfig
+from lilax._backend.inference.maxengine.maxengine import ExistingPrefix
 from lilax._backend.inference.maxengine.maxengine import MaxEngine as NativeMaxEngine
 from lilax.configuration import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime

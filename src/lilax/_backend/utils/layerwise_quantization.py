@@ -12,7 +12,8 @@ import orbax.checkpoint as ocp
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import common_types
 from lilax._backend.layers.quantization.configure import configure_quantization
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging, maxtext_utils_nnx
 from lilax._backend.utils.model_creation import model_factory, pretrained
 
 IGNORE = ocp.PLACEHOLDER

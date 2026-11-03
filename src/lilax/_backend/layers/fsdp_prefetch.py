@@ -27,7 +27,8 @@ from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils import max_logging, maxtext_utils_nnx, sharding
+from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.distributed import sharding
 
 
 def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):

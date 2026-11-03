@@ -5,6 +5,7 @@ from flax import nnx
 from grain import experimental as grain_experimental
 import jax
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import full_state_restore
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
 from lilax._backend.utils import elastic_utils, max_logging
@@ -203,7 +204,7 @@ def _load_snapshot(snapshotter: Snapshotter, abstract_state: nnx.State, config, 
   }
   restored = snapshotter.load(target)
   items = _restore_original_shardings(restored["items"], target_items)
-  state = checkpointing.restored_linen_to_nnx(items, abstract_state, config=config)
+  state = full_state_restore.restored_linen_to_nnx(items, abstract_state, config=config)
   return state, restored["data_iterator"]
 
 

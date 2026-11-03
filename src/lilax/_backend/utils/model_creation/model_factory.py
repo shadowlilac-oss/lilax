@@ -14,7 +14,8 @@ from lilax._backend.layers import nnx_wrappers
 from lilax._backend.layers.quantization.configure import configure_quantization
 from lilax._backend.layers.quantization.qwix_model import maybe_quantize_model
 from lilax._backend.models import models
-from lilax._backend.utils import device_mesh, maxtext_utils_nnx
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import maxtext_utils_nnx
 
 
 @overload

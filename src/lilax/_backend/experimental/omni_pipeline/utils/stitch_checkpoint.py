@@ -8,8 +8,9 @@ import jax
 from orbax import checkpoint as ocp
 
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.utils.model_creation import model_factory
 
 

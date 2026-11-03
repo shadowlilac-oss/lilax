@@ -15,8 +15,8 @@ from lilax._backend.trainers.pre_train.steps.train_metrics import (
     loss_scalar_metrics, train_step_metrics, update_norm_metrics, update_skip_step_metric,
 )
 from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx, qk_clip_utils
-from lilax._backend.utils.device_memory import memory_kinds
-from lilax._backend.utils.tree_ops import numerics
+from lilax._backend.device_memory import memory_kinds
+from lilax._backend.pytree import numerics
 
 
 def _apply_gradients(config, state_mesh_shardings, state, grads, loss):

@@ -3,7 +3,7 @@
 from typing import Optional
 
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
-from lilax._backend.utils.context_parallel import mask_reorder
+from lilax._backend.layers.context_parallel import mask_reorder
 import numpy as np
 
 

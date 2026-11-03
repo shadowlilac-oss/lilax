@@ -9,7 +9,7 @@ from jax.sharding import Mesh
 from flax import nnx
 
 from lilax._backend.common.common_types import ShardMode, Array, DType
-from lilax._backend.utils.sharding import create_sharding
+from lilax._backend.distributed.sharding import create_sharding
 
 
 def _cis(theta: Array) -> Array:

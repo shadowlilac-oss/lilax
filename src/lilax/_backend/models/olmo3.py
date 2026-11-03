@@ -16,7 +16,7 @@ from lilax._backend.layers.linears import MlpBlock
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.sharding import with_logical_constraint
+from lilax._backend.distributed.sharding import with_logical_constraint
 
 
 OLMO3_ATTENTION_PATTERN = (

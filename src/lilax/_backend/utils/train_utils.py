@@ -23,19 +23,19 @@ from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.input_pipeline.input_pipeline_interface import create_data_iterator
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import diloco_sharding
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 from lilax._backend.utils import state_abstraction
-from lilax._backend.utils.context_parallel import sequence_reorder
-from lilax._backend.utils.diagnostics import mesh_report
-from lilax._backend.utils.diagnostics import sharding_report
+from lilax._backend.layers.context_parallel import sequence_reorder
+from lilax._backend.observability.diagnostics import mesh_report
+from lilax._backend.observability.diagnostics import sharding_report
 from lilax._backend.utils.model_creation import nnx_abstract_model
-from lilax._backend.utils.te_integration import moe_bootstrap
+from lilax._backend.integration.transformer_engine import moe_bootstrap
 from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
 from lilax._backend.utils.training.rampup_batch import create_rampup_manager

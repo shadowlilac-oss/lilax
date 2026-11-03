@@ -9,8 +9,9 @@ import jax
 from jax.sharding import NamedSharding
 
 from lilax._backend.common import state_initialization
-from lilax._backend.utils import maxtext_utils_nnx, sharding
-from lilax._backend.utils.tree_ops import partitioning
+from lilax._backend.utils import maxtext_utils_nnx
+from lilax._backend.distributed import sharding
+from lilax._backend.pytree import partitioning
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):

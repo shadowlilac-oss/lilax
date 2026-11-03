@@ -38,8 +38,9 @@ from lilax._backend.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRoll
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.rl import utils_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import evaluate
-from lilax._backend.utils import device_mesh, max_logging
-from lilax._backend.utils.rl_setup.rollout_parallelism import get_rollout_kwargs_for_parallelism
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging
+from lilax._backend.trainers.post_train.rl.setup.rollout_parallelism import get_rollout_kwargs_for_parallelism
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from lilax.configuration.loading import load_config_values
 

@@ -41,7 +41,7 @@ from lilax._backend.configs.checkpointing_fields import Checkpointing, Emergency
 from lilax._backend.configs.precision_fields import DataTypes
 from lilax._backend.configs.quantization_fields import Quantization
 from lilax._backend.configs.model_architecture_fields import ModelArchitecture
-from lilax._backend.configs.mtp_fields import MTP
+from lilax._backend.configs.mtp.fields import MTP
 from lilax._backend.configs.logits_fields import LogitsAndLoss
 from lilax._backend.configs.moe_fields import MoEGeneral
 from lilax._backend.configs.moe_kernel_fields import MoEKernels
@@ -69,12 +69,12 @@ from lilax._backend.configs.elastic_fields import ElasticTraining
 from lilax._backend.configs.multimodal_fields import AudioEncoder, MultimodalGeneral, VisionProjector, VisionTower
 from lilax._backend.configs.vllm_fields import VLLM
 from lilax._backend.configs.rl_fields import RL, RLCluster, RLDataset, RLEvaluation, RLReward, RLSpecialTokens
-from lilax._backend.configs.engram_fields import Engram
+from lilax._backend.configs.engram.fields import Engram
 from lilax._backend.configs.derived_fields import DerivedValues
 from lilax._backend.configs.model_scaling import get_individual_scales
-from lilax._backend.configs.mtp_validation import validate_mtp_main_hidden_state
+from lilax._backend.configs.mtp.validation import validate_mtp_main_hidden_state
 from lilax._backend.configs.training_quantization_validation import validate_training_quantization
-from lilax._backend.configs.engram_validation import validate_engram
+from lilax._backend.configs.engram.validation import validate_engram
 from lilax._backend.configs.moe_architecture_validation import validate_moe_architecture
 from lilax._backend.configs.moe_kernel_validation import validate_gmm_v2, validate_moe_kernel_options
 from lilax._backend.configs.diloco_settings import (
@@ -92,7 +92,7 @@ from lilax._backend.utils import max_logging
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from lilax._backend.utils import accelerator_to_spec_map
-from lilax._backend.utils.mesh_topology import slice_count
+from lilax._backend.distributed.mesh_topology import slice_count
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import model_validator

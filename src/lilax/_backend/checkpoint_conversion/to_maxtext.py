@@ -26,7 +26,8 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
 )
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs.types import DType
-from lilax._backend.utils import device_mesh, max_logging
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging
 from lilax._backend.utils.globals import HF_IDS
 from lilax._backend.utils.model_creation import nnx_abstract_model
 

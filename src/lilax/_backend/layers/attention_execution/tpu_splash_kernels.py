@@ -16,7 +16,7 @@ from lilax._backend.kernels.attention import tokamax_ring_attention
 from lilax._backend.layers.attention_execution.tokamax_splash import tokamax_splash_kernel, tokamax_splash_mask
 from lilax._backend.layers.attention_execution.tpu_splash_tuning import SplashBlockSizes, SplashTuning
 from lilax._backend.layers.attention_masks import splash_mask_policy
-from lilax._backend.utils.sharding import logical_to_spec
+from lilax._backend.distributed.sharding import logical_to_spec
 
 # Number of in-kernel dQ reduction steps used for AttentionType.COMPRESSED.
 #

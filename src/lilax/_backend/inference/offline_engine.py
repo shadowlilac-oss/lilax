@@ -21,7 +21,7 @@ from lilax._backend.inference.maxengine.maxengine import MaxEngine
 from lilax._backend.input_pipeline.packing.prefill_packing import PrefillProcessor
 from lilax._backend.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.mesh_topology import mesh_axes
+from lilax._backend.distributed.mesh_topology import mesh_axes
 
 DecodeState = Any
 Params = Any

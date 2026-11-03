@@ -7,7 +7,7 @@ import dataclasses
 from typing import Any
 
 import jax
-from lilax._backend.utils.xla_options import libtpu_flags
+from lilax._backend.compiler.xla_options import libtpu_flags
 
 KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
 

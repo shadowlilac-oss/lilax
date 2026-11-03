@@ -13,9 +13,9 @@ import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
 from lilax._backend.training_engine import abstract_engine
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.diagnostics import config_summary
-from lilax._backend.utils.diagnostics import pytree
-from lilax._backend.utils.tensorboard_logging import summary_writing
+from lilax._backend.observability.tensorboard_logging import config_summary
+from lilax._backend.observability.diagnostics import pytree
+from lilax._backend.observability.tensorboard_logging import summary_writing
 import numpy as np
 
 _METRICS_TO_LOG = ["learning_rate", "loss", "perplexity", "total_weights", "gradient_norm", "step_skipped", "step_time", "tflops"]

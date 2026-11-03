@@ -71,9 +71,9 @@ from lilax._backend.layers.attention_execution.gpu_flash_validation import valid
 from lilax._backend.layers.attention_execution.tpu_splash_tuning import SplashTuning, select_block_sizes
 from lilax._backend.layers.attention_masks import dense_masks
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
-from lilax._backend.utils.context_parallel import sequence_reorder
-from lilax._backend.utils.kernel_tiling import eval_tiles
-from lilax._backend.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
+from lilax._backend.layers.context_parallel import sequence_reorder
+from lilax._backend.kernels.tiling import eval_tiles
+from lilax._backend.distributed.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

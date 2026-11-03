@@ -5,7 +5,7 @@ import enum
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_sort
+from lilax._backend.kernels.ragged.sort import a2a_ragged_sort
 from lilax._backend.layers.moe_ops.dispatch import sorting
 
 

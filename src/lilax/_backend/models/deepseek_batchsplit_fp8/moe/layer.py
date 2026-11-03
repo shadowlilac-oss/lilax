@@ -10,7 +10,7 @@ from lilax._backend.models.deepseek_batchsplit_fp8.moe.experts import compute, s
 from lilax._backend.models.deepseek_batchsplit_fp8.moe.gating import expert_selection
 from lilax._backend.models.deepseek_batchsplit_fp8.sharding import with_data_parallel_constraint
 from lilax._backend.models.deepseek_batchsplit_fp8.staggering import staggered_call
-from lilax._backend.utils.sharding import logical_to_spec
+from lilax._backend.distributed.sharding import logical_to_spec
 
 
 def moe(

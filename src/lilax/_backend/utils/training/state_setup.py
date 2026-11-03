@@ -9,7 +9,7 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.trainers.diloco import diloco
-from lilax._backend.trainers.diloco import utils as diloco_utils
+from lilax._backend.trainers.diloco import sync as diloco_utils
 from lilax._backend.utils import state_abstraction
 
 

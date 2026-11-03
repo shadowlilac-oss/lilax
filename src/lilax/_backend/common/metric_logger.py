@@ -39,9 +39,9 @@ from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import elastic_utils
-from lilax._backend.utils.diagnostics import config_summary
-from lilax._backend.utils.diagnostics import pytree
-from lilax._backend.utils.tensorboard_logging import summary_writing
+from lilax._backend.observability.tensorboard_logging import config_summary
+from lilax._backend.observability.diagnostics import pytree
+from lilax._backend.observability.tensorboard_logging import summary_writing
 from collections import defaultdict
 
 

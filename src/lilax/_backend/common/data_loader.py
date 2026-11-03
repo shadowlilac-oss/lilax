@@ -22,7 +22,7 @@ from lilax._backend.common.goodput import GoodputEvent, maybe_record_goodput
 from lilax._backend.utils import diloco_sharding
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import exceptions
-from lilax._backend.utils.sharding import get_input_data_sharding
+from lilax._backend.distributed.sharding import get_input_data_sharding
 
 
 @contextlib.contextmanager

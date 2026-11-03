@@ -26,7 +26,7 @@ from lilax._backend.common.common_types import (
 )
 from lilax._backend.inference.kvcache import KVQuant, KVTensor
 from lilax._backend.layers.attention_masks import dense_masks
-from lilax._backend.utils.sharding import with_logical_constraint
+from lilax._backend.distributed.sharding import with_logical_constraint
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:

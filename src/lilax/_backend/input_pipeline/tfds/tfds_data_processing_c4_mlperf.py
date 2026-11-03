@@ -29,7 +29,7 @@ from lilax._backend.input_pipeline.protos import example_pb2
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.input_pipeline.packing import sequence_packing
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.sharding import remove_size_one_mesh_axis
+from lilax._backend.distributed.sharding import remove_size_one_mesh_axis
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

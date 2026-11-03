@@ -1,7 +1,7 @@
 """Grouped matmul weight-gather axes for the DeepSeek FP8 batch-split routed experts."""
 
 from lilax._backend.layers import moe as moe_lib
-from lilax._backend.utils.sharding import logical_to_spec
+from lilax._backend.distributed.sharding import logical_to_spec
 
 
 def gmm_weight_gather_axes(config, mesh):

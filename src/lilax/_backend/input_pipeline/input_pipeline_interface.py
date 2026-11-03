@@ -14,7 +14,7 @@ from lilax._backend.input_pipeline.olmo.olmo_grain_data_processing import (
 )
 from lilax._backend.input_pipeline.synthetic_data_processing import SyntheticDataIterator, PlaceHolderDataIterator
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.sharding import remove_size_one_mesh_axis
+from lilax._backend.distributed.sharding import remove_size_one_mesh_axis
 
 
 def get_process_loading_real_data(

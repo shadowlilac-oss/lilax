@@ -7,7 +7,7 @@ from typing import Any
 
 import jax
 from lilax._backend.common import common_types
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 DATA_AXIS = "data"
 

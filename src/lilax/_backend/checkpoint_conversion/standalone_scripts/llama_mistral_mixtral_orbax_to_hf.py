@@ -7,7 +7,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM, Mis
 from lilax._backend.checkpoint_conversion.standalone_scripts.llama_ckpt_conversion_inference_only import MODEL_PARAMS_DICT
 from lilax._backend.checkpoint_conversion.utils.rope_permutation import unpermute_from_match_maxtext_rope
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils.generate_param_only_checkpoint import _read_train_checkpoint
 
 

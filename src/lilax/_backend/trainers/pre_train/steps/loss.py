@@ -13,9 +13,10 @@ from lilax._backend.layers.attention_mla import indexer_losses
 from lilax._backend.layers.multi_token_prediction import calculate_mtp_loss, mtp_acceptance, mtp_losses
 from lilax._backend.trainers.pre_train.moe.bias import collect_moe_bias_updates
 from lilax._backend.trainers.pre_train.moe.capacity_aux import update_moe_capacity_aux
-from lilax._backend.utils import max_logging, maxtext_utils, sharding
+from lilax._backend.utils import max_logging, maxtext_utils
+from lilax._backend.distributed import sharding
 from lilax._backend.utils.globals import EPS
-from lilax._backend.utils.losses import cross_entropy
+from lilax._backend.losses import cross_entropy
 from lilax._backend.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
 

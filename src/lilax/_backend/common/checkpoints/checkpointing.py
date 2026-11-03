@@ -2,8 +2,6 @@
 
 import collections
 import contextlib
-import dataclasses
-import importlib
 import os
 import time
 from typing import Any
@@ -14,20 +12,25 @@ from flax.nnx import variablelib
 from flax.training import train_state
 import jax
 from jax.experimental import multihost_utils
-import jax.numpy as jnp
 from lilax._backend.checkpoint_conversion.utils import load_dynamic
 from lilax._backend.common.checkpoints import checkpoint_context, emergency_checkpointing, grain_utility, snapshotting
+from lilax._backend.common.checkpoints.flat_moe import _flat_moe_convert, _flat_moe_restore_plan
+from lilax._backend.common.checkpoints.full_state_restore import _load_full_state_from_path, restored_linen_to_nnx
+from lilax._backend.common.checkpoints.linen_compatibility import (
+    _alias_legacy_collections, _deep_merge_dicts, _log_unconsumed_checkpoint_weights, _lookup_path,
+    _raise_on_weight_mismatch, _raise_weight_problems, _unalias_legacy_collections, _weight_mismatches,
+)
+from lilax._backend.common.checkpoints.lora_filter import _filter_lora_trainable_state
+from lilax._backend.common.checkpoints.quantized_restore import _augment_want_with_scales, maybe_dequantize_restored_params
+from lilax._backend.common.checkpoints.restore_source_types import RestoreSource, _normalize_checkpoint_root
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
-from lilax._backend.layers.quantization.weights import dequantize_weight
-from lilax._backend.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
+from lilax._backend.trainers.diloco import checkpointing as diloco_checkpoint_utils
 from lilax._backend.utils import elastic_utils, exceptions, gcs_utils
 from lilax._backend.utils import globals as maxtext_globals
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import sharding as maxtext_sharding
 from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
-from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
 load_safetensors_dynamic_state = load_dynamic.load_safetensors_dynamic_state
 PlaceHolderDataIterator = synthetic_data_processing.PlaceHolderDataIterator
@@ -38,209 +41,6 @@ EmergencyReplicatorCheckpointManager = emergency_checkpointing.ReplicatorCheckpo
 create_orbax_emergency_checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager
 create_orbax_emergency_replicator_checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager
 CheckpointManager = ocp.training.Checkpointer | EmergencyCheckpointManager | EmergencyReplicatorCheckpointManager
-
-
-def _deep_merge_dicts(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
-  out = dict(target)
-  for key, value in source.items():
-    if key in out and isinstance(out[key], dict) and isinstance(value, dict):
-      out[key] = _deep_merge_dicts(out[key], value)
-    else:
-      out[key] = value
-  return out
-
-
-def _weight_mismatches(want, have, path=(), check_missing: bool = True, is_quantized_param: bool = False):
-  if isinstance(want, dict):
-    out = []
-    is_quant = is_quantized_param or any(key in want for key in ("qvalue", "qarray"))
-    for key, value in want.items():
-      nested = have.get(key) if isinstance(have, dict) else None
-      if check_missing or nested is not None:
-        out.extend(_weight_mismatches(value, nested, path + (key,), check_missing=check_missing, is_quantized_param=is_quant))
-    return out
-  name = "/".join(str(part) for part in path)
-  is_missing = have is None or (check_missing and isinstance(have, jax.ShapeDtypeStruct))
-  if is_missing and ("lora_a" in name or "lora_b" in name or "rngs" in path or "rng" in path):
-    return []
-  if is_missing and is_quantized_param:
-    return []
-  if is_missing:
-    return [(name, f"missing (model expects {getattr(want, 'shape', '?')} {getattr(want, 'dtype', '?')})")] if check_missing else []
-  want_shape, got_shape = getattr(want, "shape", None), getattr(have, "shape", None)
-  if want_shape is not None and got_shape is None:
-    return [(name, f"structural mismatch: model expects a tensor but checkpoint provides {type(have).__name__}")]
-  if want_shape is not None and got_shape is not None and tuple(want_shape) != tuple(got_shape):
-    return [(name, f"shape {tuple(got_shape)} but the model expects {tuple(want_shape)}")]
-  return []
-
-
-def _lookup_path(tree, path):
-  node = tree
-  for key in path:
-    if not isinstance(node, dict) or key not in node:
-      return None
-    node = node[key]
-  return node
-
-
-def _alias_legacy_collections(params_collection, stored_collection_meta):
-  if not isinstance(stored_collection_meta, dict) or not stored_collection_meta:
-    return params_collection, {}
-  stored_params = stored_collection_meta.get("params")
-  if not isinstance(stored_params, dict):
-    return params_collection, {}
-  patched = dict(params_collection)
-  params_flat = dict(nnx.traversals.flatten_mapping(patched.get("params", {})))
-  aliased = {}
-  for col, tree in params_collection.items():
-    if col == "params" or col in stored_collection_meta or not isinstance(tree, dict):
-      continue
-    tree_flat = dict(nnx.traversals.flatten_mapping(tree))
-    moved = []
-    for path, leaf in tree_flat.items():
-      if _lookup_path(stored_params, path) is None:
-        continue
-      params_flat[path] = leaf
-      moved.append(path)
-    if moved:
-      aliased[col] = moved
-      moved_set = set(moved)
-      remaining = {path: value for path, value in tree_flat.items() if path not in moved_set}
-      if remaining:
-        patched[col] = nnx.traversals.unflatten_mapping(remaining)
-      else:
-        patched.pop(col, None)
-      max_logging.log(
-          f"Checkpoint predates the '{col}' collection; restoring its {len(moved)} weight(s) "
-          "from the 'params' collection instead of skipping them."
-      )
-  if aliased:
-    patched["params"] = nnx.traversals.unflatten_mapping(params_flat)
-  return patched, aliased
-
-
-def _unalias_legacy_collections(restored_collection, aliased):
-  if not aliased or not isinstance(restored_collection, dict):
-    return restored_collection
-  out = dict(restored_collection)
-  params_flat = dict(nnx.traversals.flatten_mapping(out.get("params", {})))
-  for col, paths in aliased.items():
-    col_flat = dict(nnx.traversals.flatten_mapping(out.get(col, {})))
-    for path in paths:
-      if path in params_flat:
-        col_flat[path] = params_flat.pop(path)
-    if col_flat:
-      out[col] = nnx.traversals.unflatten_mapping(col_flat)
-  out["params"] = nnx.traversals.unflatten_mapping(params_flat)
-  return out
-
-
-def _log_unconsumed_checkpoint_weights(want, stored_collection):
-  if not isinstance(want, dict) or not isinstance(stored_collection, dict):
-    return
-  try:
-    want_paths = set(nnx.traversals.flatten_mapping(want).keys())
-    stored_paths = set(nnx.traversals.flatten_mapping(stored_collection).keys())
-  except Exception:
-    return
-  unconsumed = sorted("/".join(str(part) for part in path) for path in stored_paths - want_paths)
-  if not unconsumed:
-    return
-  preview = ", ".join(unconsumed[:5])
-  max_logging.log(
-      f"WARNING: {len(unconsumed)} checkpoint weight(s) were not requested by the model and "
-      f"will be ignored (the model will use its initialised values). First few: {preview}"
-  )
-
-
-def _expected_and_restored_params(abstract_nnx_state, restored_linen):
-  want = nnx.split_state(abstract_nnx_state, nnx.Param, ...)[0].to_pure_dict().get("model", {})
-  have = restored_linen.get("params", {}).get("params", {})
-  return want, have
-
-
-def _raise_weight_problems(problems):
-  if not problems:
-    return
-  lines = "\n".join(f"  - '{path}': {reason}" for path, reason in problems)
-  raise ValueError(
-      "Checkpoint does not match the model:\n"
-      f"{lines}\n"
-      "Verify the checkpoint matches the model architecture (emb_dim, mlp_dim, num layers, scan_layers)."
-  )
-
-
-def _is_custom_projector_problem(path: str, want: dict) -> bool:
-  parts = [part for part in path.replace(".", "/").split("/") if part and part != "params"]
-  if len(parts) >= 2 and parts[0] == "vision_encoder":
-    proj_name = parts[1]
-    proj_dict = want.get("vision_encoder", {}).get(proj_name, {})
-    if isinstance(proj_dict, dict) and any("custom_linear" in key for key in proj_dict.keys()):
-      max_logging.warning(
-          f"===Warning: weight mismatch found in custom vision projector: {proj_name}.\n"
-          f"Path: {path}\n"
-          "This custom vision projector will be initialized with random weights.==="
-      )
-      return True
-  return False
-
-
-def _raise_on_weight_mismatch(want, have, config=None):
-  if config and getattr(getattr(config, "lora", None), "enable_lora", False):
-    want = _filter_lora_trainable_state(want)
-  problems = _weight_mismatches(want, have)
-  problems = [(path, reason) for path, reason in problems if not _is_custom_projector_problem(path, want)]
-  _raise_weight_problems(problems)
-
-
-def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
-  linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_nnx_state)
-  weights = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
-  if "model" in weights:
-    nnx.replace_by_pure_dict(linen_state, {"model": weights["model"]})
-  if "optimizer" in weights:
-    nnx.replace_by_pure_dict(linen_state, {"optimizer": weights["optimizer"]})
-  nnx_aux = restored_linen.get("nnx_aux")
-  if nnx_aux:
-    train_state_nnx.apply_checkpoint_aux(aux_state, nnx_aux)
-  elif isinstance(restored_linen.get("params"), dict):
-    custom_collections = {key: value for key, value in restored_linen["params"].items() if key != "params" and isinstance(value, dict)}
-    if custom_collections:
-      merged_custom = {}
-      for col_data in custom_collections.values():
-        merged_custom = _deep_merge_dicts(merged_custom, col_data)
-      train_state_nnx.apply_checkpoint_aux(aux_state, {"model": merged_custom})
-  return nnx.merge_state(linen_state, aux_state, ephemeral)
-
-
-def _load_linen_checkpoint_into_nnx(
-    path, abstract_nnx_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3,
-    enable_single_replica_ckpt_restoring: bool = False, config=None,
-):
-  max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
-  if config and getattr(config, "enable_diloco", False):
-    return diloco_checkpoint_utils.restore_diloco_checkpoint(
-        path, abstract_nnx_state, checkpoint_storage_concurrent_gb, use_ocdbt=use_ocdbt, use_zarr3=use_zarr3, config=config
-    )
-  linen_abstract = train_state_nnx.to_checkpoint_dict(abstract_nnx_state)
-  if config and getattr(getattr(config, "lora", None), "enable_lora", False):
-    linen_abstract = _filter_lora_trainable_state(linen_abstract, preserve_optimizer=True)
-  context = checkpoint_context.build_context(
-      use_ocdbt=use_ocdbt, use_zarr3=use_zarr3, checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
-      partial_load=True, enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
-      colocated_python_checkpointing=bool(getattr(config, "colocated_python_checkpointing", False)),
-  )
-  root = epath.Path(_normalize_checkpoint_root(path))
-  with context:
-    checkpointable_name = "items" if (root / "items").exists() else None
-    restored = ocp.load(root, linen_abstract, checkpointable_name=checkpointable_name)
-  return restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
-
-
-def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
-  _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
-  return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
 
 def _abstract_params(abstract_unboxed_pre_state):
@@ -255,70 +55,6 @@ def _abstract_params(abstract_unboxed_pre_state):
 
 def _bare_weights(tree):
   return tree["params"] if isinstance(tree, dict) and len(tree) == 1 and "params" in tree else tree
-
-
-def _resolve_conversion_fn(checkpoint_conversion_fn):
-  if checkpoint_conversion_fn is None:
-    raise ValueError(
-        "source_checkpoint_layout='safetensors' needs `checkpoint_conversion_fn` to map the "
-        "checkpoint's weights onto the model's, e.g. checkpoint_conversion_fn=my_pkg.my_module.my_fn."
-    )
-  if callable(checkpoint_conversion_fn):
-    return checkpoint_conversion_fn
-  module_name, _, fn_name = str(checkpoint_conversion_fn).rpartition(".")
-  if not module_name:
-    raise ValueError(f"`checkpoint_conversion_fn` must be a dotted path to a function, got {checkpoint_conversion_fn!r}.")
-  try:
-    fn = getattr(importlib.import_module(module_name), fn_name, None)
-  except ImportError as error:
-    raise ValueError(f"Could not import `checkpoint_conversion_fn` {checkpoint_conversion_fn!r}: {error}") from error
-  if not callable(fn):
-    raise ValueError(f"`checkpoint_conversion_fn` {checkpoint_conversion_fn!r} is not a function.")
-  return fn
-
-
-def _load_full_state_from_path(
-    path, abstract_unboxed_pre_state, checkpoint_conversion_fn, source_checkpoint_layout,
-    checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3, enable_single_replica_ckpt_restoring: bool = False,
-    maxtext_config=None,
-):
-  if source_checkpoint_layout == "orbax":
-    if isinstance(abstract_unboxed_pre_state, nnx.State):
-      return _load_linen_checkpoint_into_nnx(
-          path, abstract_unboxed_pre_state, checkpoint_storage_concurrent_gb, use_ocdbt, use_zarr3,
-          enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring, config=maxtext_config,
-      )
-    context = checkpoint_context.build_context(
-        use_ocdbt=use_ocdbt, use_zarr3=use_zarr3, checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
-        checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
-        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
-        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
-    )
-    with context:
-      return ocp.load(path, abstract_unboxed_pre_state)
-  if source_checkpoint_layout == "safetensors":
-    if enable_single_replica_ckpt_restoring:
-      max_logging.warning("enable_single_replica_ckpt_restoring is not supported for safetensors layout.")
-    conversion_fn = _resolve_conversion_fn(checkpoint_conversion_fn)
-    context = checkpoint_context.build_context(
-        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
-        checkpoint_layout=ocp.options.CheckpointLayout.SAFETENSORS,
-    )
-    with context:
-      metadata = ocp.metadata(path)
-      simple_abstract_state = metadata.metadata
-      shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state)
-
-      def combine_sharding(sds, shardings):
-        return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=shardings)
-
-      sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
-      pre_transformed_state = ocp.load(path, sharded_abstract_state)
-    state = conversion_fn(pre_transformed_state)
-    if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
-      state = restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
-    return state
-  raise ocp.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
 
 
 def create_orbax_checkpoint_manager(
@@ -398,64 +134,6 @@ def reached_preemption(checkpoint_manager, step: int) -> bool:
   if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
     return checkpoint_manager.reached_preemption(step)
   return multihost_utils.reached_preemption_sync_point(step)
-
-
-def _normalize_checkpoint_root(path_str):
-  path_str = str(path_str).rstrip("/")
-  if path_str == "items":
-    return "."
-  return path_str.removesuffix("/items")
-
-
-@dataclasses.dataclass(frozen=True)
-class RestoreSource:
-  kind: str
-  path: str | None = None
-  step: int | None = None
-  layout: str | None = None
-  manager: Any = dataclasses.field(default=None, repr=False, compare=False)
-
-
-def select_restore_source(
-    checkpoint_manager, load_parameters_from_path, load_full_state_from_path, *, step=-1,
-    source_checkpoint_layout="orbax", snapshotter=None,
-):
-  if snapshotting.should_restore_snapshot(snapshotter, checkpoint_manager):
-    return RestoreSource("snapshot", step=snapshotting.latest_snapshot_step(snapshotter))
-  if checkpoint_manager is not None:
-    if step >= 0 and step not in all_steps(checkpoint_manager):
-      raise ValueError(f"Checkpoint step {step} was not found in the checkpoint manager.")
-    selected_step = latest_step(checkpoint_manager) if step < 0 else step
-    if selected_step is not None:
-      if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
-        return RestoreSource("manager", step=selected_step, manager=checkpoint_manager)
-      metadata = checkpoint_manager.checkpointables_metadata(selected_step)
-      return RestoreSource("manager", path=str(metadata.path), step=selected_step, manager=checkpoint_manager)
-  parameters_path = _normalize_checkpoint_root(load_parameters_from_path) if load_parameters_from_path else ""
-  full_state_path = _normalize_checkpoint_root(load_full_state_from_path) if load_full_state_from_path else ""
-  if source_checkpoint_layout == "safetensors_dynamic":
-    return RestoreSource("dynamic", path=parameters_path or full_state_path, layout=source_checkpoint_layout)
-  if parameters_path:
-    return RestoreSource("parameters", path=parameters_path, layout=source_checkpoint_layout)
-  if full_state_path:
-    return RestoreSource("full_state", path=full_state_path, layout=source_checkpoint_layout)
-  return RestoreSource("none")
-
-
-def read_training_graph_metadata(source: RestoreSource):
-  if source.kind == "manager" and source.path is not None:
-    metadata = ocp.checkpointables_metadata(epath.Path(source.path))
-  elif source.kind == "full_state" and source.layout == "orbax":
-    metadata = ocp.checkpointables_metadata(epath.Path(source.path))
-  else:
-    return None
-  custom_metadata = metadata.custom_metadata or {}
-  if "maxtext_easy_training_graph" not in custom_metadata:
-    return None
-  record = custom_metadata["maxtext_easy_training_graph"]
-  if record is None:
-    raise ValueError("Invalid null maxtext_easy_training_graph checkpoint metadata.")
-  return record
 
 
 def load_state_if_possible(
@@ -597,125 +275,6 @@ def setup_checkpoint_logger(config) -> Any | None:
   return orbax_cloud_logger
 
 
-def _scale_sharding(weight_sharding, scale_shape):
-  mesh = getattr(weight_sharding, "mesh", None)
-  if mesh is None:
-    return None
-  spec = getattr(weight_sharding, "spec", None)
-  scale_shape = tuple(scale_shape)
-  if spec is None or len(spec) != len(scale_shape):
-    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-  try:
-    return jax.sharding.NamedSharding(mesh, maxtext_sharding.adjust_pspec_for_indivisible_shapes(spec, scale_shape, mesh))
-  except Exception:
-    return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
-
-
-def _augment_target_with_scales(want_node: Any, meta_node: Any) -> Any:
-  if not isinstance(want_node, dict) or not isinstance(meta_node, dict):
-    return want_node
-  augmented = {}
-  for key, value in want_node.items():
-    scale_key = f"{key}_scale"
-    if isinstance(value, dict):
-      augmented[key] = _augment_target_with_scales(value, meta_node.get(key))
-    elif scale_key not in want_node and scale_key in meta_node:
-      meta_scale = meta_node[scale_key]
-      meta_param = meta_node.get(key)
-      param_dtype = getattr(meta_param, "dtype", getattr(value, "dtype", jnp.bfloat16))
-      weight_sharding = getattr(value, "sharding", None)
-      augmented[key] = jax.ShapeDtypeStruct(shape=value.shape, dtype=param_dtype, sharding=weight_sharding)
-      augmented[scale_key] = jax.ShapeDtypeStruct(
-          shape=meta_scale.shape, dtype=meta_scale.dtype, sharding=_scale_sharding(weight_sharding, meta_scale.shape)
-      )
-    else:
-      augmented[key] = value
-  return augmented
-
-
-def _augment_want_with_scales(want: Any, stored: Any, is_nnx: bool, restore_key: str) -> Any:
-  if not isinstance(stored, dict) or not isinstance(want, dict):
-    return want
-  meta_weights = stored.get(restore_key)
-  if restore_key == "params" and is_nnx and isinstance(meta_weights, dict):
-    meta_weights = meta_weights.get("params")
-  if not is_nnx and "params" in want and isinstance(meta_weights, dict) and "params" not in meta_weights:
-    return {"params": _augment_target_with_scales(want["params"], meta_weights)}
-  return _augment_target_with_scales(want, meta_weights)
-
-
-def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytree: Any) -> Any:
-  if not isinstance(restored_weights, dict):
-    return restored_weights
-  expected_dict = expected_param_pytree if isinstance(expected_param_pytree, dict) else {}
-  scales_to_drop = {
-      f"{key}_scale" for key in restored_weights if f"{key}_scale" in restored_weights and f"{key}_scale" not in expected_dict
-  }
-  out = {}
-  for key, value in restored_weights.items():
-    if key in scales_to_drop:
-      continue
-    scale_key = f"{key}_scale"
-    if scale_key in scales_to_drop:
-      target_param = expected_dict.get(key)
-      target_dtype = getattr(target_param, "dtype", jnp.bfloat16)
-      out[key] = dequantize_weight(value, restored_weights[scale_key], compute_dtype=target_dtype)
-    elif isinstance(value, dict):
-      out[key] = maybe_dequantize_restored_params(value, expected_dict.get(key))
-    else:
-      out[key] = value
-  return out
-
-
-_FLAT_MOE_LEAVES = ("wi_0", "wi_1", "wo")
-
-
-def _flat_moe_restore_plan(want, stored_weights):
-  plan = {}
-
-  def _walk(want_node, stored_node, path):
-    if isinstance(want_node, dict):
-      for key, value in want_node.items():
-        _walk(value, stored_node.get(key) if isinstance(stored_node, dict) else None, path + (key,))
-      return
-    if not path or path[-1] not in _FLAT_MOE_LEAVES or stored_node is None:
-      return
-    want_shape = tuple(getattr(want_node, "shape", ()) or ())
-    stored_shape = tuple(getattr(stored_node, "shape", ()) or ())
-    if not want_shape or not stored_shape or want_shape == stored_shape or len(want_shape) != len(stored_shape) - 1:
-      return
-    if len(stored_shape) == 4:
-      experts, layers, rows, cols = stored_shape
-      flat_shape = (experts * rows, layers, cols)
-    elif len(stored_shape) == 3:
-      experts, rows, cols = stored_shape
-      flat_shape = (experts * rows, cols)
-    else:
-      return
-    if want_shape != flat_shape:
-      return
-    sharding = getattr(want_node, "sharding", None)
-    mesh = getattr(sharding, "mesh", None)
-    spec = getattr(sharding, "spec", None)
-    if mesh is None or spec is None:
-      return
-    dim0 = spec[0] if len(spec) > 0 else None
-    dim0_axes = () if dim0 is None else ((dim0,) if isinstance(dim0, str) else tuple(dim0))
-    expert_axis = dim0_axes[0] if len(dim0_axes) > 1 else None
-    rest = dim0_axes[1:] if len(dim0_axes) > 1 else dim0_axes
-    rest_spec = None if not rest else (rest[0] if len(rest) == 1 else rest)
-    tail = tuple(spec)[1:] + (None,) * max(0, len(flat_shape) - len(spec))
-    if len(stored_shape) == 4:
-      stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], rest_spec, tail[1])
-    else:
-      stored_spec = jax.sharding.PartitionSpec(expert_axis, rest_spec, tail[0])
-    stored_sds = jax.ShapeDtypeStruct(stored_shape, want_node.dtype, sharding=jax.sharding.NamedSharding(mesh, stored_spec))
-    plan[path] = (want_node, stored_sds)
-
-  _walk(want, stored_weights, ())
-  return plan
-
-
 def _set_path(tree, path, value):
   node = tree
   for key in path[:-1]:
@@ -726,30 +285,6 @@ def _set_path(tree, path, value):
     return False
   node[path[-1]] = value
   return True
-
-
-def _flat_moe_convert(x, target):
-  out_sharding = target.sharding
-  mesh = out_sharding.mesh
-  spec = tuple(out_sharding.spec) + (None,) * (len(target.shape) - len(out_sharding.spec))
-  if x.ndim == 4:
-    experts, layer_count, rows, cols = x.shape
-    layer_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(spec[0], spec[2]))
-
-    def _layer_fn(array, index):
-      return jax.lax.dynamic_index_in_dim(array, index, axis=1, keepdims=False).reshape(experts * rows, cols).astype(target.dtype)
-
-    layer_fn = jax.jit(_layer_fn, out_shardings=layer_sharding)
-    layers = [layer_fn(x, jnp.int32(index)) for index in range(layer_count)]
-    x.delete()
-    stacked = jax.jit(lambda *arrays: jnp.stack(arrays, axis=1), out_shardings=out_sharding)(*layers)
-    for layer in layers:
-      layer.delete()
-    return stacked
-  experts, rows, cols = x.shape
-  result = jax.jit(lambda array: array.reshape(experts * rows, cols).astype(target.dtype), out_shardings=out_sharding)(x)
-  x.delete()
-  return result
 
 
 def load_params_from_path(
@@ -968,33 +503,6 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   if checkpoint_saved:
     print_save_message(actual_step, config.async_checkpointing)
   _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
-
-
-def _filter_lora_trainable_state(state, preserve_optimizer=False):
-  def _lora_filter(path, val):
-    path_str = "/".join(str(part) for part in path).lower()
-    return isinstance(val, nnx.LoRAParam) or "lora" in path_str or "step" in path_str
-
-  if isinstance(state, (nnx.State, nnx.Module)):
-    return nnx.state(state, _lora_filter)
-
-  def _filter_dict(val, path=()):
-    if path == ("nnx_aux",) or (preserve_optimizer and path == ("opt_state",)):
-      return val
-    if isinstance(val, dict):
-      res = {}
-      for key, value in val.items():
-        curr_path = path + (str(key),)
-        filtered = _filter_dict(value, curr_path)
-        if filtered is not None:
-          res[key] = filtered
-      return res if res else None
-    path_str = "/".join(path).lower()
-    if "lora" in path_str or "step" in path_str:
-      return val
-    return None
-
-  return _filter_dict(state)
 
 
 def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False, training_graph=None):

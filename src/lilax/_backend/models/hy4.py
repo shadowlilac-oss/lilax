@@ -64,7 +64,7 @@ from lilax._backend.layers.initializers import default_bias_init, default_scalar
 from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
 HY4_HC_EPS = 1e-6

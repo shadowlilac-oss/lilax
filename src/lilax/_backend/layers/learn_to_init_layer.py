@@ -13,7 +13,7 @@ from lilax._backend.layers.nnx_wrappers import ToNNX
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.layers.initializers import NdInitializer, nd_dense_init
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.device_memory import memory_kinds
+from lilax._backend.device_memory import memory_kinds
 
 
 LTI_MODIFIED_ATTENTION_PARAM_NAMES = ["query", "key", "value", "out"]

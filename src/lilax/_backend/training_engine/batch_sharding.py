@@ -7,7 +7,7 @@ from typing import Any
 from absl import logging
 import jax
 import jax.numpy as jnp
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 import numpy as np
 
 _REPLICATED_BATCH_DIM_WARNING = (

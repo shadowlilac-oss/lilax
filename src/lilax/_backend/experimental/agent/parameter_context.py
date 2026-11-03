@@ -10,7 +10,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.observability.diagnostics import system_info
 
 
 def save_parameter_context(config, hf_model_config, agent_directory):

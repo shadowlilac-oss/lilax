@@ -30,7 +30,7 @@ from lilax._backend.layers.linears import DenseGeneral, MlpBlock, Dropout
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.sharding import create_sharding, maybe_shard_with_logical
+from lilax._backend.distributed.sharding import create_sharding, maybe_shard_with_logical
 
 
 GEMMA3_ATTENTION_PATTERN = (

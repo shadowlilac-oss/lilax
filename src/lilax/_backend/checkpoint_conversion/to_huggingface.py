@@ -21,7 +21,7 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
     save_adapter_files,
 )
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.observability.diagnostics import system_info
 from lilax._backend.utils.globals import HF_IDS
 from lilax._backend.utils.lora_utils import sync_lora_metadata
 from lilax._backend.utils.model_creation.scan_layers_sync import verify_and_sync_scan_layers

@@ -13,7 +13,7 @@ from lilax._backend.layers import moe
 from lilax._backend.layers.quantization.aqt import AqtQuantization
 from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.models import deepseek
-from lilax._backend.utils.sharding import with_logical_constraint
+from lilax._backend.distributed.sharding import with_logical_constraint
 from jax.ad_checkpoint import checkpoint_name
 import jax
 from jax.experimental import xla_metadata

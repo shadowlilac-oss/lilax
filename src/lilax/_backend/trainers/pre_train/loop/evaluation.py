@@ -7,7 +7,8 @@ from flax.core.spmd import logical_axis_rules
 import jax
 
 from lilax._backend.common.telemetry import mllog_utils
-from lilax._backend.utils import max_logging, sharding
+from lilax._backend.utils import max_logging
+from lilax._backend.distributed import sharding
 
 
 def run_evaluation(

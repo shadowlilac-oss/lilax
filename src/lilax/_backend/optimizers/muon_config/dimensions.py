@@ -9,7 +9,7 @@ import jax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils.model_creation import nnx_abstract_model
 from lilax.configuration.schema import MaxTextConfig
 

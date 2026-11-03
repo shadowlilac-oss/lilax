@@ -7,7 +7,7 @@ from typing import Any
 import jax
 
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 
 def is_context_parallel_ulysses_requested(config: Any) -> bool:

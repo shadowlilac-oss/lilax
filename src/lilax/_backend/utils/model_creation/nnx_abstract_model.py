@@ -7,7 +7,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 from lilax._backend.utils.model_creation.m3_default_sharding import _apply_m3_default_named_sharding
 from lilax._backend.utils.model_creation.model_factory import get_nnx_create_model_fn
 

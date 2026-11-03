@@ -11,7 +11,7 @@ from lilax._backend.training_engine import gradient_sharding
 from lilax._backend.training_engine import loss_invocation
 from lilax._backend.training_engine import zero1
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils.tree_ops import numerics
+from lilax._backend.pytree import numerics
 
 
 def fwd_bwd_kernel(

@@ -45,7 +45,8 @@ from lilax._backend.training_engine.checkpointing import (
     CheckpointRestoreError as EngineCheckpointRestoreError,
     CheckpointState as EngineCheckpointState,
 )
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, train_utils
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging, maxtext_utils_nnx, train_utils
 from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.generate_param_only_checkpoint import generate_decode_checkpoint as _generate_decode_checkpoint
 from lilax._backend.utils.layerwise_quantization import quantize_checkpoint as _quantize_checkpoint

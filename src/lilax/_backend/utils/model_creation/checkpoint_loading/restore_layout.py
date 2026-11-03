@@ -5,7 +5,7 @@ from flax.core.meta import Partitioned
 import jax
 from orbax import checkpoint as ocp
 
-from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import linen_compatibility
 from lilax._backend.m3.core import checkpoint as m3_checkpoint
 from lilax._backend.utils.model_creation.checkpoint_loading.moe_fusion import adjust_target
 from lilax._backend.utils.model_creation.checkpoint_loading.restore_args import _fix_restore_args_for_shape_mismatch
@@ -88,5 +88,5 @@ def extract_restored_params(layout, restored):
   checkpoint = restored["params"]["params"]
   for collection, collection_tree in restored["params"].items():
     if collection != "params":
-      checkpoint = checkpointing._deep_merge_dicts(checkpoint, collection_tree)
+      checkpoint = linen_compatibility._deep_merge_dicts(checkpoint, collection_tree)
   return checkpoint

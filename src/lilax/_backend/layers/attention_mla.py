@@ -70,7 +70,7 @@ from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.inference import kvcache
 from lilax._backend.inference.kvcache import KVQuant
-from lilax._backend.utils.sharding import create_sharding
+from lilax._backend.distributed.sharding import create_sharding
 from lilax._backend.utils.globals import EPS
 
 

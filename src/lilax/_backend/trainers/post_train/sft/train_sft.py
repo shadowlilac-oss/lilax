@@ -18,7 +18,8 @@ from lilax._backend.trainers.post_train.sft import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.trainers.pre_train.steps.loss import loss_fn
-from lilax._backend.utils import device_mesh, lora_utils, max_logging, maxtext_utils
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import lora_utils, max_logging, maxtext_utils
 from lilax._backend.utils.model_creation import pretrained
 
 

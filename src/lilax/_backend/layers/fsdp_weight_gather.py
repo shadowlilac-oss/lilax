@@ -5,7 +5,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 _FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 _GATHERED_FSDP_WEIGHT = "gathered_fsdp_weight"

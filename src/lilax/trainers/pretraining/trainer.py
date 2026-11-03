@@ -8,6 +8,7 @@ import jax
 import numpy as np
 
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import restore_source
 from lilax._backend.common.goodput import (
     RECORD_JOB_START_TIME, create_goodput_recorder, maybe_monitor_goodput, record_goodput,
 )
@@ -17,7 +18,8 @@ from lilax._backend.input_pipeline.hf_data_processing import make_hf_eval_iterat
 from lilax._backend.trainers.pre_train import run as native_run
 from lilax._backend.trainers.pre_train.moe import graphdefs as native_graphdefs
 from lilax._backend.trainers.pre_train.steps import eval_step as native_eval_step
-from lilax._backend.utils import sharding, train_utils
+from lilax._backend.distributed import sharding
+from lilax._backend.utils import train_utils
 from lilax._backend.utils.globals import EPS
 from lilax.configuration import QwixQATConfig
 
@@ -75,11 +77,11 @@ class Trainer(_PostTrainer):
         checkpoint_manager = train_utils.create_checkpoint_manager(attempt_config, mesh, None)
         if restore_step >= 0 and checkpoint_manager is None:
           raise ValueError(f"Cannot restore checkpoint step {restore_step} without a checkpoint manager.")
-        selected_source = checkpointing.select_restore_source(
+        selected_source = restore_source.select_restore_source(
             checkpoint_manager, attempt_config.load_parameters_path, attempt_config.load_full_state_path,
             step=restore_step, source_checkpoint_layout=attempt_config.source_checkpoint_layout,
         )
-        marker = checkpointing.read_training_graph_metadata(selected_source)
+        marker = restore_source.read_training_graph_metadata(selected_source)
         if marker is not None:
           if (not isinstance(marker, dict) or set(marker) != {"version", "kind", "qat_config"}
               or type(marker["version"]) is not int or marker["version"] != 1

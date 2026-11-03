@@ -38,7 +38,7 @@ from lilax._backend.layers.normalizations import RMSNorm, align_scale_with_norma
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.utils import model_mode_shapes
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
+from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
 
 
 GEMMA4_ATTENTION_PATTERN = (

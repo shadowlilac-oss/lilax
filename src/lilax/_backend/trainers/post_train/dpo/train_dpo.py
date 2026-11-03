@@ -14,7 +14,7 @@ from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.dpo import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
-from lilax._backend.utils import device_mesh
+from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils.model_creation import pretrained
 

@@ -15,8 +15,8 @@ from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.models import deepseek4
 from lilax._backend.models.deepseek_batchsplit.schedule import single_layer as deepseek_batchsplit_single_layer
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import sharding
-from lilax._backend.utils.context_parallel import sequence_reorder
+from lilax._backend.distributed import sharding
+from lilax._backend.layers.context_parallel import sequence_reorder
 from lilax._backend.utils.globals import EPS
 
 

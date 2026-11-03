@@ -13,8 +13,9 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import state_initialization, train_state_nnx
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.utils import gcs_utils, lora_utils, max_logging
-from lilax._backend.utils import device_mesh, maxtext_utils_nnx, train_utils
-from lilax._backend.utils.diagnostics import pytree
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import maxtext_utils_nnx, train_utils
+from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
 from lilax._backend.utils.training import state_setup
 

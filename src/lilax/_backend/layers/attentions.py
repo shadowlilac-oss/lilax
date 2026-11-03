@@ -54,7 +54,7 @@ from lilax._backend.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, Glob
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.inference import kvcache
 from lilax._backend.inference.kvcache import KVQuant
-from lilax._backend.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
+from lilax._backend.distributed.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error

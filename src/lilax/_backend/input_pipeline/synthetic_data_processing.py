@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.configs import pyconfig
 from lilax._backend.utils.diloco_sharding import reshape_first_axis_with_diloco
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 
 def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq: int) -> jnp.ndarray:

@@ -8,7 +8,7 @@ from jax.sharding import Mesh
 from flax import nnx
 from lilax._backend.common.common_types import Config, ShardMode
 from lilax._backend.layers.quantization.aqt import AqtQuantization
-from lilax._backend.utils.sharding import create_sharding
+from lilax._backend.distributed.sharding import create_sharding
 
 
 class SimpleDecoderLayer(nnx.Module):

@@ -1,6 +1,6 @@
 """Grouped matmul tile sizes for the DeepSeek FP8 batch-split routed experts."""
 
-from lilax._backend.utils.kernel_tiling import eval_tiles
+from lilax._backend.kernels.tiling import eval_tiles
 
 
 def gmm_tile_sizes(config):

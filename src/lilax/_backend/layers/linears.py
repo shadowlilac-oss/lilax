@@ -25,13 +25,13 @@ from lilax._backend.layers.quantization.nnx_ops import make_dot_general
 from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization, native_fp8_dot_general
 from lilax._backend.layers.quantization.weights import WeightQuantConfig, dequantize_weight, get_weight_quant_config
 from lilax._backend.utils import max_logging
-from lilax._backend.utils.device_memory import memory_kinds
-from lilax._backend.utils.sharding import maybe_shard_with_logical
-from lilax._backend.utils.sharding import maybe_shard_with_name
-from lilax._backend.utils.sharding import maybe_shard_with_pspec
-from lilax._backend.utils.sharding import get_physical_spec_without_axes
-from lilax._backend.utils.sharding import FSDP_MESH_AXES
-from lilax._backend.utils.sharding import truncate_out_sharding
+from lilax._backend.device_memory import memory_kinds
+from lilax._backend.distributed.sharding import maybe_shard_with_logical
+from lilax._backend.distributed.sharding import maybe_shard_with_name
+from lilax._backend.distributed.sharding import maybe_shard_with_pspec
+from lilax._backend.distributed.sharding import get_physical_spec_without_axes
+from lilax._backend.distributed.sharding import FSDP_MESH_AXES
+from lilax._backend.distributed.sharding import truncate_out_sharding
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:

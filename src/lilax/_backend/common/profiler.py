@@ -55,6 +55,7 @@ class Profiler:
     self.upload_all_profiler_results = config.upload_all_profiler_results
     self.profile_cleanly = config.profile_cleanly
     self.xplane_trace_active = False
+    self.current_step = None
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
@@ -85,6 +86,7 @@ class Profiler:
       self.profiling_options.advanced_configuration = advanced_config
 
   def maybe_activate_profiler(self, step, state):
+    self.current_step = step
     if self.mode != "" and (step == self.start_initial_profile_step or self.should_activate_periodic_profile(step)):
       optional_postfix = f"step_{step}" if self.profile_period > 0 else ""
       self.activate(blocking_object=state, optional_postfix=optional_postfix)
@@ -142,6 +144,8 @@ class Profiler:
     elif self.mode == "xplane" and self.xplane_trace_active:
       jax.profiler.stop_trace()
       self.xplane_trace_active = False
+      if step is None:
+        step = self.current_step
       if self.on_capture_complete is not None and step is not None:
         self.on_capture_complete(logdir=self.output_path, step=step, process_index=jax.process_index())
 

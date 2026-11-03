@@ -9,8 +9,8 @@ from flax import nnx
 
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.layers.moe import load_balance_updates_from_counts
-from lilax._backend.utils.xla_options import loop_unrolling
-from lilax._backend.utils.sharding import maybe_shard_with_name
+from lilax._backend.compiler.xla_options import loop_unrolling
+from lilax._backend.distributed.sharding import maybe_shard_with_name
 
 
 def gradient_accumulation_loss_and_grad(_loss_fn, config, model, params, params_shardings, data, dropout_rng):

@@ -9,7 +9,7 @@ from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from lilax._backend.kernels import megablox as mblx
 from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization
-from lilax._backend.utils.kernel_tiling import eval_tiles, tile_padding
+from lilax._backend.kernels.tiling import eval_tiles, tile_padding
 import qwix.pallas as qpl
 import tokamax
 

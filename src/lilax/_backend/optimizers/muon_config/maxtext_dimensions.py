@@ -8,8 +8,8 @@ import jax
 
 from lilax._backend.optimizers.muon import ShardedMuonDimensionNumbers as smdn
 from lilax._backend.optimizers.muon_config import dimensions as muon_utils
-from lilax._backend.utils import device_mesh
-from lilax._backend.utils import sharding as sharding_lib
+from lilax._backend.distributed import device_mesh
+from lilax._backend.distributed import sharding as sharding_lib
 
 
 def _get_leaf_value(leaf):

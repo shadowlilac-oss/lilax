@@ -62,7 +62,7 @@ from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.linears import DenseGeneral
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 
 def is_mla_layer(layer_idx: int, config: Config) -> bool:

@@ -3,9 +3,10 @@
 from flax.core.spmd import logical_axis_rules
 import jax
 
-from lilax._backend.utils import maxtext_utils, sharding
-from lilax._backend.utils.diagnostics import jaxpr_dump, pytree
-from lilax._backend.utils.xla_options import libtpu_flags
+from lilax._backend.distributed import sharding
+from lilax._backend.utils import maxtext_utils
+from lilax._backend.observability.diagnostics import jaxpr_dump, pytree
+from lilax._backend.compiler.xla_options import libtpu_flags
 
 
 def aot_compile_step(p_step, lower_args, compiler_options, prefix):

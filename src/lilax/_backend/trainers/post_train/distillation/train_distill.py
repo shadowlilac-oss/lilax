@@ -23,7 +23,8 @@ from lilax._backend.layers.learn_to_init_layer import apply_lti_model_update
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.distillation import distillation_utils, lti_utils
 from lilax._backend.trainers.post_train.hooks import GoodputTrainingHooks
-from lilax._backend.utils import device_mesh, max_logging, maxtext_utils
+from lilax._backend.distributed import device_mesh
+from lilax._backend.utils import max_logging, maxtext_utils
 from lilax._backend.utils.model_creation import pretrained
 
 

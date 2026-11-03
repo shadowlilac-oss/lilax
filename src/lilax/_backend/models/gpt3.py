@@ -50,8 +50,8 @@ from lilax._backend.layers.initializers import Initializer, NdInitializer, nd_de
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import model_mode_shapes
-from lilax._backend.utils.device_memory import memory_kinds
-from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, truncate_out_sharding
+from lilax._backend.device_memory import memory_kinds
+from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, truncate_out_sharding
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3

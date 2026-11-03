@@ -3,7 +3,7 @@
 import jax
 
 from lilax._backend.inference.maxengine import maxengine
-from lilax._backend.utils.diagnostics import system_info
+from lilax._backend.observability.diagnostics import system_info
 
 
 def validate_config(config):

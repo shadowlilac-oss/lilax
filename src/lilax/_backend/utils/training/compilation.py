@@ -8,7 +8,7 @@ import jax
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import sharding
+from lilax._backend.distributed import sharding
 
 
 def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=None):
