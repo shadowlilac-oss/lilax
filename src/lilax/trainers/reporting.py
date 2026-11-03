@@ -5,7 +5,7 @@ import trackio
 import wandb
 
 from lilax._backend.utils import max_utils
-from lilax.operations.profiling import stage_xprof_logdir
+from lilax.trainers._profile_artifacts import log_profile_artifacts
 
 
 class MetricReporter:
@@ -42,18 +42,7 @@ class MetricReporter:
       self.writer.flush()
 
   def log_capture(self, *, logdir, step, process_index):
-    if process_index != 0 or not (self.trackio or self.wandb_run is not None):
-      return
-    with stage_xprof_logdir(logdir, step) as local_logdir:
-      metadata = {"step": int(step), "logdir": str(logdir)}
-      if self.trackio:
-        artifact = trackio.Artifact(name=f"xprof-step-{step}", type="profile", metadata=metadata)
-        artifact.add_dir(local_logdir)
-        trackio.log_artifact(artifact)
-      if self.wandb_run is not None:
-        artifact = wandb.Artifact(name=f"xprof-step-{step}", type="profile", metadata=metadata)
-        artifact.add_dir(local_logdir, policy="mutable")
-        self.wandb_run.log_artifact(artifact)
+    log_profile_artifacts(logdir, step, process_index, self.trackio, self.wandb_run)
 
   def close(self):
     try:
