@@ -7,10 +7,10 @@ from collections.abc import MutableMapping
 
 import jax
 
-from lilax._backend.common import profiler
+from lilax._backend.common import flops, profiler
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.input_pipeline.packing import prefill_packing
-from lilax._backend.utils import gcs_utils, max_utils, maxtext_utils
+from lilax._backend.utils import gcs_utils, max_utils
 
 _WARMUP_ITERS = 2
 _FLATTEN_MICROBENCHMARK_RESULTS = False
@@ -45,7 +45,7 @@ def prefill_benchmark(config, engine_prefill, params, tokens, true_length, num_m
   print(f"Prefill benchmark results for length {tokens.size}:\n")
   time_in_s = prefill_benchmark_loop(engine_prefill, params, tokens, true_length, iters)
   prefill_average_ms = 1000 * time_in_s / iters
-  prefill_tflops_per_device, _, _ = maxtext_utils.calculate_prefill_tflops_per_device(
+  prefill_tflops_per_device, _, _ = flops.calculate_prefill_tflops_per_device(
       num_model_params, tokens.size, config
   )
   tflops_per_sec_per_device = prefill_tflops_per_device / prefill_average_ms * 1000.0

@@ -1177,58 +1177,9 @@ class AttentionOp(nnx.Module):
 
       uncompressed_mask = get_sliding_mask(s_len)
 
-      max_ndim = max(
-          uncompressed_mask.ndim,
-          compressed_mask.ndim if compressed_mask is not None else 0,
-          output_mask.ndim if output_mask is not None else 0,
-          4,
+      return attention_masks.combine_compressed_attention_masks(
+          uncompressed_mask, compressed_mask, output_mask, s_len, pad_kv_total
       )
-
-      def _align_mask(m, target_ndim):
-        """Expands singleton batch/head leading dimensions to match target_ndim (e.g. 5D)."""
-        if m is None or m.ndim >= target_ndim:
-          return m
-        return m.reshape(m.shape[:1] + (1,) * (target_ndim - m.ndim) + m.shape[1:])
-
-      expanded_uncompressed_mask = _align_mask(uncompressed_mask, max_ndim)
-
-      if compressed_mask is None:
-        # No compressed KV blocks present (e.g. pure sliding window without compression)
-        if output_mask is not None:
-          output_mask = _align_mask(output_mask, max_ndim)
-          output_mask = expanded_uncompressed_mask * output_mask
-        else:
-          output_mask = expanded_uncompressed_mask
-        return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE)
-
-      # --- Combine Uncompressed Mask with Compressed KV Memory Mask ---
-      compressed_mask = _align_mask(compressed_mask, max_ndim)
-      target_shape = compressed_mask.shape[:-1] + (s_len,)
-      expanded_uncompressed_mask = jnp.broadcast_to(expanded_uncompressed_mask, target_shape)
-
-      # Prepend padding to compressed blocks if required for Splash Attention tile alignment
-      if pad_kv_total > 0 and compressed_mask is not None:
-        pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
-        compressed_mask = jnp.pad(
-            compressed_mask,
-            pad_width,
-            constant_values=DEFAULT_MASK_VALUE,
-        )
-
-      # Apply document segment separation (decoder_segment_ids) to both uncompressed & compressed tokens
-      if output_mask is not None:
-        output_mask_aligned = _align_mask(output_mask, max_ndim)
-        expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
-        if output_mask_aligned.shape[-1] > s_len:
-          comp_seg_mask = output_mask_aligned[..., s_len : s_len + compressed_mask.shape[-1]]
-          compressed_mask = jnp.where(comp_seg_mask, compressed_mask, DEFAULT_MASK_VALUE)
-
-      # Convert boolean uncompressed mask to additive float mask (0.0=attend, DEFAULT_MASK_VALUE=masked)
-      expanded_uncompressed_mask = jnp.where(expanded_uncompressed_mask, 0.0, DEFAULT_MASK_VALUE).astype(
-          compressed_mask.dtype
-      )
-      # Concatenate uncompressed prefix mask and compressed memory block mask along KV sequence axis
-      return jnp.concatenate([expanded_uncompressed_mask, compressed_mask], axis=-1)
 
     elif attention_type == AttentionType.CHUNK and output_mask is not None:
       if use_segment_positions:

@@ -30,6 +30,7 @@ import google_cloud_mldiagnostics as mldiag
 import wandb
 from lilax._backend.utils.globals import EPS
 from lilax._backend.common.cloud import is_decoupled
+from lilax._backend.common import flops
 from lilax._backend.common.gcp_workload_monitor import GCPWorkloadMonitor
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
 from lilax._backend.utils import exceptions
@@ -421,7 +422,7 @@ class MetricLogger:
     """Writes setup information like train config params, num model params, and XLA flags to TensorBoard."""
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
-    self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
+    self.metadata[MetadataKey.PER_DEVICE_TOKENS] = flops.calculate_tokens_training_per_device(self.config)
     max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
     if self.writer is None:
       return

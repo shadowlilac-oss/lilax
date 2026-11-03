@@ -35,6 +35,49 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+def combine_compressed_attention_masks(uncompressed_mask, compressed_mask, output_mask, s_len, pad_kv_total):
+  """Combines sliding, compressed-memory, and segment masks."""
+  max_ndim = max(
+      uncompressed_mask.ndim,
+      compressed_mask.ndim if compressed_mask is not None else 0,
+      output_mask.ndim if output_mask is not None else 0,
+      4,
+  )
+
+  def _align_mask(mask, target_ndim):
+    if mask is None or mask.ndim >= target_ndim:
+      return mask
+    return mask.reshape(mask.shape[:1] + (1,) * (target_ndim - mask.ndim) + mask.shape[1:])
+
+  expanded_uncompressed_mask = _align_mask(uncompressed_mask, max_ndim)
+  if compressed_mask is None:
+    if output_mask is not None:
+      output_mask = _align_mask(output_mask, max_ndim)
+      output_mask = expanded_uncompressed_mask * output_mask
+    else:
+      output_mask = expanded_uncompressed_mask
+    return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE)
+
+  compressed_mask = _align_mask(compressed_mask, max_ndim)
+  target_shape = compressed_mask.shape[:-1] + (s_len,)
+  expanded_uncompressed_mask = jnp.broadcast_to(expanded_uncompressed_mask, target_shape)
+  if pad_kv_total > 0 and compressed_mask is not None:
+    pad_width = [(0, 0)] * (compressed_mask.ndim - 1) + [(pad_kv_total, 0)]
+    compressed_mask = jnp.pad(compressed_mask, pad_width, constant_values=DEFAULT_MASK_VALUE)
+
+  if output_mask is not None:
+    output_mask_aligned = _align_mask(output_mask, max_ndim)
+    expanded_uncompressed_mask = expanded_uncompressed_mask & output_mask_aligned[..., :s_len]
+    if output_mask_aligned.shape[-1] > s_len:
+      comp_seg_mask = output_mask_aligned[..., s_len : s_len + compressed_mask.shape[-1]]
+      compressed_mask = jnp.where(comp_seg_mask, compressed_mask, DEFAULT_MASK_VALUE)
+
+  expanded_uncompressed_mask = jnp.where(expanded_uncompressed_mask, 0.0, DEFAULT_MASK_VALUE).astype(
+      compressed_mask.dtype
+  )
+  return jnp.concatenate([expanded_uncompressed_mask, compressed_mask], axis=-1)
+
+
 def _decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part):
   """Absolute query and key positions for a single-token decode step over one KV cache.
 
