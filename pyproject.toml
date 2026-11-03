@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling", "hatch-requirements-txt"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lilax"
+description = "A Python API for MaxText"
+dynamic = ["version", "optional-dependencies"]
+requires-python = ">=3.12"
+readme = "README.md"
+license = "Apache-2.0"
+keywords = ["llm", "jax", "llama", "mistral", "mixtral", "gemma", "deepseek"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: ML",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "decord",
+    "huggingface_hub>=1.14.0",
+    "jinja2>=3.1.6",
+    "librosa",
+    "mlperf-logging @ https://github.com/mlcommons/logging/archive/refs/tags/6.1.0-rc1.zip",
+    "omegaconf",
+    "pydantic",
+    "pyyaml>=6.0.3",
+    "qwix>=0.1.8",
+    "soundfile",
+    "tensorboard",
+    "tqdm",
+    "trackio>=0.44.0",
+    "wandb>=0.17.0",
+]
+
+[project.scripts]
+jaxcoord = "lilax.launcher:main"
+
+[project.urls]
+Repository = "https://github.com/AI-Hypercomputer/maxtext.git"
+"Bug Tracker" = "https://github.com/AI-Hypercomputer/maxtext/issues"
+
+[tool.hatch.version]
+path = "src/lilax/version.py"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
+tpu = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/tpu-requirements.txt"]
+ngc = ["requirements/base.txt", "requirements/ngc.txt", "src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt"]
+tpu-post-train = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
+runner = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/runner-requirements.txt"]
+decoupled = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/decoupled-requirements.txt"]
+docs = ["requirements/base.txt", "requirements/docs.txt"]
+omni = ["requirements/omni.txt"]
+evaluation = ["requirements/evaluation.txt"]
+diagnostics = ["requirements/diagnostics.txt"]
+vllm = ["requirements/vllm.txt"]
+tfds = ["requirements/tfds.txt"]
+mlperf = ["requirements/mlperf.txt"]
+conversion-agent = ["requirements/conversion-agent.txt"]
+serving = ["requirements/serving.txt"]
+generation = ["requirements/generation.txt"]
+gepa = ["requirements/gepa.txt"]
+data-operations = ["requirements/data-operations.txt"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lilax"]
+artifacts = [
+    "/src/lilax/_backend/configs/**",
+    "/src/lilax/_backend/assets/**",
+    "/src/lilax/_backend/examples/**",
+    "/src/lilax/_backend/m3/models/wan/configs/**",
+    "/src/lilax/_backend/experimental/omni_pipeline/**",
+    "/src/lilax/_backend/experimental/agent/context/**",
+    "/src/lilax/_backend/experimental/agent/prompts/**",
+    "/src/lilax/_backend/experimental/agent/baselines/**",
+]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/lilax", "/requirements", "/README.md", "/LICENSE"]

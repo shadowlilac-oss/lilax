@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lilax-vllm-adapter"
+version = "0.1.0"
+description = "TPU post-training vLLM plugin registration for lilax"
+requires-python = ">=3.12"
+dependencies = ["lilax[tpu-post-train]"]
+
+[project.entry-points."vllm.general_plugins"]
+register_maxtext_vllm_adapter = "lilax._backend.integration.vllm.maxtext_vllm_adapter:register"
+
+[tool.setuptools]
+packages = []

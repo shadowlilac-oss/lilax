@@ -1,0 +1,108 @@
+"""Qwen3.5 family of model decoder layers."""
+
+from flax import nnx
+from lilax._backend.common.common_types import get_weight_dtype
+from lilax._backend.layers.linears import MlpBlock
+from lilax._backend.models.qwen3 import (
+    Qwen3NextDecoderLayer,
+    Qwen3NextFullAttention,
+    Qwen3NextGatedDeltaNet,
+    Qwen3NextScannableBlock,
+    Qwen3NextSparseMoeBlock,
+)
+from lilax._backend.utils import max_utils
+
+
+class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
+  """Qwen3.5 GatedDeltaNet layer that is identical to Qwen3-Next GatedDeltaNet"""
+
+
+class Qwen3_5FullAttention(Qwen3NextFullAttention):
+  """Qwen3.5 Gated Attention layer that is identical to Qwen3-Next"""
+
+
+class Qwen3_5SparseMoEBlock(Qwen3NextSparseMoeBlock):
+  """Shares same MoE code as Qwen3-Next"""
+
+
+class Qwen3_5ScannableBlock(Qwen3NextScannableBlock):
+  """Scanned Structure for Text-only Architecture, explicitly invoking Qwen3_5 layers."""
+
+  def _make_decoder_layer(self, *, layer_idx, is_full_attention_layer, rngs):
+    return Qwen3_5DecoderLayer(
+        config=self.config,
+        mesh=self.mesh,
+        model_mode=self.model_mode,
+        quant=self.quant,
+        layer_idx=layer_idx,
+        is_full_attention_layer=is_full_attention_layer,
+        rngs=rngs,
+    )
+
+
+class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
+  """Qwen3.5 hybrid decoder layer.
+
+  Attributes:
+    config: The model configuration object.
+    mesh: The device mesh for sharding.
+    model_mode: The operational mode (e.g., 'train', 'prefill').
+    layer_idx: The index of the current layer in the transformer stack.
+    quant: Optional quantization configuration.
+  """
+
+  def _norm_weight_dtype(self):
+    return get_weight_dtype(self.config, "norm")
+
+  def _make_full_attention(self, *, rngs: nnx.Rngs):
+    return Qwen3_5FullAttention(
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        layer_idx=self.layer_idx,
+        rngs=rngs,
+    )
+
+  def _make_linear_attention(self, *, rngs: nnx.Rngs):
+    cfg = self.config
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(cfg, self.model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, cfg.emb_dim)
+    return Qwen3_5GatedDeltaNet(
+        config=cfg,
+        inputs_shape=dummy_inputs_shape,
+        mesh=self.mesh,
+        dtype=cfg.dtype,
+        model_mode=self.model_mode,
+        quant=self.quant,
+        rngs=rngs,
+    )
+
+  def _make_mlp(self, *, rngs: nnx.Rngs):
+    cfg = self.config
+    if getattr(cfg, "num_experts", 1) > 1:
+      return Qwen3_5SparseMoEBlock(config=cfg, mesh=self.mesh, quant=self.quant, rngs=rngs)
+    return MlpBlock(
+        config=cfg,
+        mesh=self.mesh,
+        in_features=cfg.emb_dim,
+        intermediate_dim=cfg.mlp_dim,
+        activations=tuple(cfg.mlp_activations),
+        intermediate_dropout_rate=cfg.dropout_rate,
+        dtype=cfg.dtype,
+        weight_dtype=get_weight_dtype(cfg, "mlp"),
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
+    )
+
+  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts):
+    if getattr(self.config, "num_experts", 1) > 1:
+      return super()._apply_mlp(hidden_states, deterministic, forced_routed_experts)
+    mlp_output = self.mlp(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    return mlp_output, None

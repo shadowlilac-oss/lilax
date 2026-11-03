@@ -1,0 +1,285 @@
+"""Decoder layer definition for GPT OSS models."""
+
+import functools
+from typing import Optional
+
+from flax import nnx
+from jax.ad_checkpoint import checkpoint_name
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from lilax._backend.common.common_types import AttentionType, Config
+from lilax._backend.layers import attentions
+from lilax._backend.layers import initializers
+from lilax._backend.layers import linears
+from lilax._backend.layers import moe
+from lilax._backend.layers import quantizations
+from lilax._backend.layers.attentions import Attention
+from lilax._backend.layers.normalizations import RMSNorm
+from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.utils import max_utils
+from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+
+GPT_OSS_ATTENTION_PATTERN = (
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.GLOBAL,
+)
+
+
+def get_attention_type(layer_id):
+  """Get attention type based on layer ID."""
+  layer_id %= len(GPT_OSS_ATTENTION_PATTERN)
+  return GPT_OSS_ATTENTION_PATTERN[layer_id]
+
+
+class GptOssDecoderLayer(nnx.Module):
+  """Transformer decoder layer that attends to the encoder."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      attention_type: AttentionType,
+      quant: Optional[Quant] = None,
+      rngs: nnx.Rngs = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.attention_type = attention_type
+    self.quant = quant
+
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+    )
+
+    self.pre_self_attention_layer_norm = RMSNorm(
+        num_features=dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=jnp.float32,
+        shard_mode=config.shard_mode,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
+    self.post_self_attention_layer_norm = RMSNorm(
+        num_features=dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=jnp.float32,
+        shard_mode=config.shard_mode,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
+    self.GptOssAttention = Attention(
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=mesh,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        dropout_rate=config.dropout_rate,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        use_bias_in_projections=config.attention_bias,
+        attention_type=self.attention_type,
+        sliding_window_size=config.sliding_window_size,
+        query_pre_attn_scalar=(config.head_dim**-0.5),
+        model_mode=model_mode,
+        rngs=rngs,
+    )
+
+    self.GptOssMlp = moe.RoutedMoE(
+        config=config,
+        num_experts=config.num_experts,
+        num_experts_per_tok=config.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        intermediate_dim=config.mlp_dim,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        quant=self.quant,
+        rngs=rngs,
+    )
+
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
+  ):
+    cfg = self.config
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
+      inputs = inputs[0]
+
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+
+    attention_lnx, kv_cache = self.GptOssAttention(
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        out_sharding=self.out_sharding,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+    )
+
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    intermediate_inputs = inputs + attention_lnx
+
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+
+    load_balance_loss = None
+    mlp_lnx, load_balance_loss, _ = self.GptOssMlp(hidden_states, out_sharding=self.out_sharding)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+
+    layer_output = mlp_lnx + intermediate_inputs
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
+
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+
+    if cfg.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+
+    if getattr(cfg, "record_internal_nn_metrics", False):
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
+      self.sow(
+          nnx.Intermediate,
+          "activation_fraction_zero",
+          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+      )
+
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
+      return layer_output, None
+    else:
+      return layer_output, kv_cache
+
+
+class GptOssScannableBlock(nnx.Module):
+  """A repeatable block of GPT OSS decoder layers.
+
+    This block applies multiple decoder layers sequentially, using the attention
+    pattern defined by GPT_OSS_ATTENTION_PATTERN. It's designed to be
+    used with `jax.lax.scan` for efficient compilation.
+
+  Attributes:
+    config: Config, MaxText model config
+    mesh: Mesh, JAX device mesh (used for sharding)
+    num_of_layers: int, number of decoder layers in the block
+    quant: Optional[Quant], quantization config
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: Optional[Quant] = None,
+      rngs: nnx.Rngs = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+    )
+    for layer_id in range(config.inhomogeneous_layer_cycle_interval):
+      attention_type = get_attention_type(layer_id)
+      layer_name = f"layers_{layer_id}"
+      layer = GptOssDecoderLayer(
+          config=config,
+          mesh=mesh,
+          model_mode=model_mode,
+          attention_type=attention_type,
+          quant=self.quant,
+          rngs=rngs,
+      )
+      setattr(self, layer_name, layer)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
+  ):
+    cfg = self.config
+
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
+    for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
+      layer_name = f"layers_{layer_id}"
+      layer = getattr(self, layer_name)
+      y, kv_cache = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
+    return y, kv_cache

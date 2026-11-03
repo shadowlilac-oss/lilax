@@ -1,0 +1,619 @@
+"""Input pipeline using Huggingface datasets."""
+
+from typing import Optional
+
+import datasets
+import ml_collections
+import jax
+import transformers
+import grain.python as grain
+
+from lilax._backend.input_pipeline import data_processing_utils
+from lilax._backend.input_pipeline import dpo_utils
+from lilax._backend.input_pipeline import input_pipeline_utils
+from lilax._backend.input_pipeline import instruction_data_processing
+from lilax._backend.input_pipeline import multihost_dataloading
+from lilax._backend.utils import elastic_utils
+
+
+def _get_pad_id(tokenizer):
+  if tokenizer.pad_token_id is not None:
+    pad_id = tokenizer.pad_token_id
+  elif tokenizer.unk_token_id is not None:
+    pad_id = tokenizer.unk_token_id
+  else:
+    pad_id = -1
+  return pad_id
+
+
+def _sft_data_columns(dataset, config, column_name):
+  columns = getattr(config, column_name)
+  if column_name in config._pydantic_config.model_fields_set:
+    return columns
+  features = dataset.features or dataset.column_names
+  if features is None:
+    raise ValueError(f"Dataset features are unavailable; configure {column_name} explicitly.")
+  supported = (["messages"], ["prompt", "completion"], ["question", "answer"])
+  matches = [candidate for candidate in supported if set(candidate).issubset(features)]
+  if len(matches) != 1:
+    raise ValueError(f"Expected one supported SFT column layout, found {matches}; configure {column_name} explicitly.")
+  return matches[0]
+
+
+def _get_training_objective_transform(
+    config: ml_collections.ConfigDict,
+    *,
+    shift: bool,
+    use_dpo: bool,
+    use_sft: bool,
+    packing: bool,
+    pad_id: int,
+    bos_token_id: int | None,
+) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
+  """Selects target preparation for causal or block-diffusion training."""
+  objective = getattr(config, "training_objective", "causal_lm")
+  if objective == "block_diffusion":
+    completion_only = bool(use_sft and getattr(config, "sft_train_on_completion_only", False))
+    if use_dpo:
+      raise ValueError("Block-diffusion training is not compatible with DPO.")
+    if packing:
+      raise ValueError("Block-diffusion training requires packing=False.")
+    return input_pipeline_utils.BlockDiffusionCorruption(
+        block_size=config.causal_block_size,
+        mask_id=config.block_diffusion_mask_id,
+        min_noise=config.block_diffusion_min_noise,
+        logit_alignment=config.block_diffusion_logit_alignment,
+        canvas_policy=config.block_diffusion_canvas_policy,
+        axis=1,
+        completion_only=completion_only,
+    )
+  if objective != "causal_lm":
+    raise ValueError(f"Unsupported training objective: {objective}")
+  if shift and not use_dpo:
+    return input_pipeline_utils.ShiftData(ignored_ids=[pad_id, bos_token_id], axis=1)
+  return None
+
+
+def add_default_prompt_if_missing(dataset, text_columns, config):
+  """Inject default prompt if prompt column is missing in dataset (e.g. COCO captioning)."""
+  prompt_col = text_columns[0]
+  features = getattr(dataset, "features", None) or getattr(dataset, "column_names", None)
+  if features is None or prompt_col not in features:
+    dataset = dataset.map(lambda ex: {**ex, prompt_col: config.default_prompt})
+  return dataset
+
+
+def format_sharegpt(example):
+  """Convert a ShareGPT conversation into query and response fields."""
+  query = ""
+  response = ""
+  conversations = example.get("conversations", [])
+  if not isinstance(conversations, list):
+    raise TypeError(f"Expected 'conversations' to be a list, got {type(conversations).__name__}.")
+  for turn in conversations:
+    if not isinstance(turn, dict):
+      continue
+    if turn.get("from") == "human":
+      query = turn.get("value", "")
+    elif turn.get("from") == "gpt":
+      response = turn.get("value", "")
+      break
+  example["query"] = query
+  example["response"] = [response]
+  return example
+
+
+def vision_sft_preprocessing_pipeline(
+    dataset,
+    config,
+    dataloading_host_index,
+    dataloading_host_count,
+    global_mesh,
+    text_columns,
+    image_column,
+    global_batch_size,
+    processing_class=None,
+):
+  """Pipeline for multimodal SFT with HF dataset."""
+  if (
+      image_column == "video"
+      and "conversations" in dataset.features
+      and len(text_columns) == 2
+      and text_columns[0] not in dataset.features
+  ):
+    dataset = dataset.map(format_sharegpt)
+
+  assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
+  if config.elastic_enabled:
+    local_batch_size = elastic_utils.get_local_batch_size(config)
+  else:
+    local_batch_size = global_batch_size // jax.process_count()
+  if config.use_tunix_gradient_accumulation:
+    batch_size = local_batch_size // config.gradient_accumulation_steps
+  else:
+    batch_size = local_batch_size
+
+  if config.enable_data_shuffling and config.num_epoch > 1:
+    epoch_datasets = [dataset.shuffle(seed=config.data_shuffle_seed + i) for i in range(config.num_epoch)]
+    dataset = datasets.concatenate_datasets(epoch_datasets)
+  elif config.enable_data_shuffling:
+    dataset = dataset.shuffle(seed=config.data_shuffle_seed)
+  elif config.num_epoch > 1:
+    dataset = (
+        datasets.concatenate_datasets([dataset] * config.num_epoch)
+        if isinstance(dataset, datasets.Dataset)
+        else dataset.repeat(config.num_epoch)
+    )
+
+  if isinstance(image_column, list):
+    dataset = dataset.map(
+        input_pipeline_utils.merge_image_columns,
+        fn_kwargs={
+            "image_columns": image_column,
+            "max_num_images_per_example": config.max_num_images_per_example,
+        },
+        remove_columns=image_column,
+    )
+    image_column = "images"
+
+  dataset = add_default_prompt_if_missing(dataset, text_columns, config)
+  dataset = dataset.select_columns(text_columns + [image_column])
+  if image_column != "images":
+    dataset = dataset.rename_column(image_column, "images")
+
+  dataset = dataset.map(
+      input_pipeline_utils.reformat_prompt,
+      fn_kwargs={
+          "column": text_columns[0],
+          "image_placeholder": config.image_placeholder,
+          "model_name": config.model_name,
+          "video_placeholder": getattr(config, "video_placeholder", "<|video|>"),
+      },
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.reformat_response,
+      fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.pre_process_image_sft,
+      fn_kwargs={"image_column": "images", "config": config},
+  )
+  if processing_class is None:
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        config.tokenizer_path,
+        add_bos_token=False,
+        add_eos_token=False,
+        legacy=False,
+        token=config.hf_access_token,
+        extra_special_tokens={},
+    )
+  else:
+    tokenizer = processing_class.tokenizer if isinstance(processing_class, transformers.ProcessorMixin) else processing_class
+  pad_id = _get_pad_id(tokenizer)
+  dataset = dataset.map(
+      input_pipeline_utils.tokenization,
+      batched=True,
+      batch_size=global_batch_size,
+      fn_kwargs={
+          "hf_tokenizer": tokenizer,
+          "truncation": False,
+          "max_length": config.max_target_length,
+          "column_names": text_columns,
+      },
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.prepare_text_for_image_fusion,
+      fn_kwargs={"column_name": text_columns[0], "config": config},
+  )
+  dataset = input_pipeline_utils.HFDataSource(
+      dataset=dataset,
+      dataloading_host_index=dataloading_host_index,
+      dataloading_host_count=dataloading_host_count,
+      num_threads=1,
+      max_target_length=config.max_target_length,
+      data_column_names=text_columns,
+  )
+  operations = []
+  operations.append(
+      input_pipeline_utils.SFTPromptMaskingVision(
+          query_column=text_columns[0],
+          response_column=text_columns[1],
+          max_target_length=config.max_target_length,
+          pad_id=pad_id,
+      )
+  )
+  operations.append(
+      input_pipeline_utils.PadOrTrimToMaxLength(
+          config.max_target_length,
+          pad_id,
+          config=config,
+          max_num_images_per_example=config.max_num_images_per_example,
+      )
+  )
+  operations.append(input_pipeline_utils.ExtractImagesAndMasks())
+  operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
+  operations.append(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  if config.use_mrope:
+    operations.append(
+        input_pipeline_utils.ComputeQwen3OmniPositions(
+            data_column="inputs",
+            spatial_merge_size=config.spatial_merge_size_for_vit,
+            position_id_per_seconds=config.position_id_per_seconds,
+            use_audio_in_video=getattr(config, "use_audio_in_video", False),
+            config=config,
+            keep_aux_fields=False,
+        )
+    )
+  operations.append(input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1))
+  dummy_index_sampler = grain.IndexSampler(
+      num_records=len(dataset),
+      num_epochs=1,
+      shard_options=grain.ShardOptions(
+          shard_index=dataloading_host_index, shard_count=dataloading_host_count, drop_remainder=False
+      ),
+      shuffle=False,
+      seed=0,
+  )
+  dataloader = grain.DataLoader(
+      data_source=dataset,
+      operations=operations,
+      sampler=dummy_index_sampler,
+      worker_count=config.grain_worker_count,
+      worker_buffer_size=1,
+      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
+  )
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+  return multihost_gen
+
+
+def preprocessing_pipeline(
+    dataloading_host_index,
+    dataloading_host_count,
+    global_mesh,
+    dataset,
+    config,
+    data_column_names,
+    tokenize,
+    tokenizer_path,
+    hf_access_token,
+    global_batch_size,
+    max_target_length,
+    shuffle,
+    data_shuffle_seed,
+    chat_template_path="",
+    add_bos=True,
+    add_eos=True,
+    packing=True,
+    shift=True,
+    num_threads=1,
+    drop_remainder=True,
+    generate_padding_batch=False,
+    use_dpo=False,
+    use_sft=None,
+    use_tunix_gradient_accumulation=False,
+    num_microbatches=1,
+    sft_train_on_completion_only=True,
+    grain_worker_count=1,
+    max_segments_per_seq=None,
+    num_epoch=1,
+    chat_template: Optional[str] = None,
+    formatting_func_path: Optional[str] = None,
+    formatting_func_kwargs: Optional[dict] = None,
+    processing_class=None,
+):
+  """Pipeline for preprocessing HF dataset."""
+  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
+  if config.elastic_enabled:
+    local_batch_size = elastic_utils.get_local_batch_size(config)
+  else:
+    local_batch_size = global_batch_size // jax.process_count()
+  if use_tunix_gradient_accumulation:
+    batch_size = local_batch_size // num_microbatches
+  else:
+    batch_size = local_batch_size
+
+  if shuffle and num_epoch > 1:
+    epoch_datasets = [dataset.shuffle(seed=data_shuffle_seed + i) for i in range(num_epoch)]
+    dataset = datasets.concatenate_datasets(epoch_datasets)
+  elif shuffle:
+    dataset = dataset.shuffle(seed=data_shuffle_seed)
+  elif num_epoch > 1:
+    dataset = (
+        datasets.concatenate_datasets([dataset] * num_epoch)
+        if isinstance(dataset, datasets.Dataset)
+        else dataset.repeat(num_epoch)
+    )
+
+  is_offline = getattr(config, "is_offline_distillation", False)
+  if processing_class is None:
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        tokenizer_path,
+        add_bos_token=add_bos if not use_sft else False,
+        add_eos_token=add_eos if not use_sft else False,
+        legacy=False,
+        token=hf_access_token,
+        extra_special_tokens={},
+    )
+  else:
+    tokenizer = processing_class.tokenizer if isinstance(processing_class, transformers.ProcessorMixin) else processing_class
+  if is_offline:
+    data_column_names = ["inputs", "top_k_logits", "top_k_indices"]
+  dataset = dataset.select_columns(data_column_names)
+  if use_sft and not is_offline:
+    input_pipeline_utils.fix_pad_token_if_needed(tokenizer)
+    if not chat_template:
+      chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
+    data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
+    dataset, data_column_names = instruction_data_processing.convert_to_conversational_format(
+        dataset=dataset,
+        data_columns=data_column_names,
+        formatting_func_path=formatting_func_path,
+        formatting_func_kwargs=formatting_func_kwargs,
+    )
+    assert input_pipeline_utils.is_conversational(
+        dataset.features, data_column_names
+    ), "Dataset is not in conversational format."
+    if len(data_column_names) > 1:
+      combined_column_name = "messages"
+      dataset_features = datasets.Features(
+          {combined_column_name: [{"content": datasets.Value(dtype="string"), "role": datasets.Value(dtype="string")}]}
+      )
+      dataset = dataset.map(
+          input_pipeline_utils.combine_columns,
+          fn_kwargs={"columns": data_column_names, "data_column": combined_column_name},
+          remove_columns=data_column_names,
+          features=dataset_features,
+      )
+    data_column_names = list(dataset.features.keys())
+    dataset = dataset.map(
+        input_pipeline_utils.apply_chat_template,
+        fn_kwargs={
+            "tokenizer_model": tokenizer,
+            "data_column_name": data_column_names[0],
+            "model_name": getattr(config, "model_name", None),
+        },
+    )
+
+  pad_id = _get_pad_id(tokenizer)
+  if is_offline and pad_id == -1:
+    pad_id = 0
+  if tokenize and not is_offline:
+    dataset = dataset.map(
+        input_pipeline_utils.tokenization,
+        batched=True,
+        fn_kwargs={
+            "hf_tokenizer": tokenizer,
+            "truncation": not use_sft,
+            "max_length": max_target_length,
+            "column_names": data_column_names,
+        },
+    )
+  if is_offline and isinstance(dataset, datasets.IterableDataset):
+    num_threads = 1
+    grain_worker_count = 0
+  dataset = input_pipeline_utils.HFDataSource(
+      dataset,
+      dataloading_host_index,
+      dataloading_host_count,
+      num_threads,
+      max_target_length,
+      data_column_names,
+  )
+  operations = []
+  if is_offline:
+    operations.append(input_pipeline_utils.HFNormalizeFeatures("inputs", is_offline_distillation=True))
+    data_column_names = ("inputs", "targets", "top_k_logits", "top_k_indices")
+  elif use_sft:
+    operations.append(
+        input_pipeline_utils.SFTPromptMasking(
+            text_column_name=data_column_names[0],
+            completion_only=sft_train_on_completion_only,
+            max_target_length=max_target_length,
+            unk_id=pad_id,
+            training_objective=getattr(config, "training_objective", "causal_lm"),
+        )
+    )
+    data_column_names = ("inputs", "targets")
+  elif not use_dpo:
+    assert len(data_column_names) == 1
+    operations.append(input_pipeline_utils.HFNormalizeFeatures(data_column_names[0]))
+    data_column_names = ("inputs", "targets")
+
+  if packing:
+    length_struct = {col: max_target_length for col in data_column_names}
+    max_segments = max_segments_per_seq
+    if max_segments is not None and max_segments <= 0:
+      max_segments = None
+    operations.append(
+        grain.experimental.PackAndBatchOperation(
+            batch_size=batch_size,
+            length_struct=length_struct,
+            max_sequences_per_bin=max_segments,
+        )
+    )
+    operations.append(input_pipeline_utils.ReformatPacking(data_column_names))
+  else:
+    if use_dpo and not is_offline:
+      max_prompt_length = config.dpo.max_prompt_length
+      operations.append(dpo_utils.DPODataFormatting(pad_id, max_target_length, data_column_names, max_prompt_length))
+    else:
+      operations.append(input_pipeline_utils.PadOrTrimToMaxLength(max_target_length, pad_id, config=config))
+    operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
+
+  if is_offline:
+    target_transform = input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1) if shift else None
+  else:
+    target_transform = _get_training_objective_transform(
+        config,
+        shift=shift,
+        use_dpo=use_dpo,
+        use_sft=use_sft,
+        packing=packing,
+        pad_id=pad_id,
+        bos_token_id=tokenizer.bos_token_id,
+    )
+  if target_transform is not None:
+    operations.append(target_transform)
+  dummy_index_sampler = grain.IndexSampler(
+      num_records=len(dataset),
+      num_epochs=1,
+      shard_options=grain.ShardOptions(
+          shard_index=dataloading_host_index, shard_count=dataloading_host_count, drop_remainder=False
+      ),
+      shuffle=False,
+      seed=0,
+  )
+  dataloader = grain.DataLoader(
+      data_source=dataset,
+      operations=operations,
+      sampler=dummy_index_sampler,
+      worker_count=grain_worker_count,
+      worker_buffer_size=1,
+      read_options=grain.ReadOptions(num_threads=num_threads, prefetch_buffer_size=128),
+  )
+  multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh, generate_padding_batch)
+  return multihost_gen
+
+
+def make_hf_train_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices_train,
+    *,
+    dataset=None,
+    processing_class=None,
+):
+  """Load, preprocess dataset and return iterators."""
+  if dataset is None:
+    train_ds = datasets.load_dataset(
+        config.hf_path,
+        name=config.hf_name,
+        data_dir=config.hf_data_dir,
+        data_files=config.hf_train_files,
+        split=config.train_split,
+        streaming=True,
+        token=config.hf_access_token,
+    )
+  else:
+    train_ds = dataset
+  is_offline = getattr(config, "is_offline_distillation", False)
+  data_columns = config.train_data_columns
+  if dataset is not None and config.use_sft and not config.use_multimodal and not is_offline:
+    data_columns = _sft_data_columns(dataset, config, "train_data_columns")
+  if config.use_sft and config.use_multimodal and not is_offline:
+    train_iter = vision_sft_preprocessing_pipeline(
+        dataset=train_ds,
+        config=config,
+        dataloading_host_index=process_indices_train.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_train),
+        global_mesh=global_mesh,
+        text_columns=config.train_data_columns,
+        image_column=config.train_image_column,
+        global_batch_size=config.global_batch_size_to_load,
+        processing_class=processing_class,
+    )
+  else:
+    train_iter = preprocessing_pipeline(
+        dataloading_host_index=process_indices_train.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_train),
+        global_mesh=global_mesh,
+        dataset=train_ds,
+        config=config,
+        data_column_names=data_columns,
+        tokenize=config.tokenize_train_data,
+        tokenizer_path=config.tokenizer_path,
+        hf_access_token=config.hf_access_token,
+        global_batch_size=config.global_batch_size_to_load,
+        max_target_length=config.max_target_length,
+        shuffle=config.enable_data_shuffling,
+        data_shuffle_seed=config.data_shuffle_seed,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        packing=config.packing,
+        generate_padding_batch=config.generate_padding_batch_train,
+        use_dpo=config.use_dpo,
+        use_sft=config.use_sft,
+        use_tunix_gradient_accumulation=config.use_tunix_gradient_accumulation,
+        num_microbatches=config.gradient_accumulation_steps,
+        sft_train_on_completion_only=config.sft_train_on_completion_only,
+        chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
+        num_epoch=config.num_epoch,
+        chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
+        processing_class=processing_class,
+    )
+  return train_iter
+
+
+def make_hf_eval_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices_eval,
+    *,
+    dataset=None,
+    processing_class=None,
+):
+  """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
+  if dataset is None:
+    eval_ds = datasets.load_dataset(
+        config.hf_path,
+        name=config.hf_name,
+        data_dir=config.hf_data_dir,
+        data_files=config.hf_eval_files,
+        split=config.hf_eval_split,
+        streaming=True,
+        token=config.hf_access_token,
+    )
+  else:
+    eval_ds = dataset
+  is_offline = getattr(config, "is_offline_distillation", False)
+  data_columns = config.eval_data_columns
+  if dataset is not None and config.use_sft and not config.use_multimodal and not is_offline:
+    data_columns = _sft_data_columns(dataset, config, "eval_data_columns")
+  if config.use_sft and config.use_multimodal and not is_offline:
+    eval_iter = vision_sft_preprocessing_pipeline(
+        dataset=eval_ds,
+        config=config,
+        dataloading_host_index=process_indices_eval.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_eval),
+        global_mesh=global_mesh,
+        text_columns=config.eval_data_columns,
+        image_column=config.eval_image_column,
+        global_batch_size=config.global_batch_size_to_load_eval,
+        processing_class=processing_class,
+    )
+  else:
+    eval_iter = preprocessing_pipeline(
+        dataloading_host_index=process_indices_eval.index(jax.process_index()),
+        dataloading_host_count=len(process_indices_eval),
+        global_mesh=global_mesh,
+        dataset=eval_ds,
+        config=config,
+        data_column_names=data_columns,
+        tokenize=config.tokenize_eval_data,
+        tokenizer_path=config.tokenizer_path,
+        hf_access_token=config.hf_access_token,
+        global_batch_size=config.global_batch_size_to_load_eval,
+        max_target_length=config.max_target_length,
+        shuffle=False,
+        data_shuffle_seed=config.data_shuffle_seed,
+        add_bos=config.add_bos,
+        add_eos=config.add_eos,
+        packing=config.packing,
+        generate_padding_batch=config.generate_padding_batch_eval,
+        use_dpo=config.use_dpo,
+        use_sft=config.use_sft,
+        num_microbatches=config.gradient_accumulation_steps,
+        sft_train_on_completion_only=config.sft_train_on_completion_only,
+        chat_template_path=config.chat_template_path,
+        max_segments_per_seq=config.max_segments_per_seq,
+        chat_template=config.chat_template,
+        formatting_func_path=config.formatting_func_path,
+        formatting_func_kwargs=config.formatting_func_kwargs,
+        grain_worker_count=config.grain_worker_count,
+        processing_class=processing_class,
+    )
+  return eval_iter

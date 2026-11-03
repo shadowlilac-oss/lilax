@@ -1,0 +1,1 @@
+"""Capability-specific data operations."""

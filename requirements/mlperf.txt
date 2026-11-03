@@ -1,0 +1,3 @@
+absl-py
+mlcommons_loadgen @ git+https://github.com/mlcommons/inference.git#subdirectory=loadgen
+numpy

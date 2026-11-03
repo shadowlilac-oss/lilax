@@ -1,0 +1,888 @@
+"""Converts Hugging Face model checkpoints to MaxText-compatible checkpoints."""
+
+from functools import partial
+import json
+import os
+import threading
+import time
+from typing import Any, Callable, List
+
+import jax
+import ml_dtypes
+import numpy as np
+import torch
+from flax import nnx
+from flax.nnx import variablelib
+from huggingface_hub import hf_hub_download, list_repo_files
+from orbax.checkpoint import type_handlers
+from safetensors import safe_open
+
+from lilax._backend.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from lilax._backend.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from lilax._backend.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
+from lilax._backend.checkpoint_conversion.utils.utils import (
+    MemoryMonitorTqdm, load_hf_dict_from_safetensors, load_hf_dict_from_transformers, param_key_parts_from_path,
+    print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys,
+)
+from lilax._backend.configs import pyconfig
+from lilax._backend.configs.types import DType
+from lilax._backend.utils import max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.utils.globals import HF_IDS
+
+
+def resolve_scale_key(key: str, container) -> str:
+  """Resolves fallback keys from .weight_scale to .weight_scale_inv."""
+  if key in container:
+    return key
+  if key.endswith(".weight_scale"):
+    alt_key = key + "_inv"
+    if alt_key in container:
+      return alt_key
+  return key
+
+
+def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray:
+  """Converts a PyTorch tensor or NumPy array to the target NumPy format.
+
+  Args:
+    tensor: Input tensor from PyTorch/safetensors or NumPy array.
+    save_dtype: Target checkpoint storage dtype for weights (e.g. "bfloat16", "float8_e4m3fn").
+      For FP8 checkpoints (save_dtype="float8_e4m3fn"), only quantized weights are stored as FP8.
+      Every other tensor keeps its source precision: companion scale tensors are stored in
+      whatever dtype the source checkpoint provides (e.g. bfloat16 for Qwen3.5-35B-A3B-FP8),
+      and unquantized modules (e.g. embeddings, router gates) remain in their native precision.
+      Source dtypes that are neither FP8, bfloat16, nor float32 are upcast to float32.
+  """
+  if isinstance(tensor, torch.Tensor):
+    tensor = tensor.detach().cpu()
+    if save_dtype in ("float32", DType.FLOAT32):
+      return tensor.to(torch.float32).numpy()
+
+    if save_dtype in ("float8_e4m3fn", DType.FLOAT8_E4M3FN):
+      if tensor.dtype == torch.float8_e4m3fn:
+        return tensor.view(torch.uint8).numpy().view(ml_dtypes.float8_e4m3fn)
+      elif tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      elif tensor.dtype == torch.float32:
+        return tensor.numpy()
+      else:
+        return tensor.to(torch.float32).numpy()
+
+    if save_dtype in ("bfloat16", DType.BFLOAT16):
+      if tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      elif tensor.dtype == torch.float8_e4m3fn:
+        return tensor.to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+      else:
+        return tensor.to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+
+    return tensor.numpy()
+
+  if isinstance(tensor, np.ndarray):
+    if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
+      return tensor.astype(np.float32)
+    return tensor
+  return np.asarray(tensor)
+
+
+_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_FULL_PRECISION_SUBSTRINGS = (
+    "-attn_hc-",
+    "-ffn_hc-",
+    "-hc_head-",
+    "-self_attention-sinks",
+    "-self_attention-indexer-k_norm-",
+    "-self_attention-indexer-weights_proj-",
+)
+
+
+def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
+  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
+  if save_dtype not in ("bfloat16", DType.BFLOAT16):
+    return save_dtype
+  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
+    return "float32"
+  return save_dtype
+
+
+def get_maxtext_model_info(config):
+  """Initializes the abstract MaxText model and returns parameter mapping information.
+
+  Args:
+    config: The MaxText configuration object.
+
+  Returns:
+    maxtext_abstract_dict: A dictionary mapping MaxText parameter keys to a tuple
+      (index, target_shape), where 'index' is the position of the parameter in the
+      flattened parameter list.
+    abstract_params_treedef: The tree structure definition of the abstract model parameters.
+  """
+  devices_array = maxtext_utils.create_device_mesh(config)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+
+  max_logging.log("Initializing MaxText abstract model...")
+  _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+
+  abstract_params_tree = {}
+  for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):
+    if isinstance(variable, nnx.RngState):
+      continue
+    node = abstract_params_tree.setdefault(variablelib.variable_name_from_type(type(variable), allow_register=True), {})
+    *parents, name = param_key_parts_from_path(path)
+    for part in parents:
+      node = node.setdefault(part, {})
+    node[name] = variable.get_value()
+
+  abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
+
+  max_logging.log("MaxText abstract model and state initialized.")
+
+  maxtext_abstract_dict = {}
+  for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
+    maxtext_abstract_dict[mt_param_key] = (mt_target_idx, abstract_leaf_value.shape)
+
+  return maxtext_abstract_dict, abstract_params_treedef
+
+
+def _build_multi_axis_stacked_tensor(
+    hf_source_keys: List[Any],
+    tensor_getter_fn: Callable[[str], np.ndarray],
+    hook_fns: Any,
+    target_shape: tuple,
+    config,
+    mt_key: str | tuple[str, ...] = "",
+) -> np.ndarray:
+  """Builds a MaxText tensor by stacking HF weights along several axes.
+
+  Three layouts share this helper, distinguished by how deeply ``hf_source_keys``
+  is nested and by whether ``mt_key`` names a nested block scan:
+    * MoE expert stacking: outer=experts, inner=layers, placed at the LEADING two
+      axes -> shape (num_experts, num_layers, ...).
+    * Nested block scan (``...-local_layers-...``, gemma4 and qwen3-next): the
+      block's local layers are an inner scan nested inside the outer block scan,
+      so the two stacked axes live at ``(param_scan_axis, param_scan_axis + 1)``
+      rather than the leading axes, e.g. (emb, blocks, local, ...).
+    * Both at once (qwen3-next's routed experts, which are expert-stacked inside
+      a nested block scan): three axes at ``(0, param_scan_axis,
+      param_scan_axis + 1)``, e.g. (experts, blocks, local, ...).
+
+  Args:
+      hf_source_keys: A nested list of Hugging Face parameter names, one level of
+        nesting per stacked axis, outermost axis first. A ``tuple`` of names is a
+        composite HF source that the hook fuses into a single leaf, not an axis.
+      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+      hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      config: The MaxText pyconfig object.
+      mt_key: The MaxText parameter key, used to detect the nested-scan case.
+
+  Returns:
+      The final, assembled NumPy array for the MaxText parameter.
+  """
+  depth = nesting_depth(hf_source_keys)
+  axes = stacked_axes(mt_key, config, depth)
+  mt_slice_shape = slice_shape(target_shape, axes)
+
+  def gather(keys, level):
+    if level == depth:
+      if isinstance(keys, (list, tuple)):
+        raw = tuple(tensor_getter_fn(k) for k in keys)
+      else:
+        raw = tensor_getter_fn(keys)
+      return apply_hook_fns(raw, mt_slice_shape, hook_fns)
+    return np.stack([gather(sub, level + 1) for sub in keys], axis=0)
+
+  stacked = gather(hf_source_keys, 0)
+  if axes != tuple(range(depth)):
+    stacked = np.moveaxis(stacked, tuple(range(depth)), axes)
+  return stacked
+
+
+def _build_single_axis_stacked_tensor(
+    hf_source_keys: List[str],
+    tensor_getter_fn: Callable[[str], np.ndarray],
+    hook_fns: Any,
+    target_shape: tuple,
+    config,
+    mt_key: str = "",
+) -> np.ndarray:
+  """Builds a MaxText tensor by stacking HF weights along a single axis.
+
+  This function handles both standard scanned layers (e.g., attention) and
+  unscanned MoE layers (which are stacked along the expert axis).
+
+  Args:
+      hf_source_keys: A 1D list of Hugging Face parameter names.
+      tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
+      hook_fns: The hook function(s) to apply to each individual weight.
+      target_shape: The final shape of the target MaxText tensor.
+      config: The MaxText pyconfig object.
+
+  Returns:
+      The final, assembled NumPy array for the MaxText parameter.
+  """
+  tensors_to_stack = []
+  axis_to_stack = 0
+  if config.scan_layers:
+    key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+    is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
+    is_unscanned_moe = "MoeBlock" in key_str and not any(
+        s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+    )
+    if not (is_var_collection or is_unscanned_moe):
+      axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
+  else:
+    axis_to_stack = 0
+
+  mt_slice_shape_list = list(target_shape)
+  del mt_slice_shape_list[axis_to_stack]
+  mt_slice_shape = tuple(mt_slice_shape_list)
+
+  for hf_key_single in hf_source_keys:
+    if isinstance(hf_key_single, (list, tuple)):
+      hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+    else:
+      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+    tensors_to_stack.append(processed_hf_tensor)
+
+  return np.stack(tensors_to_stack, axis=axis_to_stack)
+
+
+def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_shape_or_shapes, config, mt_key=""):
+  """Determine the loading function for HF keys.
+
+  This function natively supports `composite_hf_key` mapping (where multiple HF keys
+  combine into a single MaxText parameter, like Qwen3.5's qkv and z -> in_proj_qkvz).
+  If the input is a tuple of strings, they are fetched as a tuple of arrays and passed
+  together into the model hook.
+
+  HF keys can take four forms:
+    Case 1: Unscanned (single string)
+    Case 2: Scanned (list of strings)
+    Case 3: Unscanned with expert stacking (list of strings)
+    Case 4: Scanned with expert stacking (nested list of strings)
+  """
+  load_fn = None
+  if not isinstance(hf_source_keys_or_key, list):
+    def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
+      if isinstance(key, (list, tuple)):
+        tensors = tuple(getter(k) for k in key)
+        return apply_hook_fns(tensors, shape, hook)
+      return apply_hook_fns(getter(key), shape, hook)
+
+    load_fn = partial(_loader, tensor_getter, hf_source_keys_or_key, mt_target_shape_or_shapes, hook_fn)
+  elif not isinstance(hf_source_keys_or_key[0], list):
+    load_fn = partial(
+        _build_single_axis_stacked_tensor, hf_source_keys_or_key, tensor_getter, hook_fn,
+        mt_target_shape_or_shapes, config, mt_key,
+    )
+  else:
+    load_fn = partial(
+        _build_multi_axis_stacked_tensor, hf_source_keys_or_key, tensor_getter, hook_fn,
+        mt_target_shape_or_shapes, config, mt_key,
+    )
+  return load_fn
+
+
+def _get_maxtext_indices_and_shapes(mt_param_key_or_keys, maxtext_abstract_dict):
+  """Resolves MaxText key(s) to target indices and shapes.
+
+  The index is the parameter's order in `maxtext_abstract_dict.keys()`.
+  This function handles two forms of MaxText keys:
+  - `atomic_mt_key`: A single string representing one MaxText parameter that maps to HF parameter(s).
+    Example: "params-decoder-layers_0-self_attention-query-kernel" -> returns a single index and shape tuple.
+  - `composite_mt_key`: A tuple of strings representing multiple MaxText parameters derived from
+    a single/bundled HF parameter source (e.g., HF gate_up_proj splitting into MT wi_0 and wi_1).
+    Example: ("params-decoder-layers_0-mlp-wi_0-kernel", "params-decoder-layers_0-mlp-wi_1-kernel") ->
+    returns lists of indices and shapes for each composite component.
+  """
+  is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
+  if not is_composite_mt_key:
+    mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key_or_keys]
+    return mt_target_idx, mt_target_shape
+  mt_target_indices, mt_target_shapes = [], []
+  for mt_param_key in mt_param_key_or_keys:
+    mt_target_idx, mt_target_shape = maxtext_abstract_dict[mt_param_key]
+    mt_target_indices.append(mt_target_idx)
+    mt_target_shapes.append(mt_target_shape)
+  return mt_target_indices, mt_target_shapes
+
+
+def _get_maxtext_weight(
+    load_fn,
+    mt_target_idx_or_indices,
+    mt_target_shape_or_shapes,
+    mt_param_key_or_keys,
+    final_mt_weights,
+    save_dtype,
+    use_lazy_load,
+):
+  """Loads Hugging Face parameters and converts them to MaxText parameters.
+
+  This function handles loading based on tensor mode (eager or lazy) and
+  processes MaxText keys, which can be `atomic_mt_key` or `composite_mt_key`.
+  """
+  is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
+  if not use_lazy_load:
+    final_mt_tensor_numpy = load_fn()
+    if not is_composite_mt_key:
+      final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
+      if final_mt_tensor_numpy.shape != mt_target_shape_or_shapes:
+        raise ValueError(
+            f"Shape mismatch for {mt_param_key_or_keys}: Expected {mt_target_shape_or_shapes}, "
+            f"got {final_mt_tensor_numpy.shape}"
+        )
+    else:
+      for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
+        final_mt_weights[mt_target_idx] = final_mt_tensor_numpy[..., i]
+        if final_mt_weights[mt_target_idx].shape != mt_target_shape_or_shapes[i]:
+          raise ValueError(
+              f"Shape mismatch for {mt_param_key_or_keys[i]}: Expect {mt_target_shape_or_shapes[i]}, "
+              f"got {final_mt_weights[mt_target_idx].shape}"
+          )
+  else:
+    final_mt_tensor_numpy = LazyTensor(
+        load_fn,
+        mt_target_shape_or_shapes,
+        save_dtype,
+        name=mt_param_key_or_keys,
+    )
+    if not is_composite_mt_key:
+      final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
+    else:
+      for i, mt_target_idx in enumerate(mt_target_idx_or_indices):
+
+        def _slicing_loader(base_loader, slice_idx):
+          return np.array(base_loader)[..., slice_idx]
+
+        slicing_load_fn = partial(_slicing_loader, final_mt_tensor_numpy, i)
+        final_mt_weights[mt_target_idx] = LazyTensor(
+            slicing_load_fn,
+            mt_target_shape_or_shapes[i],
+            save_dtype,
+            name=mt_param_key_or_keys[i],
+        )
+
+
+def convert_hf_lora_key_to_maxtext(hf_key: str, param_mapping: dict) -> tuple[str | None, int | None]:
+  """Convert HF LoRA key to MaxText parameter path and optional layer index."""
+  hf_param_key = hf_key.replace(".lora_A.weight", ".weight").replace(".lora_B.weight", ".weight")
+  hf_param_key = hf_param_key.replace(".lora_A", "").replace(".lora_B", "")
+  if hf_param_key.startswith("base_model.model."):
+    hf_param_key = hf_param_key[len("base_model.model.") :]
+  if hf_param_key.startswith("language_model.model."):
+    hf_param_key = "model.language_model." + hf_param_key[len("language_model.model.") :]
+  for mt_key, hf_keys in param_mapping.items():
+    if isinstance(hf_keys, str):
+      if hf_keys == hf_param_key:
+        return mt_key, None
+      continue
+    if not hf_keys:
+      continue
+    if isinstance(hf_keys[0], list):
+      for i, sub_list in enumerate(hf_keys):
+        for j, hf_k in enumerate(sub_list):
+          if hf_k == hf_param_key:
+            return mt_key, (i, j)
+    else:
+      for i, hf_k in enumerate(hf_keys):
+        if hf_k == hf_param_key:
+          return mt_key, i
+  return None, None
+
+
+def _process_and_stack_weights(
+    indexed_weights: dict[str, Any],
+    is_scanned: bool,
+    num_layers: int,
+    axis_to_stack: int,
+    target_dtype: np.dtype,
+    mt_key: str,
+    suffix: str,
+    config: Any,
+) -> np.ndarray:
+  """Transposes and optionally stacks weights across layers."""
+  needs_llama31_rope_shuffle = config.rope_type == "llama3.1" or "llama3.1" in config.model_name.lower()
+  is_2d_indexed = any(isinstance(k, tuple) for k in indexed_weights.keys())
+  for idx in list(indexed_weights.keys()):
+    w = indexed_weights[idx].T
+    if needs_llama31_rope_shuffle:
+      if "query-kernel" in mt_key and suffix == "kernel_lora_b":
+        w = w * (1.0 / np.sqrt(config.head_dim))
+      if ("query-kernel" in mt_key or "key-kernel" in mt_key) and suffix == "kernel_lora_b":
+        num_heads = config.num_query_heads if "query-kernel" in mt_key else config.num_kv_heads
+        head_dim = config.head_dim
+        orig_shape = w.shape
+        work_val = w.reshape(orig_shape[0], num_heads, head_dim)
+        assert work_val.shape[-1] % 2 == 0, "The last dimension for rope has to be even."
+        half = head_dim // 2
+        first_half = work_val[..., :half]
+        second_half = work_val[..., half:]
+        interleaved = np.stack([first_half, second_half], axis=-1).reshape(work_val.shape)
+        w = interleaved.reshape(orig_shape)
+    indexed_weights[idx] = w
+
+  if not is_scanned:
+    return np.array(indexed_weights[0], dtype=target_dtype)
+  if is_2d_indexed:
+    num_experts = max(k[0] for k in indexed_weights.keys()) + 1
+    num_layers_2d = max(k[1] for k in indexed_weights.keys()) + 1
+    sample_weight = next(iter(indexed_weights.values()))
+    weights_array = np.zeros((num_experts, num_layers_2d) + sample_weight.shape, dtype=target_dtype)
+    for (e_idx, l_idx), w in indexed_weights.items():
+      weights_array[e_idx, l_idx] = w.astype(target_dtype)
+    return weights_array
+  weights_list = [None] * num_layers
+  for idx, w in indexed_weights.items():
+    if isinstance(idx, int) and idx < num_layers:
+      weights_list[idx] = w
+  sample_weight = next((w for w in weights_list if w is not None), None)
+  if sample_weight is None:
+    return np.array([], dtype=target_dtype)
+  for i in range(num_layers):
+    if weights_list[i] is None:
+      weights_list[i] = np.zeros_like(sample_weight)
+  return np.stack(weights_list, axis=axis_to_stack).astype(target_dtype)
+
+
+def convert_lora_to_maxtext_adapter(
+    config,
+    lora_weights: dict[str, Any],
+    save_dtype: str = "bfloat16",
+) -> dict[str, Any]:
+  """Converts HF LoRA weights to MaxText adapter format."""
+  model_key = config.model_name
+  if "-Instruct" in model_key:
+    max_logging.log("Warning: You want an Instruct version, so we are using the base model architecture instead.")
+    model_key = model_key.replace("-Instruct", "")
+  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_dict = hf_config_obj.to_dict()
+  param_map_mt_to_hf = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
+  mt_adapter_tree = {}
+  mapped_count = 0
+  target_dtype = ml_dtypes.bfloat16 if save_dtype in ("bfloat16", "float8_e4m3fn") else np.float32
+  collected_weights = {}
+  for hf_key, weight in lora_weights.items():
+    mt_key, index = convert_hf_lora_key_to_maxtext(hf_key, param_map_mt_to_hf)
+    if mt_key:
+      if hasattr(weight, "numpy"):
+        if weight.dtype == torch.bfloat16:
+          weight = weight.to(torch.float32)
+        weight = weight.detach().cpu().numpy()
+      suffix = "kernel_lora_a" if "lora_A" in hf_key or "lora_a" in hf_key else "kernel_lora_b"
+      if isinstance(mt_key, tuple):
+        mt_key = mt_key[0]
+      if mt_key not in collected_weights:
+        collected_weights[mt_key] = {}
+      if suffix not in collected_weights[mt_key]:
+        collected_weights[mt_key][suffix] = {}
+      idx = index if index is not None else 0
+      collected_weights[mt_key][suffix][idx] = weight
+      mapped_count += 1
+
+  for mt_key, suffixes in collected_weights.items():
+    clean_mt_key = mt_key.replace("-kernel", "")
+    parts = clean_mt_key.split("-")
+    if parts[0] == "params":
+      parts = parts[1:]
+    for suffix, indexed_weights in suffixes.items():
+      is_scanned = isinstance(param_map_mt_to_hf.get(mt_key), list)
+      num_layers = len(param_map_mt_to_hf[mt_key]) if is_scanned else 1
+      final_weight = _process_and_stack_weights(
+          indexed_weights, is_scanned, num_layers, config.param_scan_axis, target_dtype, mt_key, suffix, config
+      )
+      current = mt_adapter_tree
+      for part in parts:
+        if part not in current:
+          current[part] = {}
+        current = current[part]
+      current[suffix] = {"value": final_weight}
+  max_logging.log(f"Successfully mapped {mapped_count} out of {len(lora_weights)} LoRA parameters")
+  return mt_adapter_tree
+
+
+def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision):
+  """Helper function to intercept the tensor_getter and inject LoRA weights dynamically."""
+  max_logging.log("LoRA adapter path provided and load_parameters_path provided. Merging LoRA into base weights.")
+  hf_access_token = config.hf_access_token
+  lora_weights = load_hf_dict_from_safetensors(hf_lora_adapter_path, hf_access_token, revision)
+  if os.path.isdir(hf_lora_adapter_path):
+    config_path = os.path.join(hf_lora_adapter_path, "adapter_config.json")
+  else:
+    config_path = hf_hub_download(hf_lora_adapter_path, "adapter_config.json", token=hf_access_token)
+  with open(config_path, "r", encoding="utf-8") as f:
+    adapter_config = json.load(f)
+  lora_alpha = adapter_config.get("lora_alpha", 8)
+  lora_rank = adapter_config.get("r", 8)
+  scaling = lora_alpha / lora_rank if lora_rank > 0 else 1.0
+  base_to_lora = {}
+  for k, w in lora_weights.items():
+    if hasattr(w, "numpy"):
+      if w.dtype == torch.bfloat16:
+        w = w.to(torch.float32)
+      w = w.detach().cpu().numpy()
+    hf_param_key = k.replace(".lora_A.weight", ".weight").replace(".lora_B.weight", ".weight")
+    hf_param_key = hf_param_key.replace(".lora_A", "").replace(".lora_B", "")
+    if hf_param_key.startswith("base_model.model."):
+      hf_param_key = hf_param_key[len("base_model.model.") :]
+    if hf_param_key.startswith("language_model.model."):
+      hf_param_key = "model.language_model." + hf_param_key[len("language_model.model.") :]
+    if hf_param_key not in base_to_lora:
+      base_to_lora[hf_param_key] = {}
+    if "lora_A" in k or "lora_a" in k:
+      base_to_lora[hf_param_key]["A"] = w
+    else:
+      base_to_lora[hf_param_key]["B"] = w
+  original_getter = tensor_getter
+
+  def _merged_getter(key, **kwargs):
+    base_w = original_getter(key, **kwargs)
+    if key in base_to_lora:
+      lora_dict = base_to_lora[key]
+      if "A" in lora_dict and "B" in lora_dict:
+        lora_a = np.array(lora_dict["A"], dtype=np.float32)
+        lora_b = np.array(lora_dict["B"], dtype=np.float32)
+        if lora_a.ndim > 2 or lora_b.ndim > 2:
+          delta = np.einsum("...ir,rj...->...ij...", lora_b, lora_a) * scaling
+        else:
+          delta = np.matmul(lora_b, lora_a) * scaling
+        if hasattr(base_w, "dtype"):
+          original_dtype = base_w.dtype
+        else:
+          original_dtype = np.float32
+        if delta.shape != base_w.shape and delta.size == base_w.size:
+          delta = delta.reshape(base_w.shape)
+        base_w = np.array(base_w, dtype=np.float32) + delta
+        return base_w.astype(original_dtype)
+    return base_w
+
+  return _merged_getter
+
+
+class LazyHFLoader:
+  """
+  Loads Hugging Face weights on-demand to minimize RAM usage.
+
+  This class is the core of the "lazy loading" feature. Instead of loading the
+  entire model into memory at once, it reads the model's index file (e.g.,
+  `model.safetensors.index.json`) to understand the mapping between tensor names
+  and the shard files they belong to.
+
+  When a specific tensor is requested via `get_tensor`, this class:
+  1. Identifies the correct shard file.
+  2. Downloads the shard file if not already cached by `huggingface_hub`.
+  3. Opens the shard and extracts *only* the requested tensor into memory.
+
+  This approach is highly memory-efficient, especially for `safetensors`, as
+  it avoids loading entire multi-gigabyte shard files when only a small piece
+  is needed. A threading lock (`_ram_lock`) is used to ensure that memory-intensive
+  file-opening operations are serialized to prevent RAM spikes, while downloads
+  can still occur in parallel.
+  """
+
+  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16"):
+    self.model_id = model_id
+    self.token = token
+    self.revision = revision
+    self.save_dtype = save_dtype
+    self.is_local = os.path.isdir(self.model_id)
+    self.shard_map = {}
+    self.current_shard_name = None
+    self.current_shard_content = {}
+    self._local_shard_paths = {}
+    self._ram_lock = threading.Lock()
+    self._initialize_index()
+
+  def __getstate__(self):
+    """Allows pickling/copying by excluding the non-pickleable lock."""
+    state = self.__dict__.copy()
+    del state["_ram_lock"]
+    return state
+
+  def __setstate__(self, state):
+    """Restores state after pickling/copying and recreates a new lock."""
+    self.__dict__.update(state)
+    self._ram_lock = threading.Lock()
+
+  def _initialize_index(self):
+    """Fetches and parses the Hugging Face model index file to build a shard map."""
+    if self.is_local:
+      files = os.listdir(self.model_id)
+    else:
+      files = list_repo_files(self.model_id, token=self.token)
+
+    if "model.safetensors.index.json" in files:
+      index_file = "model.safetensors.index.json"
+    elif "model.safetensors" in files:
+      self.shard_map = {None: "model.safetensors"}
+      return
+    else:
+      raise ValueError("Could not find recognized model weights (safetensors) in HF repo.")
+
+    max_logging.log(f"Loading index file: {index_file}")
+    if self.is_local:
+      index_path = os.path.join(self.model_id, index_file)
+    else:
+      index_path = hf_hub_download(
+          repo_id=self.model_id,
+          filename=index_file,
+          token=self.token,
+          revision=self.revision,
+      )
+    with open(index_path, "r", encoding="utf-8") as f:
+      index_data = json.load(f)
+    self.shard_map = index_data["weight_map"]
+
+  def get_tensor(self, key: str, dtype: str | None = None) -> np.ndarray:
+    """
+    Retrieves a specific tensor by name, lazily loading its shard if necessary.
+
+    This is the main entry point for accessing model weights. It determines
+    which shard file contains the tensor, ensures it's downloaded, and then
+    reads the tensor data.
+
+    For safetensors, this is extremely efficient as it memory-maps the file
+    and reads only the required tensor's data from disk.
+    """
+    resolved_key = resolve_scale_key(key, self.shard_map)
+    shard_name = self.shard_map.get(resolved_key)
+
+    if shard_name is None and None in self.shard_map:
+      shard_name = self.shard_map[None]
+    elif shard_name is None:
+      raise ValueError(f"Key {key} not found in HF checkpoint index.")
+
+    if shard_name in self._local_shard_paths:
+      local_path = self._local_shard_paths[shard_name]
+    else:
+      if self.is_local:
+        local_path = os.path.join(self.model_id, shard_name)
+      else:
+        local_path = hf_hub_download(
+            repo_id=self.model_id,
+            filename=shard_name,
+            token=self.token,
+            revision=self.revision,
+        )
+      self._local_shard_paths[shard_name] = local_path
+
+    with self._ram_lock:
+      framework = "pt" if torch is not None else "np"
+      with safe_open(local_path, framework=framework, device="cpu") as f:
+        t = f.get_tensor(resolved_key)
+        return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
+
+
+class LazyTensor:
+  """
+  A proxy object that looks like a NumPy array but delays actual loading
+  and transformation until __array__ is called (e.g., by Orbax during save).
+  """
+
+  def __init__(
+      self,
+      load_fn: Callable[[], np.ndarray],
+      shape: tuple,
+      dtype,
+      name: str = "unknown",
+  ):
+    self._load_fn = load_fn
+    self.shape = shape
+    try:
+      self.dtype = np.dtype(dtype)
+    except (TypeError, ValueError):
+      dtype_str = str(dtype)
+      if "float8_e4m3fn" in dtype_str:
+        self.dtype = np.dtype(ml_dtypes.float8_e4m3fn)
+      elif "bfloat16" in dtype_str:
+        self.dtype = np.dtype(ml_dtypes.bfloat16)
+      else:
+        self.dtype = np.dtype(np.float32)
+    self.ndim = len(shape)
+    self.name = name
+
+  @property
+  def size(self):
+    """Total number of elements in the tensor."""
+    return np.prod(self.shape)
+
+  @property
+  def nbytes(self):
+    """Return estimated nbytes so Orbax doesn't need to load the real array to find out."""
+    return self.size * self.dtype.itemsize
+
+  @property
+  def itemsize(self):
+    return self.dtype.itemsize
+
+  def __array__(self, dtype=None):
+    """
+    Materializes the tensor data.
+
+    When this method is invoked, it finally calls the `_load_fn` that was
+    provided during initialization. This function executes the actual loading
+    and transformation of the tensor from the Hugging Face checkpoint. The
+    resulting NumPy array is then returned to the caller.
+    """
+    try:
+      arr = self._load_fn()
+    except Exception as e:
+      max_logging.log(f"FATAL ERROR: Failed to load tensor '{self.name}' (shape {self.shape}). Error: {e}")
+      raise
+
+    if not isinstance(self.shape, list) and arr.shape != self.shape:
+      raise ValueError(f"Shape mismatch for tensor '{self.name}'. Expected {self.shape}, but got {arr.shape}.")
+
+    if not isinstance(arr, np.ndarray):
+      arr = np.array(arr)
+
+    if dtype is not None and arr.dtype != dtype:
+      return arr.astype(dtype)
+    return arr
+
+  def __repr__(self):
+    return f"LazyTensor(name={self.name}, shape={self.shape}, dtype={self.dtype})"
+
+
+class LazyTensorHandler(type_handlers.NumpyHandler):
+  """
+  Custom Orbax handler for LazyTensor.
+
+  It masquerades as a standard NumpyHandler so that the resulting checkpoint
+  has the standard 'array_metadatas' structure and can be loaded by
+  standard MaxText instances.
+  """
+
+  async def serialize(self, value, *args, **kwargs):
+    if hasattr(value, "__array__"):
+      value = np.array(value)
+
+    return await super().serialize(value, *args, **kwargs)
+
+
+type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+
+
+def convert_to_maxtext(
+    config, *, lazy_load_tensors=True, eager_load_method="safetensors", hf_model_path=None,
+    revision=None, save_dtype="bfloat16", simulated_cpu_devices_count=16,
+):
+  overall_start = time.time()
+  model_name = config.model_name
+  if model_name not in HF_IDS:
+    raise ValueError(f"Unsupported model name: {model_name}. Supported models are: {list(HF_IDS.keys())}")
+
+  model_id = hf_model_path or HF_IDS[model_name]
+  if "-Instruct" in model_name:
+    max_logging.log("Warning: You want an Instruct version, so we are using the base model architecture instead.")
+    flat_config = config.get_keys().copy()
+    config = pyconfig.HyperParameters(
+        config._pydantic_config.model_copy(update={"model_name": model_name.replace("-Instruct", "")})
+    )
+    flat_config["model_name"] = config.model_name
+    config.get_keys().update(flat_config)
+  output_directory = config.base_output_directory or f"tmp/{config.run_name}"
+  hf_token = config.hf_access_token
+  hf_lora_adapter_path = config.hf_lora_adapter_path
+  is_adapter_only = bool(hf_lora_adapter_path and not config.load_parameters_path)
+  is_merge_mode = bool(hf_lora_adapter_path and config.load_parameters_path)
+
+  if is_adapter_only:
+    max_logging.log("LoRA adapter path provided and load_parameters_path NOT provided. Converting LoRA adapter ONLY.")
+    lora_weights = load_hf_dict_from_safetensors(hf_lora_adapter_path, hf_token, revision)
+    state_params = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
+    adapter_name = os.path.basename(os.path.normpath(hf_lora_adapter_path))
+    output_directory = os.path.join(output_directory, model_name, adapter_name)
+  else:
+    if lazy_load_tensors and config.use_multimodal:
+      raise ValueError("lazy loading of HF tensors is not supported for multimodal models yet.")
+
+    hf_state_dict_numpy = None
+    if lazy_load_tensors:
+      max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype)
+      print_ram_usage("After LazyLoader init")
+      tensor_getter = hf_loader.get_tensor
+    else:
+      if eager_load_method == "transformers":
+        max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
+        hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
+      elif eager_load_method == "safetensors":
+        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+        hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+      else:
+        raise NotImplementedError
+
+      unique_dtypes = {tensor.dtype for tensor in hf_state_dict_numpy.values()}
+      max_logging.log(f"HuggingFace model loaded. dtypes: {unique_dtypes}")
+      print_ram_usage("After full HF model load")
+      if eager_load_method == "transformers" and config.use_multimodal:
+        old_prefix = "model.vision_tower.vision_model."
+        new_prefix = "model.vision_tower."
+        needs_remap = any(key.startswith(new_prefix) and not key.startswith(old_prefix) for key in hf_state_dict_numpy)
+        if needs_remap:
+          max_logging.log("Detected new-style key layout; remapping vision_tower keys.")
+          hf_state_dict_numpy = {
+              (old_prefix + key[len(new_prefix):] if key.startswith(new_prefix) and not key.startswith(old_prefix)
+               else key): value for key, value in hf_state_dict_numpy.items()
+          }
+
+      def _eager_getter(key, dtype=None):
+        if key is None:
+          return None
+        resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
+        if resolved_key not in hf_state_dict_numpy:
+          raise ValueError(f"HuggingFace key {key} not found in state_dict.")
+        return _convert_tensor_to_numpy(hf_state_dict_numpy[resolved_key], dtype or save_dtype)
+
+      tensor_getter = _eager_getter
+
+    if is_merge_mode:
+      tensor_getter = _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision)
+
+    model_key = config.model_name
+    hf_config_dict = HF_MODEL_CONFIGS[model_key].to_dict()
+    param_map = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
+    hook_map = HOOK_FNS[model_key](hf_config_dict, config, config.scan_layers, saving_to_hf=False)
+    maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
+    start = time.time()
+    final_mt_weights = [None] * len(maxtext_abstract_dict)
+    filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_abstract_dict.keys())
+
+    for mt_key in MemoryMonitorTqdm(
+        filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True, smoothing=0
+    ):
+      if not lazy_load_tensors:
+        max_logging.log(f"maxtext param: {mt_key}")
+      if mt_key not in param_map:
+        raise ValueError(f"MaxText parameter {mt_key} not found in mapping.")
+      target_indices, target_shapes = _get_maxtext_indices_and_shapes(mt_key, maxtext_abstract_dict)
+      param_dtype = _param_save_dtype(mt_key, save_dtype)
+      getter = tensor_getter if param_dtype == save_dtype else partial(tensor_getter, dtype=param_dtype)
+      load_fn = _get_hf_loading_function(param_map.get(mt_key), getter, hook_map.get(mt_key), target_shapes, config, mt_key)
+      _get_maxtext_weight(load_fn, target_indices, target_shapes, mt_key, final_mt_weights, param_dtype, lazy_load_tensors)
+
+    del hf_state_dict_numpy
+    max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
+    print_ram_usage("Before creating full JAX tree")
+    state_params = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
+
+  print_ram_usage("Before saving")
+  leaves = jax.tree_util.tree_leaves(state_params)
+  max_logging.log(f"Length of state_params leaves: {len(leaves)}")
+  if leaves:
+    max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
+  save_weights_to_checkpoint(
+      output_directory, state_params, simulated_cpu_devices_count,
+      config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3, config=config,
+  )
+  print_ram_usage("Program Ends")
+  max_logging.log(f"Conversion complete. Checkpoint saved to {output_directory}")
+  max_logging.log(f"Overall Elapse: {(time.time() - overall_start) / 60:.2f} min")
+  print_peak_memory()
+  return os.path.join(output_directory, "0", "items")

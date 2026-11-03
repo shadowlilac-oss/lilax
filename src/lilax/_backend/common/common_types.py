@@ -1,0 +1,203 @@
+"""Common types."""
+import enum
+import fnmatch
+from typing import Any, Sequence
+
+import numpy as np
+
+import jax.numpy as jnp
+from flax import struct
+
+Config = Any
+
+Array = jnp.ndarray
+PRNGKey = jnp.ndarray
+DType = jnp.dtype
+Shape = Sequence[int]
+
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is FP8."""
+  return dtype in (
+      "float8_e4m3fn",
+      "float8_e5m2",
+      jnp.float8_e4m3fn,
+      jnp.float8_e5m2,
+  )
+
+
+def is_module_unquantized(config: Config, module_name: str) -> bool:
+  """Checks whether module_name matches any pattern in config.unquantized_modules."""
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  if isinstance(unquantized, str):
+    unquantized = (unquantized,)
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  return any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized)
+
+
+def get_weight_dtype(config: Config, module_name: str) -> DType:
+  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return config.weight_dtype
+  if is_module_unquantized(config, module_name):
+    return config.dtype
+  return config.weight_dtype
+
+
+def get_quant(config: Config, module_name: str, quant: Any) -> Any:
+  """Resolves quantization object for a submodule, returning None if in unquantized_modules."""
+  if is_module_unquantized(config, module_name):
+    return None
+  return quant
+
+
+AxisNames = tuple[str, ...]
+AxisIdxes = tuple[int, ...]
+
+SEGMENT_ID_BATCH = "segment_ids_batch"
+
+BATCH = "activation_batch"
+BATCH_ATTN = "activation_batch_attn"
+
+ATTN_LENGTH = "activation_length_attn"
+ATTN_INPUT_LENGTH = "activation_input_length_attn"
+
+LENGTH = "activation_length"
+PREFILL_LENGTH = "prefill_activation_length"
+Q_LENGTH = "activation_q_length"
+Q_LORA_UP_PROJ = "q_lora_up_proj"
+KV_LENGTH = "activation_kv_length"
+KV_LORA_UP_PROJ = "kv_lora_up_proj"
+ATTN_EMBED = "activation_embed_attn"
+EMBED = "activation_embed"
+HEAD = "activation_heads"
+PREFILL_KV_BATCH = "activation_prefill_kv_batch"
+KV_BATCH = "activation_kv_batch"
+KV_HEAD = "activation_kv_heads"
+KV_HEAD_DIM = "activation_kv_head_dim"
+D_KV = "activation_kv"
+DECODE_BATCH = "decode_batch"
+DECODE_LENGTH = "decode_length"
+CACHE_BATCH_PREFILL = "cache_batch_prefill"
+CACHE_BATCH = "cache_batch"
+CACHE_SEQUENCE = "cache_sequence"
+CACHE_HEADS = "cache_heads"
+CACHE_HEADS_NONE = "cache_heads_none"
+CACHE_KV = "cache_kv"
+CACHE_SCALE_BATCH = "cache_scale_batch"
+CACHE_SCALE_SEQUENCE = "cache_scale_sequence"
+CACHE_SCALE_HEADS = "cache_scale_heads"
+CACHE_SCALE_KV = "cache_scale_kv"
+
+MODEL_MODE_AUTOREGRESSIVE = "autoregressive"
+MODEL_MODE_PREFILL = "prefill"
+MODEL_MODE_TRAIN = "train"
+
+DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
+
+DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
+
+
+@struct.dataclass
+class MultimodalInput:
+  """Multimodal inputs for encoder processing."""
+
+  image_embeddings: Array | None = None
+  image_masks: Array | None = None
+  video_embeddings: Array | None = None
+  video_masks: Array | None = None
+  audio_embeddings: Array | None = None
+  audio_masks: Array | None = None
+  bidirectional_mask: Array | None = None
+  bidirectional_mask_video: Array | None = None
+
+
+class DecoderBlockType(enum.Enum):
+  """Decoder block types."""
+
+  DEFAULT = "default"
+  LLAMA2 = "llama2"
+  MISTRAL = "mistral"
+  MIXTRAL = "mixtral"
+  DEEPSEEK = "deepseek"
+  GEMMA = "gemma"
+  GEMMA2 = "gemma2"
+  GEMMA3 = "gemma3"
+  GEMMA4 = "gemma4"
+  GEMMA4_SMALL = "gemma4_small"
+  QWEN2 = "qwen2"
+  QWEN3 = "qwen3"
+  QWEN3_MOE = "qwen3_moe"
+  QWEN3_CUSTOM_MOE = "qwen3_custom_moe"
+  QWEN3_NEXT = "qwen3_next"
+  QWEN3_5 = "qwen3_5"
+  GPT3 = "gpt3"
+  GPT_OSS = "gpt_oss"
+  SIMPLE = "simple"
+  SIMPLE_MLP = "simple_mlp"
+  LLAMA4 = "llama4"
+  OLMO3 = "olmo3"
+  DEEPSEEK4 = "deepseek4"
+  ENVY = "envy"
+  WEAVER = "weaver"
+  MING = "ming"
+  HY4 = "hy4"
+
+
+class VisionEncoderBlockType(enum.Enum):
+  """Vision encoder block types."""
+
+  NONE = "none"
+  GEMMA3 = "gemma3"
+  LLAMA4 = "llama4"
+  QWEN3_OMNI = "qwen3_omni"
+  GEMMA4 = "gemma4"
+  QWEN3_5 = "qwen3_5"
+  QWEN3_VL = "qwen3_vl"
+
+
+class AttentionType(enum.Enum):
+  GLOBAL = "global"
+  LOCAL_SLIDING = "local_sliding"
+  CHUNK = "chunk"
+  MLA = "mla"
+  COMPRESSED = "compressed"
+  FULL = "full"
+  BLOCK_DIFFUSION = "block_diffusion"
+
+
+class ShardMode(enum.Enum):
+  AUTO = "auto"
+  EXPLICIT = "explicit"
+
+
+class ReorderStrategy(enum.Enum):
+  """Reorder strategies for load-balanced context parallelism.
+  Maps to transformer_engine.jax.attention.ReorderStrategy at runtime.
+  """
+
+  AUTO = "auto"
+  DUAL_CHUNK_SWAP = "dual_chunk_swap"
+  STRIPED = "striped"
+
+
+class HyperConnectionType(enum.Enum):
+  ATTENTION = "attention"
+  MLP_MOE = "mlp_moe"
+  MLP_DENSE = "mlp_dense"
+
+
+class CustomRule(enum.Enum):
+  """Custom mesh and logical axis rule sets, each backed by a yml in configs/custom_mesh_and_rule."""
+
+  DEFAULT = ""
+  PURE_FSDP = "pure-fsdp"
+  CP_AS_EP = "cp-as-ep"
+  EP_AS_CP = "ep-as-cp"
+  PIPELINE_LARGE_MOE = "pipeline-large-moe"
+  FSDP_2D = "2d-fsdp"
+  EP_AS_DP = "ep-as-dp"
+  SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
+  EXPERT_ON_FSDP_EP = "expert-on-fsdp-ep"
+  FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"

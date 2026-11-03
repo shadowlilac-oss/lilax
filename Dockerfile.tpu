@@ -1,0 +1,13 @@
+FROM python:3.12-slim-trixie
+
+ARG TARGETARCH
+RUN test "$TARGETARCH" = amd64 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV CC=gcc-12 CXX=g++-12
+WORKDIR /opt/lilax
+COPY . .
+RUN python -m pip install -e '.[tpu]' \
+    -r src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt

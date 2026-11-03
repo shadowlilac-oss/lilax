@@ -1,0 +1,10 @@
+# Sphinx-related requirements.
+sphinx<9
+myst-nb
+myst-parser[linkify]
+sphinx-book-theme
+sphinx-design
+sphinx-copybutton
+
+# for import docs
+jax

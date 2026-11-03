@@ -1,0 +1,625 @@
+"""MaxText-specific vLLM sampler and rollout implementations."""
+
+import ast
+import contextlib
+import copy
+import inspect
+import json
+import logging
+import re
+import time
+import traceback
+from typing import Any, NamedTuple, Optional, Tuple
+
+from flax import nnx
+from flax.traverse_util import flatten_dict, unflatten_dict
+import jax
+import jax.numpy as jnp
+from lilax._backend.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary
+from lilax._backend.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
+from lilax._backend.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
+from lilax._backend.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
+from lilax._backend.integration.vllm.weight_converter import MODEL_TO_CONVERSION_RULES, WeightConverter
+from tunix.generate import mappings
+from tunix.generate import utils as tunix_utils
+from tunix.generate.vllm_sampler import VllmConfig, VllmSampler
+from tunix.rl.rollout import base_rollout, vllm_rollout
+
+_NO_RULE_TABLE = object()
+
+
+def _patch_tunix_moe_weight_keys() -> None:
+  tunix_keys = getattr(tunix_utils, "_MOE_MLP_WEIGHTS", None)
+  if tunix_keys is None:
+    logging.warning("tunix.generate.utils._MOE_MLP_WEIGHTS is absent; skipping the MoE `wo` zero-pad patch.")
+    return
+  missing = set(MOE_MLP_WEIGHTS) - set(tunix_keys)
+  if not missing:
+    return
+  tunix_utils._MOE_MLP_WEIGHTS = frozenset(set(tunix_keys) | set(MOE_MLP_WEIGHTS))
+  logging.info("Patched tunix _MOE_MLP_WEIGHTS with %s so padded MoE weights are zero-padded instead of repeated.",
+               sorted(missing))
+
+
+_patch_tunix_moe_weight_keys()
+
+
+def _rule_table_for(model_name: str):
+  if model_name == "qwen3-0.6b":
+    return MODEL_TO_CONVERSION_RULES["qwen3"]
+  if model_name.startswith("qwen3.5"):
+    return None
+  return _NO_RULE_TABLE
+
+
+def _create_model_converter(
+    model_name: str,
+    config: Any,
+    mesh: jax.sharding.Mesh,
+    use_hf_mapping: bool = False,
+    use_weight_converter: bool = False,
+    use_standalone_converter: bool = False,
+    sharding_hints: Optional[dict] = None,
+    debug: bool = False,
+):
+  tp = config.rollout_tensor_parallelism
+  if use_standalone_converter:
+    if model_name.startswith("qwen3.5"):
+      return Qwen35MaxTextToVLLMConverter(
+          config=config,
+          mesh=mesh,
+          vllm_attn_dp=sharding_hints.get("attn_dp_size", 1) if sharding_hints else 1,
+          vllm_use_ep=sharding_hints.get("enable_expert_parallel", False) if sharding_hints else False,
+      )
+    if model_name.startswith("gemma4"):
+      return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+    raise NotImplementedError(f"use_standalone_converter: no standalone torchax converter for {model_name}")
+  if not use_hf_mapping and not use_weight_converter:
+    return None
+  rule_table = _rule_table_for(model_name)
+  if rule_table is not _NO_RULE_TABLE:
+    if not use_hf_mapping:
+      return WeightConverter(rules=None, config=config, tp=tp, debug=debug)
+    if rule_table is None:
+      raise NotImplementedError(
+          f"{model_name} has no HuggingFace-target conversion rules. It is only "
+          "supported on the direct MaxText-to-MaxText sync path, which requires "
+          "'maxtext_config' in vllm_additional_config so vLLM runs "
+          "MaxTextForCausalLM."
+      )
+    return WeightConverter(rules=rule_table, tp=tp)
+  if model_name.startswith("gemma4"):
+    return Gemma4MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3.5"):
+    return Qwen35MaxTextToVLLMConverter(config=config, mesh=mesh)
+  if model_name.startswith("qwen3-30"):
+    return Qwen3MaxTextToVLLMConverter(config=config, mesh=mesh)
+  return None
+
+
+def _as_dict(value: Any) -> dict:
+  if isinstance(value, dict):
+    return value
+  if isinstance(value, str):
+    for parse in (json.loads, ast.literal_eval):
+      try:
+        parsed = parse(value)
+      except (ValueError, SyntaxError):
+        continue
+      if isinstance(parsed, dict):
+        return parsed
+    logging.warning("Could not parse vllm_additional_config: %.120s", value)
+    return {}
+  if type(value).__name__ == "DictConfig":
+    from omegaconf import OmegaConf
+
+    return OmegaConf.to_container(value, resolve=True)
+  return {}
+
+
+def uses_maxtext_vllm_adapter(config: Any) -> bool:
+  overrides = getattr(config, "vllm_hf_overrides", None)
+  if isinstance(overrides, str):
+    return "MaxTextForCausalLM" in overrides
+  if isinstance(overrides, dict):
+    architectures = overrides.get("architectures", ())
+    if isinstance(architectures, str):
+      architectures = (architectures,)
+    return "MaxTextForCausalLM" in architectures
+  return False
+
+
+def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:
+  return bool(getattr(config, "scan_layers", False) and uses_maxtext_vllm_adapter(config))
+
+
+def prepare_direct_sync_additional_config(
+    additional_config: Optional[dict[str, Any]],
+    *,
+    direct_maxtext_sync: bool,
+    num_experts: int,
+    tensor_parallel_size: int,
+) -> Optional[dict[str, Any]]:
+  if not direct_maxtext_sync or num_experts <= 1 or tensor_parallel_size <= 1:
+    return additional_config
+  prepared = copy.deepcopy(additional_config) if additional_config is not None else {}
+  maxtext_overrides = prepared.setdefault("maxtext_config", {})
+  if not isinstance(maxtext_overrides, dict):
+    raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for direct MaxText sync.")
+  if not maxtext_overrides.get("prefuse_moe_weights", False):
+    logging.info("MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
+                 tensor_parallel_size)
+  maxtext_overrides["prefuse_moe_weights"] = True
+  return prepared
+
+
+def _find_scanned_layer_idx(key_tuple, container_names=("layers", "scanned_blocks", "layers_remainder")):
+  for name in container_names:
+    for i in range(len(key_tuple) - 1):
+      if key_tuple[i] == name and isinstance(key_tuple[i + 1], str) and key_tuple[i + 1].startswith("layers_"):
+        return i, name
+  return -1, None
+
+
+def validate_direct_sync_layer_coverage(source, target) -> int:
+  def to_pure_params(state):
+    if hasattr(state, "filter") and hasattr(state, "to_pure_dict"):
+      return state.filter(nnx.Param).to_pure_dict()
+    if hasattr(state, "to_pure_dict"):
+      return state.to_pure_dict()
+    if hasattr(state, "to_dict"):
+      return state.to_dict()
+    return state
+
+  def unwrap(state, wrapper):
+    while isinstance(state, dict) and wrapper in state:
+      state = state[wrapper]
+    return state
+
+  source = unwrap(to_pure_params(source), "base")
+  target = unwrap(to_pure_params(target), "model")
+  if not isinstance(source, dict) or not isinstance(target, dict):
+    return 0
+  source_flat = flatten_dict(source)
+  target_flat = flatten_dict(target)
+
+  def unscanned_layer_index(path):
+    for i, part in enumerate(path):
+      if isinstance(part, str) and re.fullmatch(r"layers_\d+", part):
+        return i
+    return -1
+
+  source_keys = set(source_flat)
+  target_layer_keys = {key for key in target_flat if unscanned_layer_index(key) != -1}
+
+  def has_split_wi(key):
+    return key[-1] == "wi" and key[:-1] + ("wi_0",) in source_keys and key[:-1] + ("wi_1",) in source_keys
+
+  def source_covers(target_key):
+    if target_key in source_keys or has_split_wi(target_key):
+      return True
+    idx = unscanned_layer_index(target_key)
+    scanned_key = target_key[:idx] + ("layers",) + target_key[idx + 1 :]
+    implicit_key = target_key[:idx] + target_key[idx + 1 :]
+    return scanned_key in source_keys or implicit_key in source_keys or has_split_wi(scanned_key)
+
+  missing = {key for key in target_layer_keys if not source_covers(key)}
+  if not target_layer_keys or missing:
+    examples = [".".join(map(str, key)) for key in sorted(missing)[:5]]
+    raise ValueError(
+        "Direct MaxText weight sync would leave rollout transformer parameters at random initialization: "
+        f"matched {len(target_layer_keys) - len(missing)}/{len(target_layer_keys)} target layer parameters; "
+        f"missing examples: {examples}"
+    )
+  logging.info("MaxTextVllmSampler: verified direct-sync coverage for all %d rollout layer parameters.",
+               len(target_layer_keys))
+  return len(target_layer_keys)
+
+
+_QWEN_NESTED_LOCAL = "local_layers"
+_QWEN_NESTED_GLOBAL = "global_layer"
+
+
+class _QwenScannedRef(NamedTuple):
+  container_idx: int
+  slot_idx: Optional[int]
+  consumed: int
+  nested: bool
+  trailing: bool
+
+
+_NO_QWEN_SCAN = _QwenScannedRef(-1, -1, 0, False, False)
+
+
+def _find_qwen_scanned_layer_idx(key_tuple) -> _QwenScannedRef:
+  for i in range(len(key_tuple) - 1):
+    if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
+      continue
+    name = key_tuple[i + 1]
+    if name.startswith("layers_"):
+      continue
+    if name == _QWEN_NESTED_LOCAL:
+      return _QwenScannedRef(i, None, 2, True, False)
+    if name == _QWEN_NESTED_GLOBAL:
+      return _QwenScannedRef(i, None, 2, False, True)
+    match = re.fullmatch(r"layer_(\d+)", name)
+    if match:
+      return _QwenScannedRef(i, int(match.group(1)), 2, False, False)
+    return _QwenScannedRef(i, 0, 1, False, False)
+  return _NO_QWEN_SCAN
+
+
+def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
+  if hasattr(weights, "filter") and hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.filter(nnx.Param).to_pure_dict()
+  elif hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.to_pure_dict()
+  elif hasattr(weights, "to_dict"):
+    pure_dict = weights.to_dict()
+  elif isinstance(weights, dict):
+    pure_dict = weights
+  else:
+    return weights
+
+  flat_w = flatten_dict(pure_dict)
+  scanned_keys = []
+  slot_indices = set()
+  scan_lengths = set()
+  local_widths = set()
+  has_trailing = False
+  for key, value in flat_w.items():
+    if "layers_remainder" in key and "dropout" not in key and "rngs" not in key:
+      raise ValueError(
+          f"Qwen scanned parameter {'.'.join(map(str, key))} is in `layers_remainder`: unrolling the layers past "
+          "the last whole cycle is not supported, so num_decoder_layers must be a multiple of the cycle."
+      )
+    ref = _find_qwen_scanned_layer_idx(key)
+    if ref.container_idx == -1 or "dropout" in key or "rngs" in key:
+      continue
+    min_ndim = scan_axis + 2 if ref.nested else scan_axis + 1
+    if not hasattr(value, "shape") or len(value.shape) < min_ndim:
+      raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
+    scanned_keys.append((key, value, ref))
+    scan_lengths.add(value.shape[scan_axis])
+    if ref.nested:
+      local_widths.add(value.shape[scan_axis + 1])
+      slot_indices.update(range(value.shape[scan_axis + 1]))
+    elif ref.trailing:
+      has_trailing = True
+    else:
+      slot_indices.add(ref.slot_idx)
+
+  if not scanned_keys:
+    return weights
+  if len(local_widths) > 1:
+    raise ValueError(f"Qwen nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
+  if pattern_length is None:
+    trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
+  else:
+    if local_widths and local_widths != {pattern_length - 1}:
+      raise ValueError(
+          f"Qwen nested `local_layers` hold {local_widths.pop()} cycle slots, but pattern_length {pattern_length} "
+          f"leaves {pattern_length - 1} before the global layer"
+      )
+    trailing_slot = pattern_length - 1
+  if has_trailing:
+    slot_indices.add(trailing_slot)
+  if pattern_length is None:
+    expected_slots = set(range(max(slot_indices) + 1))
+    if slot_indices != expected_slots:
+      raise ValueError(
+          f"Qwen scanned layer slots must be contiguous when pattern_length is omitted; found {sorted(slot_indices)}"
+      )
+    pattern_length = len(slot_indices)
+  elif pattern_length <= max(slot_indices):
+    raise ValueError(f"Qwen scanned layer slot {max(slot_indices)} is outside configured pattern length {pattern_length}")
+  if len(scan_lengths) != 1:
+    raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
+
+  scan_length = scan_lengths.pop()
+  scanned_key_paths = {key for key, _, _ in scanned_keys}
+  new_flat_w = {key: value for key, value in flat_w.items() if key not in scanned_key_paths}
+  for key, value, ref in scanned_keys:
+    prefix = key[: ref.container_idx]
+    suffix = key[ref.container_idx + ref.consumed :]
+    if ref.nested:
+      slots = tuple(range(value.shape[scan_axis + 1]))
+    else:
+      slots = (trailing_slot if ref.trailing else ref.slot_idx,)
+    for repetition in range(scan_length):
+      block = jax.lax.index_in_dim(value, repetition, axis=scan_axis, keepdims=False)
+      for local_idx, slot_idx in enumerate(slots):
+        global_idx = repetition * pattern_length + slot_idx
+        new_key = prefix + (f"layers_{global_idx}",) + suffix
+        new_flat_w[new_key] = (
+            jax.lax.index_in_dim(block, local_idx, axis=scan_axis, keepdims=False) if ref.nested else block
+        )
+  logging.info("MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
+               len(scanned_key_paths), scan_length * pattern_length)
+  return unflatten_dict(new_flat_w)
+
+
+def _accepts_kwarg(cls: Any, name: str) -> bool:
+  try:
+    params = inspect.signature(cls).parameters
+  except (ValueError, TypeError):
+    return True
+  return name in params or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _log_and_flush_traceback(msg: str) -> None:
+  logging.error("%s:\n%s", msg, traceback.format_exc())
+  for handler in logging.getLogger().handlers:
+    try:
+      handler.flush()
+    except Exception:
+      pass
+
+
+class MaxTextVllmSampler(VllmSampler):
+  """VllmSampler with MaxText direct-sync scanned-weight unrolling."""
+
+  def __init__(
+      self,
+      tokenizer: Any,
+      config: VllmConfig,
+      direct_maxtext_sync: bool = False,
+      model_name: Optional[str] = None,
+  ):
+    super().__init__(tokenizer=tokenizer, config=config)
+    self._direct_maxtext_sync = direct_maxtext_sync
+    engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
+    self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
+    self._is_gemma = "gemma" in str(self._model_name).lower()
+    self._is_qwen = "qwen" in str(self._model_name).lower()
+
+  def _vllm_config(self, config: VllmConfig):
+    user_sharding_strategy = copy.deepcopy(
+        ((config.additional_config or {}).get("sharding") or {}).get("sharding_strategy") or {}
+    )
+    args = super()._vllm_config(config)
+    if user_sharding_strategy:
+      additional_config = args.setdefault("additional_config", {})
+      sharding = additional_config.setdefault("sharding", {})
+      sharding_strategy = sharding.setdefault("sharding_strategy", {})
+      sharding_strategy.update(user_sharding_strategy)
+    return args
+
+  def update_params(self, updated_weights, filter_types: Optional[Tuple[Any, ...]] = None):
+    converter = getattr(self, "converter", getattr(self, "_converter", None))
+    if self._direct_maxtext_sync:
+      if converter is not None:
+        updated_weights = converter.convert(updated_weights, target_state=self.transformer_state)
+        while isinstance(updated_weights, dict) and "model" in updated_weights:
+          updated_weights = updated_weights["model"]
+      elif self._is_gemma:
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      elif self._is_qwen:
+        updated_weights = unroll_qwen_scanned_weights(updated_weights)
+      validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
+    try:
+      return super().update_params(updated_weights, filter_types)
+    except BaseException:
+      _log_and_flush_traceback("MaxTextVllmSampler.update_params failed")
+      raise
+
+
+class MaxTextVllmRollout(vllm_rollout.VllmRollout):
+  """VllmRollout using MaxTextVllmSampler for weight synchronization."""
+
+  def __init__(
+      self,
+      rollout_actor: Any,
+      tokenizer: Any,
+      mesh: jax.sharding.Mesh,
+      rollout_config: base_rollout.RolloutConfig,
+      maxtext_config: Any,
+      cache_config_or_size: base_rollout.CacheConfig | int = None,
+  ):
+    if cache_config_or_size is None:
+      cache_config_or_size = rollout_config.kv_cache_size
+    vllm_additional_config = _as_dict(
+        getattr(rollout_config, "rollout_vllm_additional_config", None)
+        or getattr(maxtext_config, "vllm_additional_config", None)
+        or {}
+    )
+    use_hf = "maxtext_config" not in vllm_additional_config and not uses_maxtext_vllm_adapter(maxtext_config)
+    direct_maxtext_sync = not use_hf
+    self._weight_sync_debug = bool(
+        getattr(maxtext_config, "weight_sync_debug", False) or vllm_additional_config.get("weight_sync_debug", False)
+    )
+    mapping_config = mappings.MappingConfig.build(
+        mapping_obj=rollout_config.rollout_mapping_config,
+        model=rollout_actor,
+        backend="vllm_jax",
+    )
+    engine_kwargs = {
+        "max_model_len": cache_config_or_size,
+        "model": rollout_config.rollout_vllm_model_version,
+        "async_scheduling": rollout_config.rollout_vllm_async_scheduling,
+        "max_num_batched_tokens": rollout_config.rollout_vllm_max_num_batched_tokens,
+        "max_num_seqs": rollout_config.rollout_vllm_max_num_seqs,
+        "hf_config_path": rollout_config.rollout_vllm_hf_config_path,
+        "max_logprobs": 1,
+        "logprobs_mode": rollout_config.rollout_vllm_logprobs_mode,
+    }
+    if hasattr(rollout_config, "rollout_vllm_kwargs") and rollout_config.rollout_vllm_kwargs:
+      engine_kwargs.update(rollout_config.rollout_vllm_kwargs)
+    rollout_additional_config = prepare_direct_sync_additional_config(
+        vllm_additional_config,
+        direct_maxtext_sync=direct_maxtext_sync,
+        num_experts=getattr(maxtext_config, "num_experts", 1),
+        tensor_parallel_size=rollout_config.tensor_parallel_size,
+    )
+    self._maxtext_config = maxtext_config
+    optional_vllm_config = {}
+    if hasattr(rollout_config, "rollout_vllm_free_kv_cache_during_weight_sync"):
+      if _accepts_kwarg(VllmConfig, "free_kv_cache_during_weight_sync"):
+        optional_vllm_config["free_kv_cache_during_weight_sync"] = (
+            rollout_config.rollout_vllm_free_kv_cache_during_weight_sync
+        )
+      else:
+        logging.warning(
+            "Installed tunix VllmConfig does not support free_kv_cache_during_weight_sync; the setting is ignored."
+        )
+    self._sampler = MaxTextVllmSampler(
+        tokenizer=tokenizer,
+        config=VllmConfig(
+            mesh=mesh,
+            hbm_utilization=rollout_config.rollout_vllm_hbm_utilization,
+            init_with_random_weights=rollout_config.rollout_vllm_init_with_random_weights,
+            tpu_backend_type=rollout_config.rollout_vllm_tpu_backend_type,
+            mapping_config=mapping_config,
+            lora_config=rollout_config.rollout_vllm_lora_config,
+            server_mode=rollout_config.rollout_vllm_server_mode,
+            server_mode_submission_threshold=rollout_config.rollout_vllm_server_mode_submission_threshold,
+            server_mode_submission_timeout_s=rollout_config.rollout_vllm_server_mode_submission_timeout_s,
+            return_logprobs=rollout_config.return_logprobs,
+            tensor_parallel_size=rollout_config.tensor_parallel_size,
+            data_parallel_size=rollout_config.data_parallel_size,
+            expert_parallel_size=rollout_config.expert_parallel_size,
+            enable_dp_attention=rollout_config.rollout_vllm_enable_dp_attention,
+            delete_dst_buffers=rollout_config.rollout_vllm_delete_dst_buffers,
+            reshard_chunk_size=rollout_config.rollout_vllm_reshard_chunk_size,
+            engine_kwargs=engine_kwargs,
+            additional_config=rollout_additional_config,
+            sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
+            **optional_vllm_config,
+        ),
+        direct_maxtext_sync=direct_maxtext_sync,
+        model_name=getattr(maxtext_config, "model_name", ""),
+    )
+    self._weight_sync_count = 0
+    state = nnx.state(rollout_actor, nnx.Param)
+    with self._timed_weight_sync("initial load_checkpoint"):
+      self._sampler.load_checkpoint(state)
+
+  def update_params(self, params: Any, filter_types: Optional[Tuple[Any, ...]] = None) -> None:
+    if getattr(self._maxtext_config, "log_weight_sync_norm", False):
+      param_leaves = [
+          p.value if hasattr(p, "value") else p for p in jax.tree_util.tree_leaves(params) if hasattr(p, "shape")
+      ]
+      if param_leaves:
+        l2_norm = float(jnp.sqrt(sum(jnp.sum(jnp.square(p.astype(jnp.float32))) for p in param_leaves)))
+        logging.info("Weight sync: actor parameter L2 norm = %.6f", l2_norm)
+    if getattr(self, "_weight_sync_debug", False):
+      self._log_sync_boundary(params)
+    with self._timed_weight_sync("sync_weights"):
+      super().update_params(params, filter_types)
+
+  def _sync_path_name(self) -> str:
+    converter = getattr(self._sampler, "converter", getattr(self._sampler, "_converter", None))
+    if converter is not None:
+      return type(converter).__name__
+    if getattr(self._sampler, "to_hf_key_mappings", None):
+      return "tunix transfer_state_with_mappings"
+    return "tunix transfer_state_directly"
+
+  @contextlib.contextmanager
+  def _timed_weight_sync(self, label: str):
+    index = self._weight_sync_count
+    self._weight_sync_count += 1
+    if not getattr(self._maxtext_config, "log_weight_sync_time", False):
+      yield
+      return
+    start = time.perf_counter()
+    try:
+      yield
+      self._block_on_rollout_state(index)
+    except BaseException:
+      logging.info("weight_sync_time: sync %d (%s) FAILED after %.4f s (no measurement)",
+                   index, label, time.perf_counter() - start)
+      raise
+    logging.info("weight_sync_time: sync %d (%s) via %s: %.4f s",
+                 index, label, self._sync_path_name(), time.perf_counter() - start)
+
+  def _block_on_rollout_state(self, index: int) -> None:
+    try:
+      jax.block_until_ready(jax.tree_util.tree_leaves(self._sampler.transformer_state))
+    except Exception as exc:
+      logging.warning(
+          "weight_sync_time: could not block on rollout state (%s); sync %d " "excludes any work still in flight.",
+          exc,
+          index,
+      )
+
+  def _log_sync_boundary(self, params: Any) -> None:
+    def _first_leaf(tree):
+      for leaf in jax.tree_util.tree_leaves(tree):
+        if hasattr(leaf, "shape") or hasattr(leaf, "value"):
+          return leaf
+      return None
+
+    try:
+      src_leaf = _first_leaf(params)
+      logging.info("weight_sync_debug: incoming trainer params | %s",
+                   _sharding_summary(src_leaf) if src_leaf is not None else "<empty tree>")
+      tgt_leaf = _first_leaf(self._sampler.transformer_state)
+      logging.info("weight_sync_debug: rollout target state | %s",
+                   _sharding_summary(tgt_leaf) if tgt_leaf is not None else "<empty tree>")
+    except Exception:
+      logging.exception("weight_sync_debug: could not summarize sync boundary")
+
+
+def unroll_gemma_scanned_weights(weights):
+  if hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.to_pure_dict()
+  elif hasattr(weights, "to_dict"):
+    pure_dict = weights.to_dict()
+  elif isinstance(weights, dict):
+    pure_dict = weights
+  else:
+    return weights
+  flat_w = flatten_dict(pure_dict)
+  new_flat_w = {}
+  logging.debug("MaxTextVllmSampler: First 5 keys in flat_w: %s", list(flat_w.keys())[:5])
+  is_gemma_scanned = any(_find_scanned_layer_idx(k)[0] != -1 for k in flat_w)
+  if not is_gemma_scanned:
+    return weights
+  logging.info("MaxTextVllmSampler: Detected Gemma scanned weights structure. Unrolling along axis 1...")
+  pattern_keys = set()
+  scan_length = 0
+  for k, v in flat_w.items():
+    container_idx, name = _find_scanned_layer_idx(k)
+    if container_idx != -1 and name != "layers_remainder":
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      pattern_keys.add(layer_sub_idx)
+      if hasattr(v, "shape") and len(v.shape) >= 2:
+        if "mlp" in k and "wi_0" in k:
+          scan_length = max(scan_length, v.shape[1])
+  pattern_length = max(pattern_keys) + 1 if pattern_keys else 0
+  logging.info("MaxTextVllmSampler: Discovered scan_length=%d, pattern_length=%d", scan_length, pattern_length)
+  unrolled_count = 0
+  for k, v in flat_w.items():
+    if "dropout" in k or "rngs" in k:
+      continue
+    container_idx, container_name = _find_scanned_layer_idx(k)
+    if container_idx != -1 and container_name in ("layers", "scanned_blocks"):
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      prefix = k[:container_idx]
+      suffix = k[container_idx + 2 :]
+      if hasattr(v, "shape") and len(v.shape) >= 2 and v.shape[1] == scan_length:
+        v_swapped = jnp.swapaxes(v, 1, 0)
+        unstacked = [v_swapped[i] for i in range(scan_length)]
+      else:
+        unstacked = [v] * scan_length
+      for i in range(scan_length):
+        global_idx = i * pattern_length + layer_sub_idx
+        new_k = prefix + (f"layers_{global_idx}",) + suffix
+        new_flat_w[new_k] = unstacked[i]
+        unrolled_count += 1
+    elif container_idx != -1 and container_name == "layers_remainder":
+      layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
+      prefix = k[:container_idx]
+      suffix = k[container_idx + 2 :]
+      global_idx = scan_length * pattern_length + layer_sub_idx
+      new_k = prefix + (f"layers_{global_idx}",) + suffix
+      new_flat_w[new_k] = v
+      unrolled_count += 1
+    else:
+      new_flat_w[k] = v
+  if unrolled_count <= 0:
+    raise ValueError("MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!")
+  logging.info("MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
+               unrolled_count)
+  return unflatten_dict(new_flat_w)

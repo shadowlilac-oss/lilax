@@ -1,0 +1,25 @@
+flax>=0.12.12
+fsspec==2026.6.0
+gcsfs==2026.6.0
+google-metrax>=0.2.3
+grain==0.2.19
+hf_transfer
+importlib_resources
+kagglehub
+markdown>=3.10.2
+numba
+oauthlib>=4.0.0
+perfetto
+pylatexenc
+python-dotenv
+safetensors<0.8
+setuptools>=84.0.0
+sqlalchemy
+tenacity
+tensorflow_datasets
+torch @ https://download-r2.pytorch.org/whl/cu134/torch-2.15.0%2Bcu134-cp312-cp312-manylinux_2_28_x86_64.whl
+transformers!=4.57.2
+urllib3>=2.8.0
+werkzeug>=3.1.9
+wheel>=0.48.0
+xprof>=2.23.1

@@ -1,0 +1,244 @@
+"""Load Hugging Face safetensors dynamically into the target MaxText layout."""
+
+import concurrent.futures
+import multiprocessing
+import os
+import random
+import time
+
+from flax import nnx
+import flax.traverse_util
+from google.cloud import storage
+import huggingface_hub
+import jax
+from lilax._backend.checkpoint_conversion.utils import hf_model_configs
+from lilax._backend.checkpoint_conversion.utils import param_mapping
+from lilax._backend.checkpoint_conversion.utils import tensor_handling
+from lilax._backend.utils import gcs_utils
+from lilax._backend.utils import globals as maxtext_globals
+from lilax._backend.utils import max_logging
+from orbax.checkpoint import v1 as ocp_v1
+from orbax.checkpoint._src.arrays import sharding as sharding_utils
+
+
+HF_MODEL_CONFIGS = hf_model_configs.HF_MODEL_CONFIGS
+get_hf_loading_function = tensor_handling.get_hf_loading_function
+
+
+def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
+  """Cache a Hugging Face file in a GCS directory."""
+  fs = huggingface_hub.HfFileSystem(token=hf_access_token)
+  time.sleep(random.uniform(0.0, 5.0))
+
+  bucket_name, blob_prefix = gcs_utils.parse_gcs_bucket_and_prefix(gcs_cache_dir)
+  blob_name = os.path.join(blob_prefix, os.path.basename(fpath))
+
+  storage_client = storage.Client()
+  bucket = storage_client.bucket(bucket_name)
+  blob = bucket.blob(blob_name)
+
+  if blob.exists():
+    max_logging.log(f"[Worker] Cache hit for {os.path.basename(fpath)}.")
+    return
+
+  t0 = time.time()
+  max_retries = 5
+  for attempt in range(max_retries):
+    try:
+      with fs.open(fpath, "rb") as remote_f:
+        blob.chunk_size = 1024 * 1024 * 32
+        blob.upload_from_file(remote_f, client=storage_client)
+      print(f"[Worker] Cached {os.path.basename(fpath)} in" f" {time.time() - t0:.1f}s", flush=True)
+      break
+    except Exception as e:
+      if attempt < max_retries - 1:
+        max_logging.log(
+            f"Error fetching {fpath} to GCS: {e}. Retrying in 15 seconds..." f" (Attempt {attempt+1}/{max_retries})"
+        )
+        time.sleep(15)
+      else:
+        max_logging.log(f"Failed to fetch {fpath} to GCS after {max_retries} attempts.")
+        raise
+
+
+def get_hf_config_and_mappings(maxtext_config):
+  """Get Hugging Face configuration and parameter mappings for a model."""
+  model_key = maxtext_config.model_name
+  if "-Instruct" in model_key:
+    model_key = model_key.replace("-Instruct", "")
+  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_dict = hf_config_obj.to_dict()
+
+  param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
+      hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
+  )
+  hook_fn_map_mt = param_mapping.HOOK_FNS[model_key](
+      hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers, saving_to_hf=False
+  )
+  return param_map_mt_to_hf, hook_fn_map_mt
+
+
+def load_sharded_hf_state(path):
+  """Load a local or GCS safetensors directory sharded across all JAX devices."""
+  t0 = time.time()
+  context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
+  with context:
+    metadata = ocp_v1.pytree_metadata(path)
+    simple_abstract_state = metadata.metadata
+    current_global_devices = jax.devices()
+    shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
+
+    def combine_sharding(sds, single_sharding):
+      return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=single_sharding)
+
+    sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
+
+    max_logging.log("Reading raw Safetensors into memory (Distributed Sharded GCS Download)...")
+    hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
+    max_logging.log(f"load_sharded_hf_state took {time.time() - t0:.2f}s")
+    return hf_state
+
+
+def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
+  """Transform Hugging Face state into MaxText state using mappings and hooks."""
+  t0 = time.time()
+
+  def tensor_getter(key):
+    return hf_state.pop(key)
+
+  flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
+  flat_restored = flat_target.copy()
+
+  mapped_count = 0
+  keys_missed = []
+  max_logging.log("Starting fast in-memory Distributed Transformations...")
+
+  for mt_key, hf_source in param_map_mt_to_hf.items():
+    mt_name = mt_key.replace("params-", "").replace("-", ".")
+
+    check_name = mt_name
+    if check_name not in flat_target:
+      if f"params.{mt_name}" in flat_target:
+        check_name = f"params.{mt_name}"
+      elif mt_key.replace("-", ".") in flat_target:
+        check_name = mt_key.replace("-", ".")
+
+    if check_name not in flat_target:
+      keys_missed.append(mt_name)
+      continue
+
+    target_leaf = flat_target[check_name]
+    hook_fn = hook_fn_map_mt.get(mt_key)
+    load_fn = get_hf_loading_function(hf_source, tensor_getter, hook_fn, target_leaf, maxtext_config, mt_key)
+
+    t_layer = time.time()
+    flat_restored[check_name] = load_fn()
+
+    max_logging.log(f"Transformed {check_name} from {hf_source} in {time.time() - t_layer:.4f}s")
+    mapped_count += 1
+
+  if mapped_count == 0:
+    max_logging.log(f"All transformations missed! Sample missed mt_names: {keys_missed[:5]}")
+    max_logging.log(f"Sample flat_target keys: {list(flat_target.keys())[:5]}")
+
+  max_logging.log(f"Successfully mapped {mapped_count} parameters.")
+  restored_params = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
+
+  if "params" in restored_params:
+    restored_params = restored_params["params"]
+
+  max_logging.log(f"transform_hf_state_to_mt_state took {time.time() - t0:.2f}s")
+  return {"params": restored_params}
+
+
+def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
+  """Load safetensors from local storage, GCS, or the Hub into target weights.
+
+  Hub repositories require a GCS base output directory for their shared cache.
+  An empty path selects the repository in HF_IDS for the exact model name.
+  Returns (None, {"params": weights}).
+  """
+  if maxtext_config is None:
+    raise ValueError("maxtext_config must be provided for safetensors_dynamic loading.")
+
+  model_name = maxtext_config.model_name
+  if not path:
+    if model_name not in maxtext_globals.HF_IDS:
+      raise ValueError(
+          f"No HF repo for model_name={model_name} in HF_IDS; set load_parameters_path to the safetensors"
+          " location (a gs:// or local directory, or hf://<repo>)."
+      )
+    path = maxtext_globals.HF_IDS[model_name]
+
+  if path.startswith("hf://"):
+    path = path[5:]
+
+  if not path.startswith("gs://") and not os.path.isdir(path):
+    fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
+    repo_id = path
+    files = fs.glob(f"{repo_id}/*.safetensors")
+    host_id = jax.process_index()
+
+    if hasattr(maxtext_config, "base_output_directory") and maxtext_config.base_output_directory.startswith("gs://"):
+      gcs_cache_dir = f"{maxtext_config.base_output_directory}/hf_cache/{repo_id.replace('/', '_')}"
+      path = gcs_cache_dir
+
+      if host_id == 0:
+        max_logging.log("Dynamic HF Hub Fast DL: Host 0 is downloading to shared GCS" f" Cache: {gcs_cache_dir}")
+        t_gcs_start = time.time()
+        storage_client = storage.Client()
+        bucket_name = gcs_cache_dir.replace("gs://", "").split("/", maxsplit=1)[0]
+        blob_prefix = (
+            gcs_cache_dir.replace("gs://", "").split("/", maxsplit=1)[1]
+            if "/" in gcs_cache_dir.replace("gs://", "")
+            else ""
+        )
+        existing_blobs = {blob.name for blob in storage_client.list_blobs(bucket_name, prefix=blob_prefix)}
+
+        files_to_download = []
+        for fpath in files:
+          expected_blob_name = os.path.join(blob_prefix, os.path.basename(fpath))
+          if expected_blob_name not in existing_blobs:
+            files_to_download.append(fpath)
+
+        if files_to_download:
+          with concurrent.futures.ProcessPoolExecutor(
+              max_workers=32, mp_context=multiprocessing.get_context("spawn")
+          ) as executor:
+            futures = [
+                executor.submit(build_gcs_cache_worker, fpath, gcs_cache_dir, maxtext_config.hf_access_token)
+                for fpath in files_to_download
+            ]
+            while futures:
+              done, futures = concurrent.futures.wait(futures, timeout=10)
+              for f in done:
+                f.result()
+
+        t_gcs_end = time.time()
+        max_logging.log(
+            f"GCS caching complete in {t_gcs_end - t_gcs_start:.2f}s."
+            f" Downloaded {len(files_to_download)} missing files."
+        )
+
+      max_logging.log(f"Host {host_id} waiting for GCS cache at {gcs_cache_dir} to be" " populated by Host 0...")
+      jax.experimental.multihost_utils.sync_global_devices("dynamic_hf_download_complete")
+      max_logging.log(f"Host {host_id} detected GCS cache is ready!")
+    else:
+      raise ValueError("base_output_directory with gs:// prefix is required for " "huggingface downloads.")
+
+  t_total = time.time()
+  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
+  max_logging.log(f"[1/3] Mappings derived in {time.time() - t_total:.2f}s")
+
+  target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
+  t1 = time.time()
+  hf_state = load_sharded_hf_state(path)
+  max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
+
+  t2 = time.time()
+  restored_params = transform_hf_state_to_mt_state(
+      hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
+  )
+  max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
+  max_logging.log(f"Total safetensors_dynamic duration: {time.time() - t_total:.2f}s")
+  return None, restored_params

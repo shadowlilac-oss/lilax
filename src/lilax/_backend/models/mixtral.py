@@ -1,0 +1,104 @@
+"""Decoder layer definition for mixtral."""
+
+import functools
+
+from flax import nnx
+from jax.ad_checkpoint import checkpoint_name
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from lilax._backend.common.common_types import Config
+from lilax._backend.layers import initializers
+from lilax._backend.layers import moe
+from lilax._backend.layers import quantizations
+from lilax._backend.layers.attentions import Attention
+from lilax._backend.layers.linears import Dropout
+from lilax._backend.layers.normalizations import RMSNorm
+from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.utils import max_utils
+from lilax._backend.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+
+
+class MixtralDecoderLayer(nnx.Module):
+  """Transformer decoder layer that attends to the encoder."""
+
+  def __init__(self, config: Config, mesh: Mesh, model_mode: str, quant: None | Quant = None, *, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    self.rngs = rngs
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+    self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical, mesh=mesh, shard_mode=config.shard_mode, debug_sharding=config.debug_sharding,
+    )
+    self.pre_self_attention_layer_norm = RMSNorm(
+        num_features=config.emb_dim, dtype=config.dtype, weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode, kernel_axes=("norm",), epsilon=config.normalization_layer_epsilon, rngs=self.rngs,
+    )
+    self.self_attention = Attention(
+        config=config, num_query_heads=config.num_query_heads, num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim, max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length, attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape, inputs_kv_shape=dummy_inputs_shape, mesh=mesh,
+        dtype=config.dtype, weight_dtype=config.weight_dtype, dropout_rate=config.dropout_rate,
+        float32_qk_product=config.float32_qk_product, float32_logits=config.float32_logits,
+        quant=self.quant, kv_quant=quantizations.configure_kv_quant(config),
+        prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+        ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+        compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))), reshape_q=config.reshape_q,
+        use_ragged_attention=config.use_ragged_attention, ragged_block_size=config.ragged_block_size,
+        model_mode=model_mode, rngs=self.rngs,
+    )
+    self.post_self_attention_layer_norm = RMSNorm(
+        num_features=config.emb_dim, dtype=config.dtype, weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode, kernel_axes=("norm",), epsilon=config.normalization_layer_epsilon, rngs=self.rngs,
+    )
+    self.MoeBlock_0 = moe.RoutedMoE(
+        config=config, num_experts=config.num_experts, num_experts_per_tok=config.num_experts_per_tok, mesh=mesh,
+        kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None), intermediate_dim=config.mlp_dim, dtype=config.dtype,
+        weight_dtype=config.weight_dtype, quant=self.quant, rngs=self.rngs,
+    )
+    self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+  def __call__(
+      self, inputs, decoder_segment_ids, decoder_positions, deterministic, model_mode, previous_chunk=None,
+      page_state=None, slot=None, kv_cache=None, attention_metadata=None,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ):
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+    attention_lnx, kv_cache = self.self_attention(
+        lnx, lnx, decoder_positions, decoder_segment_ids=decoder_segment_ids, deterministic=deterministic,
+        model_mode=model_mode, previous_chunk=previous_chunk, out_sharding=self.out_sharding,
+        kv_cache=kv_cache, attention_metadata=attention_metadata,
+    )
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    intermediate_inputs = inputs + attention_lnx
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    load_balance_loss = None
+    mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(
+        hidden_states, out_sharding=self.out_sharding, forced_routed_experts=forced_routed_experts
+    )
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+    layer_output = mlp_lnx + intermediate_inputs
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    if getattr(self.config, "record_internal_nn_metrics", False):
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
+      self.sow(nnx.Intermediate, "activation_fraction_zero", jnp.sum(layer_output == 0) / jnp.size(layer_output))
+    if self.config.scan_layers:
+      return layer_output, None
+    else:
+      return layer_output, kv_cache

@@ -1,0 +1,29 @@
+FROM --platform=linux/amd64 quay.io/pypa/manylinux_2_28_x86_64@sha256:7e41b1c7fd64dfc69703a1124b43c404382973ee06ec5d764b85c34d2221fded AS grain-build
+
+RUN yum install -y rsync && \
+    curl -fsSL -o /usr/local/bin/bazel https://github.com/bazelbuild/bazel/releases/download/7.2.1/bazel-7.2.1-linux-x86_64 && \
+    chmod a+x /usr/local/bin/bazel && \
+    /opt/python/cp312-cp312/bin/python -m pip install -U setuptools
+WORKDIR /build
+RUN curl -fsSL -o grain.zip https://github.com/google/grain/archive/a3b351858a1a875a626affe555f9d68bc5190054.zip && \
+    echo '780b620dc7ad7473bc452c37ef5ca1aa7c0660311a1e0aa94e9f452f79e5f91c  grain.zip' | sha256sum -c - && \
+    /opt/python/cp312-cp312/bin/python -m zipfile -e grain.zip .
+WORKDIR /build/grain-a3b351858a1a875a626affe555f9d68bc5190054
+RUN printf '%s\n' 'build --incompatible_default_to_explicit_init_py' 'build --enable_platform_specific_config' \
+      'build --@rules_python//python/config_settings:python_version=3.12' 'common --check_direct_dependencies=error' > .bazelrc && \
+    unset PYTHONPATH PYTHONHOME && \
+    bazel build ... --action_env PYTHON_BIN_PATH=/opt/python/cp312-cp312/bin/python --action_env MACOSX_DEPLOYMENT_TARGET=11.0 && \
+    mkdir -p /stage /wheels && \
+    cp README.md setup.py pyproject.toml LICENSE /stage/ && \
+    rsync -avm -L --exclude='__pycache__/*' grain /stage/ && \
+    rsync -avm -L --include='*.so' --include='*_pb2.py' --exclude='*.runfiles' --exclude='*_obj' \
+      --include='*/' --exclude='*' bazel-bin/grain /stage/ && \
+    cd /stage && /opt/python/cp312-cp312/bin/python setup.py bdist_wheel --python-tag py312 && \
+    auditwheel repair --plat manylinux_2_28_x86_64 -w /wheels dist/*.whl
+
+FROM --platform=linux/amd64 nvcr.io/nvidia/jax:26.10-py3@sha256:20cf0aa0e1438560c4c878cbc5a99e070507a76c2be6fc5b2e42905e880d23f6
+
+WORKDIR /opt/lilax
+COPY . .
+COPY --from=grain-build /wheels /opt/lilax-grain-wheels
+RUN /usr/bin/python /opt/lilax/install_ngc.py /opt/lilax /opt/lilax-grain-wheels

@@ -1,0 +1,280 @@
+"""Decoder layer definition for Olmo 3 models."""
+
+from typing import Optional
+
+from flax import nnx
+from jax.ad_checkpoint import checkpoint_name
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from lilax._backend.common.common_types import AttentionType, Config
+from lilax._backend.layers import attentions
+from lilax._backend.layers import linears
+from lilax._backend.layers import quantizations
+from lilax._backend.layers.attentions import Attention
+from lilax._backend.layers.linears import MlpBlock
+from lilax._backend.layers.normalizations import RMSNorm
+from lilax._backend.layers.quantizations import AqtQuantization as Quant
+from lilax._backend.utils import max_utils
+from lilax._backend.utils.sharding import with_logical_constraint
+
+
+OLMO3_ATTENTION_PATTERN = (
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.LOCAL_SLIDING,
+    attentions.AttentionType.GLOBAL,
+)
+
+
+def get_attention_type(layer_id):
+  """Get attention type based on layer ID."""
+  layer_id %= len(OLMO3_ATTENTION_PATTERN)
+  return OLMO3_ATTENTION_PATTERN[layer_id]
+
+
+class Olmo3DecoderLayer(nnx.Module):
+  """Transformer decoder layer that attends to the encoder."""
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      attention_type: AttentionType,
+      quant: Optional[Quant] = None,
+      rngs: nnx.Rngs = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.attention_type = attention_type
+    self.quant = quant
+
+    batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+    dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+    self.post_self_attention_layer_norm = RMSNorm(
+        num_features=dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=jnp.float32,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
+    self.post_mlp_layer_norm = RMSNorm(
+        num_features=dummy_inputs_shape[-1],
+        dtype=config.dtype,
+        weight_dtype=jnp.float32,
+        kernel_axes=("norm",),
+        epsilon=config.normalization_layer_epsilon,
+        rngs=rngs,
+    )
+
+    current_rope_type = config.rope_type.lower()
+
+    self.attention = Attention(
+        config=config,
+        num_query_heads=config.num_query_heads,
+        num_kv_heads=config.num_kv_heads,
+        head_dim=config.head_dim,
+        max_target_length=config.max_target_length,
+        max_prefill_predict_length=config.max_prefill_predict_length,
+        attention_kernel=config.attention,
+        inputs_q_shape=dummy_inputs_shape,
+        inputs_kv_shape=dummy_inputs_shape,
+        mesh=mesh,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        dropout_rate=config.dropout_rate,
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(config),
+        use_bias_in_projections=config.attention_bias,
+        attention_type=self.attention_type,
+        sliding_window_size=config.sliding_window_size,
+        query_pre_attn_scalar=(config.head_dim**-0.5),
+        model_mode=model_mode,
+        use_qk_norm=config.use_qk_norm,
+        rope_type=current_rope_type,
+        rngs=rngs,
+    )
+
+    self.mlp = MlpBlock(
+        in_features=config.emb_dim,
+        intermediate_dim=config.mlp_dim,
+        activations=config.mlp_activations,
+        intermediate_dropout_rate=config.dropout_rate,
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        config=config,
+        mesh=mesh,
+        quant=quant,
+        model_mode=model_mode,
+        rngs=rngs,
+    )
+    self.dropout = linears.Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
+  ):
+    cfg = self.config
+    is_scan_carry = False
+    if isinstance(inputs, tuple) and len(inputs) == 3:
+      hidden_states, stacked_kv_cache, layer_idx = inputs
+      kv_cache = stacked_kv_cache[layer_idx]
+      inputs = hidden_states
+      is_scan_carry = True
+    elif isinstance(inputs, tuple):
+      inputs = inputs[0]
+
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+
+    attention_lnx, kv_cache = self.attention(
+        inputs,
+        inputs,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        kv_cache=kv_cache,
+        attention_metadata=attention_metadata,
+    )
+
+    attention_lnx = with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
+
+    attention_lnx = self.post_self_attention_layer_norm(attention_lnx)
+    attention_lnx = with_logical_constraint(
+        attention_lnx, ("activation_batch", "activation_norm_length", "activation_embed")
+    )
+
+    intermediate_inputs = inputs + attention_lnx
+
+    mlp_lnx = self.mlp(intermediate_inputs)
+    mlp_lnx = with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+
+    mlp_lnx = self.post_mlp_layer_norm(mlp_lnx)
+    mlp_lnx = with_logical_constraint(mlp_lnx, ("activation_batch", "activation_norm_length", "activation_embed"))
+
+    layer_output = mlp_lnx + intermediate_inputs
+    layer_output = self.dropout(layer_output, deterministic=deterministic)
+
+    layer_output = with_logical_constraint(
+        layer_output,
+        ("activation_batch", "activation_norm_length", "activation_embed"),
+    )
+
+    if getattr(cfg, "record_internal_nn_metrics", False):
+      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
+      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
+      self.sow(
+          nnx.Intermediate,
+          "activation_fraction_zero",
+          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+      )
+
+    if is_scan_carry:
+
+      def update_cache(cache, val):
+        if jnp.size(val) > 0:
+          return cache.at[layer_idx].set(val)
+        return cache
+
+      stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)
+      return (layer_output, stacked_kv_cache, layer_idx + 1), None
+    elif cfg.scan_layers:
+      return layer_output, None
+    else:
+      return layer_output, kv_cache
+
+
+class Olmo3ScannableBlock(nnx.Module):
+  """A repeatable block of Olmo 3 decoder layers.
+
+    This block applies multiple decoder layers sequentially, using the attention
+    pattern defined by OLMO3_ATTENTION_PATTERN. It's designed to be
+    used with `jax.lax.scan` for efficient compilation.
+
+  Attributes:
+    config: Config, MaxText model config
+    mesh: Mesh, JAX device mesh (used for sharding)
+    num_of_layers: int, number of decoder layers in the block
+    quant: Optional[Quant], quantization config
+  """
+
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      model_mode: str,
+      quant: Optional[Quant] = None,
+      rngs: nnx.Rngs = None,
+  ):
+    self.config = config
+    self.mesh = mesh
+    self.model_mode = model_mode
+    self.quant = quant
+    for layer_id in range(config.inhomogeneous_layer_cycle_interval):
+      attention_type = get_attention_type(layer_id)
+      layer_name = f"layers_{layer_id}"
+      layer = Olmo3DecoderLayer(
+          config=config,
+          mesh=mesh,
+          model_mode=model_mode,
+          attention_type=attention_type,
+          quant=self.quant,
+          rngs=rngs,
+      )
+      setattr(self, layer_name, layer)
+
+  def __call__(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
+  ):
+    cfg = self.config
+
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
+    y = inputs
+    for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):
+      layer_name = f"layers_{layer_id}"
+      layer = getattr(self, layer_name)
+      y = layer(
+          y,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          previous_chunk=previous_chunk,
+          slot=slot,
+          kv_cache=kv_cache,
+          attention_metadata=attention_metadata,
+      )
+      if cfg.scan_layers:
+        y = y[0]
+    if cfg.scan_layers:
+      return y, None
+    else:
+      return y

@@ -1,0 +1,235 @@
+"""MaxText optimizer transformations."""
+
+import re
+
+import jax
+import jax.numpy as jnp
+import optax
+from optax.contrib._muon import muon as optax_muon
+
+from lilax._backend.common.common_types import DecoderBlockType
+from lilax._backend.optimizers.muon import muon as maxtext_muon
+from lilax._backend.utils.muon_utils import get_muon_weight_dimension_numbers
+from lilax._backend.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
+
+
+def _get_path_mask_fn(patterns, match_returns_true=True):
+  if not patterns:
+    return None
+  compiled_patterns = [re.compile(pattern) for pattern in patterns]
+
+  def mask_fn(params):
+    def _is_masked(path, _):
+      path_str = jax.tree_util.keystr(path, simple=True, separator="/")
+      matched = any(pattern.search(path_str) for pattern in compiled_patterns)
+      return matched if match_returns_true else not matched
+
+    return jax.tree_util.tree_map_with_path(_is_masked, params)
+
+  return mask_fn
+
+
+def get_adamw_mask(config):
+  return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
+
+
+def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
+  valid_elements = jnp.minimum(count, interval)
+  safe_elements = jnp.maximum(1, valid_elements)
+  mask = jnp.arange(interval) < valid_elements
+  mean = jnp.sum(jnp.where(mask, arr, 0.0)) / safe_elements
+  sq_diff = jnp.where(mask, (arr - mean) ** 2, 0.0)
+  variance = jnp.sum(sq_diff) / jnp.maximum(1, valid_elements - 1)
+  std = jnp.sqrt(variance)
+  return mean, std
+
+
+def skip_step_on_spikes(
+    inner_opt: optax.GradientTransformation, interval: int, scaling_factor: float
+) -> optax.GradientTransformationExtraArgs:
+  def init_fn(params):
+    return {
+        "inner_state": inner_opt.init(params),
+        "losses": jnp.zeros(interval, dtype=jnp.float32),
+        "grad_norms": jnp.zeros(interval, dtype=jnp.float32),
+        "count": jnp.zeros((), dtype=jnp.int32),
+        "is_skipped": jnp.array(False, dtype=jnp.bool_),
+    }
+
+  def update_fn(updates, state, params=None, **extra_args):
+    loss = extra_args.pop("loss", None)
+    grad_norm = extra_args.pop("grad_norm", None)
+    if loss is None:
+      inner_updates, new_inner_state = inner_opt.update(updates, state["inner_state"], params, **extra_args)
+      return inner_updates, {
+          "inner_state": new_inner_state,
+          "losses": state["losses"],
+          "grad_norms": state["grad_norms"],
+          "count": state["count"],
+          "is_skipped": jnp.array(False, dtype=jnp.bool_),
+      }
+
+    count = state["count"]
+    losses = state["losses"]
+    grad_norms = state["grad_norms"]
+    loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
+    grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
+    is_loss_ok = (loss - loss_mean) <= scaling_factor * loss_std
+    if grad_norm is not None:
+      is_grad_norm_ok = (grad_norm - grad_norm_mean) <= scaling_factor * grad_norm_std
+      is_ok = jnp.logical_and(is_loss_ok, is_grad_norm_ok)
+    else:
+      is_ok = is_loss_ok
+    min_history = max(2, interval // 2)
+    is_warmup = (count + 1) < min_history
+    is_ok = jnp.logical_or(is_warmup, is_ok)
+
+    def do_update():
+      return inner_opt.update(updates, state["inner_state"], params, **extra_args)
+
+    def skip_update():
+      inner_updates = jax.tree_util.tree_map(jnp.zeros_like, updates)
+      return inner_updates, state["inner_state"]
+
+    inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
+    idx = count % interval
+    new_losses = losses.at[idx].set(loss)
+    new_grad_norms = grad_norms
+    if grad_norm is not None:
+      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+    new_state = {
+        "inner_state": new_inner_state,
+        "losses": new_losses,
+        "grad_norms": new_grad_norms,
+        "count": count + 1,
+        "is_skipped": jnp.logical_not(is_ok),
+    }
+    return inner_updates, new_state
+
+  return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
+  if config.opt_type == "adamw":
+    base_opt = optax.adamw(
+        learning_rate_schedule, b1=config.adam_b1, b2=config.adam_b2, eps=config.adam_eps,
+        eps_root=config.adam_eps_root, weight_decay=config.adam_weight_decay, mu_dtype=config.mu_dtype,
+        mask=get_adamw_mask(config),
+    )
+  elif config.opt_type == "adam_pax":
+    base_opt = adam_pax(
+        learning_rate_schedule, beta1=config.adam_b1, beta2=config.adam_b2, epsilon=config.adam_eps,
+        epsilon_root=config.adam_eps_root, weight_decay=config.adam_weight_decay, mask=get_adamw_mask(config),
+    )
+  elif config.opt_type == "sgd":
+    base_opt = optax.sgd(learning_rate_schedule)
+  elif config.opt_type == "muon":
+    muon_type = getattr(config, "muon_type", "optax_muon")
+    if config.decoder_block == DecoderBlockType.DEEPSEEK4:
+      ns_coeffs = [(3.4445, -4.7750, 2.0315)] * 8 + [(2.0, -1.5, 0.5)] * 2
+      ns_steps = 10
+    else:
+      ns_coeffs = (3.4445, -4.7750, 2.0315)
+      ns_steps = 5
+    muon_kwargs = {
+        "learning_rate": learning_rate_schedule,
+        "eps": config.adam_eps,
+        "mu_dtype": config.mu_dtype,
+        "beta": config.muon_beta,
+        "weight_decay": config.muon_weight_decay,
+        "consistent_rms": config.muon_consistent_rms,
+        "ns_coeffs": ns_coeffs,
+        "ns_steps": ns_steps,
+        "adam_b1": config.adam_b1,
+        "adam_b2": config.adam_b2,
+        "adam_eps_root": config.adam_eps_root,
+        "adam_weight_decay": config.adam_weight_decay,
+    }
+    if muon_type in ("optax", "optax_muon"):
+      assert not getattr(config, "muon_use_all_to_all", False), (
+          "all-to-all communication in muon is only supported with maxtext_muon, not optax_muon."
+      )
+      if model is not None:
+        muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config)
+      else:
+        raise ValueError("Please specify model to extract muon dimension number.")
+      muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}
+      base_opt = optax_muon(**muon_kwargs)
+    elif muon_type in ("maxtext", "maxtext_muon"):
+      if model is not None:
+        muon_weight_dimension_numbers = get_maxtext_muon_weight_dimension_numbers(model, config, mesh=mesh)
+      else:
+        raise ValueError("Please specify model to extract muon dimension number.")
+      use_all_to_all = getattr(config, "muon_use_all_to_all", True)
+      muon_kwargs = muon_kwargs | {
+          "muon_weight_dimension_numbers": muon_weight_dimension_numbers,
+          "use_all_to_all": use_all_to_all,
+      }
+      base_opt = maxtext_muon(**muon_kwargs)
+    else:
+      raise ValueError(
+          f"Unsupported muon_type: {muon_type}. Must be 'optax_muon' (or 'optax') or 'maxtext_muon' (or 'maxtext')."
+      )
+  else:
+    raise ValueError(f"{config.opt_type=} is not a supported.")
+
+  if getattr(config, "skip_step_on_spikes", False):
+    base_opt = skip_step_on_spikes(
+        base_opt, interval=config.skip_step_interval, scaling_factor=config.skip_step_scaling_factor,
+    )
+  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
+  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  if freeze_mask_fn is not None:
+    return optax.multi_transform(
+        {"trainable": base_opt, "frozen": optax.set_to_zero()},
+        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
+    )
+  return base_opt
+
+
+def adam_pax(
+    learning_rate_fn: optax.Schedule, beta1: float, beta2: float, epsilon: float,
+    epsilon_root: float, weight_decay: float, mask=None,
+) -> optax.GradientTransformation:
+  def init_fn(params):
+    mu = jax.tree_util.tree_map(jnp.zeros_like, params)
+    nu = jax.tree_util.tree_map(jnp.zeros_like, params)
+    return optax.ScaleByAdamState(count=jnp.zeros([], jnp.int32), mu=mu, nu=nu)
+
+  def bias_corrected_decay(step: jnp.int32, decay: float):
+    t = step.astype(jnp.float32) + 1.0
+    return decay * (1.0 - jnp.power(decay, t - 1.0)) / (1.0 - jnp.power(decay, t))
+
+  def update_fn(updates, state, params=None):
+    if weight_decay > 0:
+      assert params is not None
+    count = state.count
+
+    class _slot_opt_state:
+      def __init__(self, mu, nu):
+        self.mu = mu
+        self.nu = nu
+
+    def _update_momentum(update, mu, nu):
+      beta1_decay = bias_corrected_decay(count, beta1).astype(update.dtype)
+      beta2_decay = bias_corrected_decay(count, beta2).astype(update.dtype)
+      mu = (1.0 - beta1_decay) * update + beta1_decay * mu
+      nu = (1.0 - beta2_decay) * (update**2) + beta2_decay * nu
+      return _slot_opt_state(mu=mu, nu=nu)
+
+    updated_moments = jax.tree_util.tree_map(_update_momentum, updates, state.mu, state.nu)
+    mu = jax.tree_util.tree_map(lambda x: x.mu, updated_moments)
+    nu = jax.tree_util.tree_map(lambda x: x.nu, updated_moments)
+    updates = jax.tree_util.tree_map(lambda mu, nu: mu / (jnp.sqrt(nu + epsilon_root) + epsilon), mu, nu)
+    if weight_decay > 0:
+      if mask is not None:
+        mask_tree = mask(params) if callable(mask) else mask
+        updates = jax.tree_util.tree_map(lambda x, v, m: x + weight_decay * v if m else x, updates, params, mask_tree)
+      else:
+        updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v, updates, params)
+    step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
+    updates = jax.tree_util.tree_map(lambda x: step_size * x, updates)
+    updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
+    return updates, updated_states
+
+  return optax.GradientTransformation(init_fn, update_fn)

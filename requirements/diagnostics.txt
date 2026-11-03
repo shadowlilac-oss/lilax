@@ -1,0 +1,4 @@
+cloud-accelerator-diagnostics
+google-cloud-mldiagnostics>=1.0.9
+google-cloud-monitoring
+ml-goodput-measurement

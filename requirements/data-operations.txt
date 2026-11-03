@@ -1,0 +1,7 @@
+array-record
+datasets>=5.0.1
+google-cloud-storage
+numpy
+protobuf
+pyarrow
+requests

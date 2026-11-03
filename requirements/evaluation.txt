@@ -1,0 +1,15 @@
+aiohttp
+evalchemy @ git+https://github.com/mlfoundations/evalchemy.git
+evaluate
+fastapi
+jinja2
+lm_eval[api]
+nltk
+numpy
+openai
+pandas
+requests
+rouge-score==0.1.2
+scipy
+tqdm
+uvicorn
