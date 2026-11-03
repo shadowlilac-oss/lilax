@@ -70,7 +70,11 @@ from lilax._backend.configs.multimodal_fields import AudioEncoder, MultimodalGen
 from lilax._backend.configs.vllm_fields import VLLM
 from lilax._backend.configs.rl_fields import RL, RLCluster, RLDataset, RLEvaluation, RLReward, RLSpecialTokens
 from lilax._backend.configs.engram.fields import Engram
-from lilax._backend.configs.derived_fields import DerivedValues
+from lilax._backend.configs.scaled_model_dimension_fields import ScaledModelDimensions
+from lilax._backend.configs.resolved_mesh_fields import ResolvedMeshTopology
+from lilax._backend.configs.batch_size_fields import BatchSizeRampupEnd, BatchSizeRampupIncrements, GlobalBatchSizes
+from lilax._backend.configs.output_directory_fields import RunOutputDirectories
+from lilax._backend.configs.custom_remat_fields import CustomRematTensors
 from lilax._backend.configs.model_scaling import get_individual_scales
 from lilax._backend.configs.mtp.validation import validate_mtp_main_hidden_state
 from lilax._backend.configs.training_quantization_validation import validate_training_quantization
@@ -87,9 +91,9 @@ from lilax._backend.configs.decoder_block_validation import validate_decoder_blo
 from lilax._backend.configs.splash_attention_validation import validate_splash_attention_flags
 from lilax._backend.configs.lineage_validation import validate_lineage
 from lilax._backend.common.common_types import DecoderBlockType, ShardMode, CustomRule, is_fp8_dtype
-from lilax._backend.utils import gcs_utils
+from lilax._backend.storage import gcs
 from lilax._backend.utils import max_logging
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from lilax._backend.utils import accelerator_to_spec_map
 from lilax._backend.distributed.mesh_topology import slice_count
@@ -121,11 +125,11 @@ def validate_and_set_hlo_dump_defaults(config):
   if not config.dump_hlo_gcs_dir:
     config.dump_hlo_gcs_dir = os.path.join(config.base_output_directory, config.run_name, "xla_dump")
   else:
-    config.dump_hlo_gcs_dir = gcs_utils.add_trailing_slash(config.dump_hlo_gcs_dir)
+    config.dump_hlo_gcs_dir = gcs.add_trailing_slash(config.dump_hlo_gcs_dir)
   if not config.dump_jaxpr_gcs_dir:
     config.dump_jaxpr_gcs_dir = os.path.join(config.base_output_directory, config.run_name, "jaxpr_dump")
   else:
-    config.dump_jaxpr_gcs_dir = gcs_utils.add_trailing_slash(config.dump_jaxpr_gcs_dir)
+    config.dump_jaxpr_gcs_dir = gcs.add_trailing_slash(config.dump_jaxpr_gcs_dir)
   if not os.environ.get("XLA_FLAGS"):
     os.environ["XLA_FLAGS"] = config.dump_hlo_xla_flags
 
@@ -669,7 +673,13 @@ class MaxTextConfig(
     VisionTower,
     VisionProjector,
     AudioEncoder,
-    DerivedValues,
+    BatchSizeRampupIncrements,
+    CustomRematTensors,
+    BatchSizeRampupEnd,
+    RunOutputDirectories,
+    GlobalBatchSizes,
+    ResolvedMeshTopology,
+    ScaledModelDimensions,
 ):
   """
   The main configuration object for MaxText.
@@ -1215,7 +1225,7 @@ class MaxTextConfig(
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     if self.elastic_enabled:
-      elastic_utils.ensure_elastic_manager_initialized(self)
+      elastic.ensure_elastic_manager_initialized(self)
 
     def get_num_target_devices():
       """Get the number of devices for the target topology, handling AOT compilation and single-controller modes."""
@@ -1230,7 +1240,7 @@ class MaxTextConfig(
         shape_tuple = tuple(int(x) for x in self.subslice_shape.split(","))
         return prod(shape_tuple)
       elif self.elastic_enabled:
-        return len(elastic_utils.live_devices(config=self))
+        return len(elastic.live_devices(config=self))
       else:
         return len(jax.devices())
 
@@ -1757,7 +1767,13 @@ class RLConfig(
     AOT,
     Metrics,
     Tensorboard,
-    DerivedValues,
+    BatchSizeRampupIncrements,
+    CustomRematTensors,
+    BatchSizeRampupEnd,
+    RunOutputDirectories,
+    GlobalBatchSizes,
+    ResolvedMeshTopology,
+    ScaledModelDimensions,
     RL,
     RLCluster,
     RLDataset,
