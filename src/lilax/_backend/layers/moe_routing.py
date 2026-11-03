@@ -78,3 +78,47 @@ def valid_expert_mask(indices, num_experts):
   the same way.
   """
   return (indices >= 0) & (indices < num_experts)
+
+
+def top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
+  """Sum the two largest scores in each group, accumulating in float32."""
+  if scores_grouped.shape[-1] < 2:
+    raise ValueError("Each routing group needs at least 2 experts, got" f" {scores_grouped.shape[-1]}.")
+
+  max_1 = jnp.max(scores_grouped, axis=-1)
+  argmax_1 = jnp.argmax(scores_grouped, axis=-1)[..., None]
+  lane = jax.lax.broadcasted_iota(argmax_1.dtype, scores_grouped.shape, scores_grouped.ndim - 1)
+  max_2 = jnp.max(jnp.where(lane == argmax_1, -jnp.inf, scores_grouped), axis=-1)
+  return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
+
+
+class ExpertGroupRouting:
+  @staticmethod
+  def deepseek_scale_weights(weights, routed_score_func, routed_scaling_factor):
+    """Scales weights according to DeepSeek's v3 reference implementation."""
+    if routed_score_func in ("sigmoid", "sqrtsoftplus"):
+      weights /= weights.sum(-1, keepdims=True) + 1e-20
+    weights *= routed_scaling_factor
+    return weights
+
+  @staticmethod
+  def expert_group_mask(gate_logits: jax.Array, n_routing_groups, topk_routing_group, num_experts) -> jax.Array:
+    """Select experts from the groups with the largest top-two scores."""
+    scores_grouped = jnp.reshape(
+        gate_logits,
+        gate_logits.shape[:-1] + (n_routing_groups, -1),
+    )
+    group_scores = top_2_in_group_sum(scores_grouped)
+    _, group_idx = jax.lax.top_k(group_scores, k=topk_routing_group)
+
+    group_mask = jax.nn.one_hot(group_idx, num_classes=n_routing_groups, dtype=jnp.float32)
+    group_mask = jnp.sum(group_mask, axis=-2)
+
+    score_mask_expanded = jnp.broadcast_to(
+        group_mask[..., None],
+        group_mask.shape + (num_experts // n_routing_groups,),
+    )
+    return jnp.reshape(
+        score_mask_expanded,
+        score_mask_expanded.shape[:-2] + (num_experts,),
+    )

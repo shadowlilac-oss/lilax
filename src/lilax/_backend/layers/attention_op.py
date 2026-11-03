@@ -69,6 +69,7 @@ from lilax._backend.kernels.attention import ulysses_attention
 from lilax._backend.kernels.attention import usp_attention
 from lilax._backend.kernels.attention.ragged_attention import ragged_gqa
 from lilax._backend.kernels.attention.ragged_attention import ragged_mha
+from lilax._backend.layers import attention_masks
 from lilax._backend.layers import nnx_wrappers
 from lilax._backend.layers.quantizations import AqtQuantization as Quant
 from lilax._backend.utils import max_utils
@@ -118,35 +119,6 @@ def validate_compute_axis_order(s: AxisIdxes) -> None:
         "Invalid compute_axis_order was passed. Valid options ",
         valid_compute_axis_order,
     )
-
-
-def apply_mask_to_logits(logits: Array, mask: Array):
-  """Applies a floating-point mask to a set of logits.
-
-  The mask is represented as a tensor with some dtype where 0 represents true
-  and values
-  below a large negative number (here set to
-  get_large_negative_number(logits.dtype) / 2) represent false. Applying the
-  mask
-  leaves the logits alone in the true case and replaces them by
-  get_large_negative_number(logits.dtype) in the false case. Previously, this
-  was
-  done by adding the logits to the mask; however, this leads to a bad fusion
-  decision in the compiler that saves the values in memory rather than
-  just the predicate. This implementation avoids that problem.
-
-  from
-  https://github.com/google/praxis/blob/4712a6b9ee13e224b86e235ff55f7c6bab9fbab3/praxis/py_utils.py#L706
-
-  Args:
-    logits: A JTensor of logit values.
-    mask: A JTensor of mask values with the encoding described in the function
-      documentation.
-
-  Returns:
-    Masked logits.
-  """
-  return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
 def validate_gpu_flash_attention(
@@ -437,101 +409,6 @@ class HCAStaticMask(splash_attention_mask.Mask):
     raise NotImplementedError(
         "Conversion to bool is unsupported. Could be caused by using logical" " instead of bitwise operations on masks."
     )
-
-
-def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:
-  """Generates an explicit boolean mask for chunked causal attention.
-
-  This function computes the full boolean mask array where True indicates
-  attention is allowed based on chunked causal rules (tokens attend only
-  within the same chunk, and causally within that chunk).
-
-  Args:
-    mask_shape: The desired shape of the mask (q_seq_len, kv_seq_len).
-    chunk_size: The size of the attention chunks.
-
-  Returns:
-    A boolean mask of shape `mask_shape` where True indicates attention is
-    allowed according to chunked causal rules, and False otherwise.
-
-  Raises:
-    ValueError: If chunk_window_size is None or not positive.
-  """
-
-  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
-  col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-  if chunk_size <= 0:
-    raise ValueError("chunk_size must be positive")
-
-  # chunk mask calculation
-  same_chunk = (row_ids // chunk_size) == (col_ids // chunk_size)
-  chunk_mask = same_chunk & (row_ids >= col_ids)
-  return chunk_mask
-
-
-def _generate_block_causal_attention_mask(
-    mask_shape: tuple[int, int], causal_block_size: int, q_offset: int = 0
-) -> jax.Array:
-  """Generates a block-causal mask for Block Diffusion Language Models (BD3LMs).
-
-  Implements the block-causal attention pattern (M_BC) described in Arriola et
-  al., "Block Diffusion: Interpolating Between Autoregressive and Diffusion
-  Language Models" (https://arxiv.org/abs/2503.09573).
-
-  For block size B = causal_block_size, query index q, and key index k:
-
-  * Within block i (floor(q/B) == floor(k/B)), tokens attend bidirectionally.
-  * Across blocks (floor(q/B) > floor(k/B)), block i attends causally to every
-    preceding block, but not to future blocks.
-
-  B = 1 reduces to standard causal attention, while B equal to the sequence
-  length reduces to full bidirectional attention.
-  """
-  if causal_block_size <= 0:
-    raise ValueError("causal_block_size must be positive")
-
-  row_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + q_offset
-  col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
-  return (row_ids // causal_block_size) >= (col_ids // causal_block_size)
-
-
-def _make_block_mask_indices(bidirectional_mask):
-  """Creates block mask identifying segments based on a bidirectional mask.
-
-  Args:
-    bidirectional_mask: boolean mask, e.g. [011110011010].
-
-  Returns:
-    block mask for segments, e.g. [011110022030].
-  """
-  # Left pad 0.
-  padded_mask = jnp.pad(bidirectional_mask, [(0, 0), (1, 0)], constant_values=0)
-  boundary = padded_mask[..., 1:] > padded_mask[..., :-1]
-  numbered_boundary = jnp.cumsum(boundary, axis=-1)
-  return bidirectional_mask * numbered_boundary
-
-
-def _make_bidirectional_block_mask(bidirectional_mask):
-  """Creates bidirectional block mask from bidirectional_mask, where True corresponds to image tokens.
-
-  bidirectional_mask shape: [B, L] bidirectional_block_mask shape: [B, L, L]
-  Examples: bidirectional_mask = [[0, 1, 1, 1, 0, 0]] bidirectional_block_mask =
-  [[
-
-      [False, False, False, False, False, False],
-      [False,  True,  True,  True, False, False],
-      [False,  True,  True,  True, False, False],
-      [False,  True,  True,  True, False, False],
-      [False, False, False, False, False, False],
-      [False, False, False, False, False, False],
-  ]]
-  """
-  q_block_indices = _make_block_mask_indices(bidirectional_mask)
-  kv_block_indices = q_block_indices
-  bidirectional_block_mask = (kv_block_indices[:, None, :] == q_block_indices[..., None]) & (
-      q_block_indices[..., None] > 0
-  )
-  return bidirectional_block_mask
 
 
 class AttentionOp(nnx.Module):
@@ -1007,28 +884,6 @@ class AttentionOp(nnx.Module):
         extra_stack_level=1,
     )
 
-  def _decode_cache_positions(self, segment_positions, decoder_segment_ids, s_len, kv_cache_part):
-    """Absolute query and key positions for a single-token decode step over one KV cache.
-
-    Prefill cache slot i holds position i. The AR cache is written in order from
-    the first decode step, so its newest valid slot holds the query token.
-
-    Returns:
-      (abs_q [batch, 1, 1], abs_k [batch, 1, s_len]), or None when the cache part,
-      the query position or the AR cache segment ids are unknown.
-    """
-    if kv_cache_part is None or segment_positions is None:
-      return None
-    abs_q = segment_positions[:, :, None]
-    slots = jnp.arange(s_len)[None, None, :]
-    if kv_cache_part == "prefill":
-      return abs_q, jnp.broadcast_to(slots, abs_q.shape[:2] + (s_len,))
-    if decoder_segment_ids is None:
-      return None
-    valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
-    newest = jnp.max(jnp.where(valid, jnp.arange(s_len)[None, :], -1), axis=-1)[:, None, None]
-    return abs_q, abs_q - newest + slots
-
   def generate_attention_mask(
       self,
       query,
@@ -1217,7 +1072,7 @@ class AttentionOp(nnx.Module):
       if use_segment_positions:
         sliding_mask = sliding_mask[:, None, None, :, :]
       if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
-        decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
+        decode_positions = attention_masks._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
         if decode_positions is not None:
           distance = decode_positions[0] - decode_positions[1]
           sliding_mask = ((distance >= 0) & (distance < self.sliding_window_size))[:, None, None, :, :]
@@ -1269,7 +1124,7 @@ class AttentionOp(nnx.Module):
         """
         if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
           # --- CASE 1: Single-token Autoregressive Decoding ---
-          decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
+          decode_positions = attention_masks._decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
           if decode_positions is not None:
             distance = decode_positions[0] - decode_positions[1]
             in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
@@ -1382,7 +1237,7 @@ class AttentionOp(nnx.Module):
         )
         chunk_mask = (same_chunk & (position_row_ids >= position_col_ids))[:, None, None, :, :]
       else:
-        chunk_mask = _generate_chunk_attention_mask(
+        chunk_mask = attention_masks._generate_chunk_attention_mask(
             mask_shape=(q_seq_len, kv_seq_len),
             chunk_size=self.chunk_attn_window_size,
             q_offset=next_pos,
@@ -1398,7 +1253,7 @@ class AttentionOp(nnx.Module):
             :, None, None, :, :
         ]
       else:
-        block_mask = _generate_block_causal_attention_mask(
+        block_mask = attention_masks._generate_block_causal_attention_mask(
             mask_shape=(q_seq_len, kv_seq_len),
             causal_block_size=self.causal_block_size,
             q_offset=next_pos,
@@ -1406,7 +1261,7 @@ class AttentionOp(nnx.Module):
       output_mask = block_mask if output_mask is None else jnp.logical_and(output_mask, block_mask)
 
     if bidirectional_mask is not None:
-      image_mask = _make_bidirectional_block_mask(bidirectional_mask)
+      image_mask = attention_masks._make_bidirectional_block_mask(bidirectional_mask)
       output_mask = output_mask | image_mask[:, None, None, ...]
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
@@ -3053,13 +2908,13 @@ class AttentionOp(nnx.Module):
 
     if indexer_mask is not None:
       indexer_mask = indexer_mask[:, None, None, :, :]
-      attn_weights = apply_mask_to_logits(attn_weights, indexer_mask)
+      attn_weights = attention_masks.apply_mask_to_logits(attn_weights, indexer_mask)
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = with_logical_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
       attn_mask = with_logical_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
-      attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
+      attn_weights = attention_masks.apply_mask_to_logits(attn_weights, attn_mask)
 
     if record_max_logits:
       max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))

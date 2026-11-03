@@ -1,7 +1,6 @@
 """MoE related Layers."""
 
 import dataclasses
-import enum
 import functools
 import inspect
 import math
@@ -21,14 +20,13 @@ from jax.sharding import PartitionSpec as P
 from lilax._backend.common import common_types as ctypes
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.kernels import megablox as mblx
-from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_sort
 from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_sort
 from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from lilax._backend.layers import attentions, linears, moe_dispatch, moe_routing, nnx_wrappers, quantizations
+from lilax._backend.layers import attentions, linears, moe_dispatch, moe_experts, moe_routing, nnx_wrappers, quantizations
 from lilax._backend.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import max_utils
@@ -143,51 +141,6 @@ def get_batchsplit_init_kernel_axes():
       ("expert_only", "embed_moe", None),
       ("expert_only", None, "embed_moe"),
   )
-
-
-def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
-  """Sums the two largest scores along the last axis, accumulating in float32.
-
-  This is mathematically equivalent to:
-    `jnp.sum(jax.lax.top_k(scores_grouped, k=2)[0].astype(jnp.float32), axis=-1)`
-  but avoids invoking `jax.lax.top_k`.
-
-  Motivation:
-    On TPU, `jax.lax.top_k` requires a sort. When the sorted dimension is small
-    (e.g., DeepSeek-V3 has 256 experts divided into 8 groups, or 32 experts per
-    group), it falls outside XLA:TPU's `SortPrefixFusion` requirements (which
-    expects a power-of-two dimension >= 256). Consequently, XLA falls back to
-    `BitonicSortEmitter`, which pads 32 elements into 128-wide vector registers
-    and executes multiple compare-and-exchange stages, adding noticeable
-    overhead per MoE layer.
-    Using two sequential `jnp.max` reductions (with the first maximum masked out)
-    replaces the sort with lightweight, fusible elementwise reductions.
-
-  Args:
-    scores_grouped: Array of shape `(..., n_routing_groups, experts_per_group)`.
-
-  Returns:
-    float32 array of shape `(..., n_routing_groups)` containing the sum of the
-    two largest scores in each routing group.
-  """
-  if scores_grouped.shape[-1] < 2:
-    raise ValueError("Each routing group needs at least 2 experts, got" f" {scores_grouped.shape[-1]}.")
-
-  # 1. Find the first maximum along the group axis.
-  max_1 = jnp.max(scores_grouped, axis=-1)
-
-  # 2. Mask out the element at the first maximum to find the second maximum.
-  # Note: `jnp.argmax` selects the lowest index in case of ties. Masking only
-  # that single index ensures that groups with tied top scores (e.g., [5.0, 5.0])
-  # correctly retain the second 5.0 as max_2, yielding 2 * max (identical to
-  # `top_k`). Comparing against `broadcasted_iota` keeps the mask fusible without
-  # materializing intermediate arrays.
-  argmax_1 = jnp.argmax(scores_grouped, axis=-1)[..., None]
-  lane = jax.lax.broadcasted_iota(argmax_1.dtype, scores_grouped.shape, scores_grouped.ndim - 1)
-  max_2 = jnp.max(jnp.where(lane == argmax_1, -jnp.inf, scores_grouped), axis=-1)
-
-  # 3. Cast both values to float32 before summation.
-  return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
 
 
 def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, return_counts=False):
@@ -714,6 +667,65 @@ _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psu
 
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
+
+  def deepseek_scale_weights(self, weights):
+    return moe_routing.ExpertGroupRouting.deepseek_scale_weights(
+        weights, self.config.routed_score_func, self.config.routed_scaling_factor
+    )
+
+  def expert_group_mask(self, gate_logits: jax.Array) -> jax.Array:
+    return moe_routing.ExpertGroupRouting.expert_group_mask(
+        gate_logits, self.config.n_routing_groups, self.config.topk_routing_group, self.num_experts
+    )
+
+  def apply_ffn_activation(self, layer_w0, layer_w1):
+    return moe_experts.ExpertActivation.apply_ffn_activation(
+        layer_w0, layer_w1, self.config.decoder_block, self.config.mlp_activations_limit, self.activation_fn, self.dtype
+    )
+
+  @staticmethod
+  def _maybe_truncate_local_group_size(
+      all_shard_local_sizes: jax.Array, buffer_size: int, ragged_buffer_factor: float
+  ) -> jax.Array:
+    return moe_dispatch.ExpertDispatch._maybe_truncate_local_group_size(
+        all_shard_local_sizes, buffer_size, ragged_buffer_factor
+    )
+
+  @staticmethod
+  def local_permute(
+      inputs,
+      global_group_sizes,
+      local_expert_size,
+      shard_index,
+      is_offset=False,
+      global_sorted_experts=None,
+      use_custom_sort_vjp=True,
+      use_ragged_sort=False,
+      ragged_buffer_factor=-1.0,
+      use_single_sparsecore=False,
+  ):
+    return moe_dispatch.ExpertDispatch.local_permute(
+        inputs, global_group_sizes, local_expert_size, shard_index, is_offset, global_sorted_experts,
+        use_custom_sort_vjp, use_ragged_sort, ragged_buffer_factor, use_single_sparsecore,
+        truncate_local_group_size=lambda sizes, size, factor: RoutedMoE._maybe_truncate_local_group_size(
+            sizes, size, factor
+        ),
+    )
+
+  @staticmethod
+  def get_all_to_all_params(
+      all_shards_group_sizes,
+      shard_id,
+      num_expert_parallelism,
+      is_batch_sharded=True,
+      ragged_buffer_factor=-1.0,
+      buffer_size=None,
+      is_dispatch=True,
+  ):
+    return moe_dispatch.ExpertDispatch.get_all_to_all_params(
+        all_shards_group_sizes, shard_id, num_expert_parallelism, is_batch_sharded,
+        ragged_buffer_factor, buffer_size, is_dispatch,
+    )
 
   def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
     """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
@@ -1276,51 +1288,6 @@ class RoutedMoE(nnx.Module):
 
     return top_k_weights, top_k_indices
 
-  def deepseek_scale_weights(self, weights):
-    """Scales weights according to DeepSeek's v3 reference implementation."""
-    # https://github.com/deepseek-ai/DeepSeek-V3/blob/2f7b80eecebf3d1c84da5a0d465f6639ea175012/inference/model.py#L592-L594.
-    if self.config.routed_score_func in ("sigmoid", "sqrtsoftplus"):
-      weights /= weights.sum(-1, keepdims=True) + 1e-20
-    weights *= self.config.routed_scaling_factor
-    return weights
-
-  def expert_group_mask(self, gate_logits: jax.Array) -> jax.Array:
-    """Returns a mask that selects only the top-k groups of experts.
-
-    Groups of experts are selected based on the sum of the top-2 expert scores
-    for each group.
-
-    Args:
-      gate_logits: Array of shape `(batch, seq, num_experts)`.
-
-    Returns:
-      Array of shape `(batch, seq, num_experts)` that is 1 for experts in the
-      top-k groups and 0 elsewhere.
-    """
-    # Find top groups based on each group's top-2 expert scores, where
-    # `scores_grouped.shape =
-    # (batch * seq, n_routing_groups, experts_per_group)`.
-    scores_grouped = jnp.reshape(
-        gate_logits,
-        gate_logits.shape[:-1] + (self.config.n_routing_groups, -1),
-    )
-    group_scores = _top_2_in_group_sum(scores_grouped)
-    _, group_idx = jax.lax.top_k(group_scores, k=self.config.topk_routing_group)
-
-    # Mask selected groups so that only those experts are considered.
-    group_mask = jax.nn.one_hot(group_idx, num_classes=self.config.n_routing_groups, dtype=jnp.float32)
-    group_mask = jnp.sum(group_mask, axis=-2)
-
-    # Apply masks and get top-k indices.
-    score_mask_expanded = jnp.broadcast_to(
-        group_mask[..., None],
-        group_mask.shape + (self.num_experts // self.config.n_routing_groups,),
-    )
-    return jnp.reshape(
-        score_mask_expanded,
-        score_mask_expanded.shape[:-2] + (self.num_experts,),
-    )
-
   def deepseek_routing(self, gate_logits: jax.Array, pre_bias_logits: jax.Array) -> tuple[jax.Array, jax.Array]:
     """DeepSeek routing logit.
 
@@ -1355,38 +1322,6 @@ class RoutedMoE(nnx.Module):
     else:
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
-
-  def apply_ffn_activation(self, layer_w0, layer_w1):
-    """Applies FFN activation function."""
-    with jax.named_scope("ffn_act"):
-      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
-        layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
-        layer_w1 = jnp.clip(
-            layer_w1,
-            min=-self.config.mlp_activations_limit,
-            max=self.config.mlp_activations_limit,
-        )
-        layer_act = self.activation_fn(layer_w0 * 1.702)
-        glu = jnp.multiply(layer_w0, layer_act)
-        intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      elif (
-          self.config.decoder_block
-          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.HY4)
-          and self.config.mlp_activations_limit > 0.0
-      ):
-        # DeepSeek V4 uses bounds to clip the SwiGLU activations
-        layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
-        layer_w1 = jnp.clip(
-            layer_w1,
-            min=-self.config.mlp_activations_limit,
-            max=self.config.mlp_activations_limit,
-        )
-        layer_act = self.activation_fn(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      else:
-        layer_act = self.activation_fn(layer_w0)
-        intermediate_layer = jnp.multiply(layer_act, layer_w1)
-      return intermediate_layer.astype(self.dtype)
 
   def permute(
       self,
@@ -1626,131 +1561,6 @@ class RoutedMoE(nnx.Module):
           reshaped_weights = reshaped_weights.astype(jnp.float32)
         output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights, precision=matmul_precision)
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
-
-  @staticmethod
-  def _maybe_truncate_local_group_size(
-      all_shard_local_sizes: jax.Array,
-      buffer_size: int,
-      ragged_buffer_factor: float,
-  ) -> jax.Array:
-    if ragged_buffer_factor > 0.0:
-      flat_sizes = all_shard_local_sizes.reshape(-1)
-      cumsum = jnp.cumsum(flat_sizes)
-      clamped_cumsum = jnp.minimum(cumsum, buffer_size)
-      clamped_cumsum_extended = jnp.concatenate([jnp.zeros((1,), dtype=clamped_cumsum.dtype), clamped_cumsum])
-      truncated_flat_sizes = jnp.diff(clamped_cumsum_extended)
-      truncated_all_shard_local_sizes = truncated_flat_sizes.reshape(all_shard_local_sizes.shape)
-      return jnp.sum(truncated_all_shard_local_sizes, axis=0)
-    else:
-      return jnp.sum(all_shard_local_sizes, axis=0)
-
-  @staticmethod
-  def local_permute(
-      inputs,
-      global_group_sizes,
-      local_expert_size,
-      shard_index,
-      is_offset=False,
-      global_sorted_experts=None,
-      use_custom_sort_vjp=True,
-      use_ragged_sort=False,
-      ragged_buffer_factor=-1.0,
-      use_single_sparsecore=False,
-  ):
-    all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-        global_group_sizes, shard_index * local_expert_size, local_expert_size, axis=1
-    )
-    local_sizes = all_shard_local_sizes.reshape(-1)
-    local_group_size = RoutedMoE._maybe_truncate_local_group_size(
-        all_shard_local_sizes, inputs.shape[0], ragged_buffer_factor
-    )
-    if is_offset:
-      divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
-      expert_indices = jnp.where(
-          divided_assignments == shard_index, jnp.mod(global_sorted_experts, local_expert_size), local_expert_size
-      )
-    else:
-      base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
-      expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
-
-    sorted_indices = jnp.argsort(expert_indices)
-    if use_ragged_sort:
-      valid_end = jnp.sum(local_group_size).astype(jnp.int32)
-      sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end, use_single_sparsecore=use_single_sparsecore)
-    else:
-      sorted_inputs = moe_dispatch._sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
-    sorted_experts_ids = expert_indices[sorted_indices]
-    return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
-
-  @staticmethod
-  def get_all_to_all_params(
-      all_shards_group_sizes,
-      shard_id,
-      num_expert_parallelism,
-      is_batch_sharded=True,
-      ragged_buffer_factor=-1.0,
-      buffer_size=None,
-      is_dispatch=True,
-  ):
-    class TransformStrategy(enum.Enum):
-      INPUT_OFFSET = enum.auto()
-      SEND_SIZE = enum.auto()
-      OUTPUT_OFFSET = enum.auto()
-      RECV_SIZE = enum.auto()
-
-    def transform_array(input_array, shard_id, strategy, is_batch_sharded):
-      if is_batch_sharded:
-        if strategy == TransformStrategy.INPUT_OFFSET:
-          local_array = input_array[shard_id]
-          return jnp.concatenate((jnp.array([0]), jnp.cumsum(local_array)[:-1]))
-        elif strategy == TransformStrategy.SEND_SIZE:
-          return input_array[shard_id]
-        elif strategy == TransformStrategy.OUTPUT_OFFSET:
-          zero_row = jnp.zeros((1,) + input_array.shape[1:], dtype=input_array.dtype)
-          array_with_zeros = jnp.concatenate((zero_row, input_array), axis=0)
-          cumulated_array = jnp.cumsum(array_with_zeros, axis=0, dtype=input_array.dtype)
-          return cumulated_array[shard_id]
-        elif strategy == TransformStrategy.RECV_SIZE:
-          return input_array[:, shard_id]
-        else:
-          raise ValueError(f"Unknown transform array strategy: {strategy}")
-      else:
-        if strategy == TransformStrategy.INPUT_OFFSET:
-          return jnp.zeros(num_expert_parallelism, dtype=input_array.dtype)
-        elif strategy == TransformStrategy.SEND_SIZE:
-          return jnp.repeat(input_array[shard_id], num_expert_parallelism)
-        elif strategy == TransformStrategy.OUTPUT_OFFSET:
-          output_offset = jnp.concatenate((jnp.array([0]), jnp.cumsum(input_array[:-1])))[shard_id]
-          return jnp.repeat(output_offset, num_expert_parallelism)
-        elif strategy == TransformStrategy.RECV_SIZE:
-          return input_array
-        else:
-          raise ValueError(f"Unknown transform array strategy: {strategy}")
-
-    if ragged_buffer_factor > 0.0:
-      assert buffer_size is not None
-      truncated_all_shards_group_sizes = moe_dispatch._truncate_matrix(all_shards_group_sizes, buffer_size)
-      if is_dispatch:
-        input_offsets = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
-        send_sizes = transform_array(truncated_all_shards_group_sizes, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
-        output_offsets = transform_array(
-            truncated_all_shards_group_sizes, shard_id, TransformStrategy.OUTPUT_OFFSET, is_batch_sharded
-        )
-        recv_sizes = transform_array(truncated_all_shards_group_sizes, shard_id, TransformStrategy.RECV_SIZE, is_batch_sharded)
-      else:
-        transposed_all_shards = jnp.transpose(all_shards_group_sizes)
-        transposed_truncated = jnp.transpose(truncated_all_shards_group_sizes)
-        input_offsets = transform_array(transposed_truncated, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
-        send_sizes = transform_array(transposed_truncated, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
-        output_offsets = transform_array(transposed_all_shards, shard_id, TransformStrategy.OUTPUT_OFFSET, is_batch_sharded)
-        recv_sizes = transform_array(transposed_truncated, shard_id, TransformStrategy.RECV_SIZE, is_batch_sharded)
-    else:
-      matrix = all_shards_group_sizes if is_dispatch else jnp.transpose(all_shards_group_sizes)
-      input_offsets = transform_array(matrix, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
-      send_sizes = transform_array(matrix, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
-      output_offsets = transform_array(matrix, shard_id, TransformStrategy.OUTPUT_OFFSET, is_batch_sharded)
-      recv_sizes = transform_array(matrix, shard_id, TransformStrategy.RECV_SIZE, is_batch_sharded)
-    return input_offsets, send_sizes, output_offsets, recv_sizes
 
   def transform_bias(self, experts_index, *biases):
     return tuple(bias[experts_index] for bias in biases)
