@@ -1,12 +1,12 @@
 """Ragged gather reduce kernel implementation from tpu-inference."""
 
 import functools
-import math
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
-from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
+
+from lilax._backend.kernels.ragged import ragged_gather_reduce_v1_dispatch as _dispatch
 
 
 def _align_to(a, b):
@@ -75,6 +75,52 @@ def _fallback_implementation(
   out = out.reshape(-1, reduce_group_size, out.shape[-1])
   out = jnp.sum(out, axis=1).astype(x.dtype)
   return out
+
+
+def _preprocess(
+    indices: jax.Array,
+    topk_weights: jax.Array,
+    valid_rows_mask: jax.Array,
+    reduce_group_size: int,
+    num_row_partitions: int,
+    num_simd_lanes: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Preprocesses indices for ragged gather reduce."""
+  assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
+
+  row_partition_size = indices.shape[0] // num_row_partitions
+  valid_rows_mask = valid_rows_mask.reshape(num_row_partitions, -1)
+
+  sorted_by_validity = jnp.argsort(~valid_rows_mask, descending=False, stable=True, axis=-1)
+  sorted_by_validity += (
+      jnp.broadcast_to(
+          jnp.arange(num_row_partitions)[:, None],
+          (num_row_partitions, row_partition_size),
+      )
+      * row_partition_size
+  )
+  sorted_by_validity = sorted_by_validity.reshape(-1)
+
+  src_indices = indices[sorted_by_validity]
+  dst_indices = sorted_by_validity // reduce_group_size
+  topk_weights = topk_weights[sorted_by_validity]
+  topk_weights = topk_weights.astype(jnp.float32)
+
+  num_src_rows_per_row_partition = jnp.sum(valid_rows_mask, axis=-1)
+  assert num_row_partitions <= num_simd_lanes
+  num_src_rows_per_row_partition = jnp.pad(
+      num_src_rows_per_row_partition.astype(jnp.int32),
+      (0, num_simd_lanes - num_row_partitions),
+  )
+  mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
+
+  return (
+      src_indices,
+      dst_indices,
+      topk_weights,
+      num_src_rows_per_row_partition,
+      mask,
+  )
 
 
 def main_kernel(
@@ -294,52 +340,6 @@ def main_kernel(
   inner_kernel()
 
 
-def _preprocess(
-    indices: jax.Array,
-    topk_weights: jax.Array,
-    valid_rows_mask: jax.Array,
-    reduce_group_size: int,
-    num_row_partitions: int,
-    num_simd_lanes: int,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Preprocesses indices for ragged gather reduce."""
-  assert indices.ndim == 1, "Ragged scatter only supports 1d indices."
-
-  row_partition_size = indices.shape[0] // num_row_partitions
-  valid_rows_mask = valid_rows_mask.reshape(num_row_partitions, -1)
-
-  sorted_by_validity = jnp.argsort(~valid_rows_mask, descending=False, stable=True, axis=-1)
-  sorted_by_validity += (
-      jnp.broadcast_to(
-          jnp.arange(num_row_partitions)[:, None],
-          (num_row_partitions, row_partition_size),
-      )
-      * row_partition_size
-  )
-  sorted_by_validity = sorted_by_validity.reshape(-1)
-
-  src_indices = indices[sorted_by_validity]
-  dst_indices = sorted_by_validity // reduce_group_size
-  topk_weights = topk_weights[sorted_by_validity]
-  topk_weights = topk_weights.astype(jnp.float32)
-
-  num_src_rows_per_row_partition = jnp.sum(valid_rows_mask, axis=-1)
-  assert num_row_partitions <= num_simd_lanes
-  num_src_rows_per_row_partition = jnp.pad(
-      num_src_rows_per_row_partition.astype(jnp.int32),
-      (0, num_simd_lanes - num_row_partitions),
-  )
-  mask = jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1)
-
-  return (
-      src_indices,
-      dst_indices,
-      topk_weights,
-      num_src_rows_per_row_partition,
-      mask,
-  )
-
-
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -391,109 +391,8 @@ def ragged_gather_reduce(
     `(input_size // reduce_group_size, hidden_size)`.
   """
 
-  assert x.ndim == 2, "ragged_gather_reduce only supports 2d inputs."
-  assert indices.ndim == 1, "ragged_gather_reduce only supports 1d indices."
-  assert topk_weights.ndim == 1, "ragged_gather_reduce only supports 1d topk_weights."
-  assert valid_rows_mask.ndim == 1, "ragged_gather_reduce only supports 1d valid_rows_mask."
-
-  if enforce_fallback or not pltpu.is_tpu_device():
-    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
-
-  sc_info = pltpu.get_tpu_info().sparse_core
-  if sc_info is None:
-    return _fallback_implementation(x, indices, topk_weights, valid_rows_mask, reduce_group_size)
-
-  dtype = x.dtype
-  dtype_bytes = jax.dtypes.itemsize_bits(dtype) // 8
-
-  hidden_size = x.shape[-1]
-  input_size = indices.size
-  num_simd_lanes = sc_info.num_lanes
-  num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
-  num_cores = num_sc_cores * sc_info.num_subcores
-
-  num_column_partitions = 8
-  assert num_cores % num_column_partitions == 0
-  num_rows_partitions = num_cores // num_column_partitions
-
-  aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
-  col_size = aligned_hidden_size // num_column_partitions
-  row_tile_size = num_simd_lanes
-  padded_input_size = _align_to(
-      input_size,
-      math.lcm(num_rows_partitions * row_tile_size, reduce_group_size),
+  return _dispatch.ragged_gather_reduce(
+      x, indices, topk_weights, valid_rows_mask, reduce_group_size, enforce_fallback,
+      flops_override, bytes_accessed_override, use_single_sparsecore,
+      _align_to, get_cost_estimate, _fallback_implementation, _preprocess, main_kernel,
   )
-  pad_input_size = padded_input_size - input_size
-
-  x = jnp.pad(
-      x,
-      ((0, pad_input_size), (0, aligned_hidden_size - hidden_size)),
-      constant_values=0,
-  )
-  indices = jnp.pad(indices, (0, pad_input_size), constant_values=0)
-  topk_weights = jnp.pad(topk_weights, (0, pad_input_size), constant_values=0)
-  valid_rows_mask = jnp.pad(valid_rows_mask, (0, pad_input_size), constant_values=False)
-
-  (
-      src_indices,
-      dst_indices,
-      topk_weights,
-      num_src_rows_per_row_partition,
-      mask,
-  ) = _preprocess(
-      indices,
-      topk_weights,
-      valid_rows_mask,
-      reduce_group_size,
-      num_rows_partitions,
-      num_simd_lanes,
-  )
-
-  vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=num_sc_cores,
-      num_subcores=sc_info.num_subcores,
-      core_axis_name="core",
-      subcore_axis_name="subcore",
-  )
-  out = pl.kernel(
-      functools.partial(
-          main_kernel,
-          core_axis_name=vector_mesh.core_axis_name,
-          subcore_axis_name=vector_mesh.subcore_axis_name,
-          num_row_partitions=num_rows_partitions,
-          num_column_partitions=num_column_partitions,
-      ),
-      out_type=jax.ShapeDtypeStruct(
-          (padded_input_size // reduce_group_size, aligned_hidden_size),
-          jnp.float32,
-      ),
-      compiler_params=pltpu.CompilerParams(
-          use_tc_tiling_on_sc=True,
-          disable_bounds_checks=True,
-      ),
-      cost_estimate=get_cost_estimate(
-          padded_input_size=padded_input_size,
-          aligned_hidden_size=aligned_hidden_size,
-          reduce_group_size=reduce_group_size,
-          input_dtype_bytes=dtype_bytes,
-          flops_override=flops_override,
-          bytes_accessed_override=bytes_accessed_override,
-      ),
-      scratch_types=dict(
-          num_rows_per_row_partition_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          out_vmem_ref=pltpu.VMEM((num_simd_lanes, col_size), jnp.uint32),
-          prev_iter_last_row_vmem_ref=pltpu.VMEM((1, col_size), jnp.uint32),
-          src_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          dst_indices_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.int32),
-          topk_weights_vmem_ref=pltpu.VMEM((num_simd_lanes,), jnp.float32),
-          sem_ref=pltpu.SemaphoreType.DMA((2,)),
-      ),
-      mesh=vector_mesh,
-      name="sc_ragged_gather_reduce",
-  )(num_src_rows_per_row_partition, x, src_indices, dst_indices, topk_weights)
-
-  return jnp.where(
-      mask[:, None],
-      out.astype(x.dtype),
-      jnp.zeros_like(out, dtype=x.dtype),
-  )[: (input_size // reduce_group_size), :hidden_size]
