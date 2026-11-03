@@ -12,8 +12,8 @@ from lilax._backend.experimental.lineage import dsv3_dense_layers
 from lilax._backend.experimental.lineage import dsv3_expert_shuffle
 from lilax._backend.experimental.lineage import dsv3_sparse_layer
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage.sharding import axis_collectives
 
 
 def collect_ehproj_weights(
@@ -22,9 +22,13 @@ def collect_ehproj_weights(
 ) -> dsv3_types.DSv3EHProjWeightsPytree:
   """Collects EHProj weights along mesh axes."""
   return dsv3_types.DSv3EHProjWeightsPytree(
-      enorm_scale=ops.collect_along_axis(w.enorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-      hnorm_scale=ops.collect_along_axis(w.hnorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-      eh_proj=ops.collect_along_axis(w.eh_proj, ("dcn", "fsdp_attention", "attention"), axis_mapping),
+      enorm_scale=axis_collectives.collect_along_axis(
+          w.enorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping,
+      ),
+      hnorm_scale=axis_collectives.collect_along_axis(
+          w.hnorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping,
+      ),
+      eh_proj=axis_collectives.collect_along_axis(w.eh_proj, ("dcn", "fsdp_attention", "attention"), axis_mapping),
   )
 
 
@@ -94,16 +98,16 @@ def dsv3_mtp_layer(
       axis_mapping: Mapping[str, str | tuple[str, ...]],
   ) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
     if expert_permutations is None:
-      collected = ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping)
+      collected = axis_collectives.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping)
       return dsv3_sparse_layer.routed_w_to_tiles(
           jax.tree.map(lambda a: a.reshape(num_experts, -1, a.shape[-1]) if a.ndim == 2 else a, collected)
       )
-    routed = ops.collect_along_axis(routed, ("dcn",), axis_mapping)
+    routed = axis_collectives.collect_along_axis(routed, ("dcn",), axis_mapping)
     with jax.named_scope("shuffle_experts"):
       routed = dsv3_expert_shuffle.shuffle_experts(
           routed, expert_permutations, expert_axis_name=expert_axis_name, axis_mapping=axis_mapping,
       )
-    return dsv3_sparse_layer.routed_w_to_tiles(ops.collect_along_axis(routed, ("fsdp_moe",), axis_mapping))
+    return dsv3_sparse_layer.routed_w_to_tiles(axis_collectives.collect_along_axis(routed, ("fsdp_moe",), axis_mapping))
 
   def _collect_w(
       w: dsv3_types.DSv3MTPWeightsPytree,
@@ -112,29 +116,41 @@ def dsv3_mtp_layer(
     return dsv3_types.DSv3MTPWeightsPytree(
         ehproj=collect_ehproj_weights(w.ehproj, axis_mapping),
         sparse=dsv3_types.DSv3SparseLayerWeightsPytree(
-            pre_attn_norm_scale=ops.collect_along_axis(
+            pre_attn_norm_scale=axis_collectives.collect_along_axis(
                 w.sparse.pre_attn_norm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping,
             ),
             mla=dsv3_types.DSv3MLAWeightsPytree(
-                q_down=ops.collect_along_axis(w.sparse.mla.q_down, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-                q_up=ops.collect_along_axis(w.sparse.mla.q_up, ("dcn", "fsdp_attention"), axis_mapping),
-                q_norm_scale=ops.collect_along_axis(w.sparse.mla.q_norm_scale, ("dcn", "fsdp_attention"), axis_mapping),
-                kv_down=ops.collect_along_axis(w.sparse.mla.kv_down, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-                k_up=ops.collect_along_axis(w.sparse.mla.k_up, ("dcn", "fsdp_attention"), axis_mapping),
-                v_up=ops.collect_along_axis(w.sparse.mla.v_up, ("dcn", "fsdp_attention"), axis_mapping),
-                kv_norm_scale=ops.collect_along_axis(w.sparse.mla.kv_norm_scale, ("dcn", "fsdp_attention"), axis_mapping),
-                out=ops.collect_along_axis(w.sparse.mla.out, ("dcn", "fsdp_attention"), axis_mapping),
+                q_down=axis_collectives.collect_along_axis(
+                    w.sparse.mla.q_down, ("dcn", "fsdp_attention", "attention"), axis_mapping,
+                ),
+                q_up=axis_collectives.collect_along_axis(w.sparse.mla.q_up, ("dcn", "fsdp_attention"), axis_mapping),
+                q_norm_scale=axis_collectives.collect_along_axis(
+                    w.sparse.mla.q_norm_scale, ("dcn", "fsdp_attention"), axis_mapping,
+                ),
+                kv_down=axis_collectives.collect_along_axis(
+                    w.sparse.mla.kv_down, ("dcn", "fsdp_attention", "attention"), axis_mapping,
+                ),
+                k_up=axis_collectives.collect_along_axis(w.sparse.mla.k_up, ("dcn", "fsdp_attention"), axis_mapping),
+                v_up=axis_collectives.collect_along_axis(w.sparse.mla.v_up, ("dcn", "fsdp_attention"), axis_mapping),
+                kv_norm_scale=axis_collectives.collect_along_axis(
+                    w.sparse.mla.kv_norm_scale, ("dcn", "fsdp_attention"), axis_mapping,
+                ),
+                out=axis_collectives.collect_along_axis(w.sparse.mla.out, ("dcn", "fsdp_attention"), axis_mapping),
             ),
-            post_attn_norm_scale=ops.collect_along_axis(
+            post_attn_norm_scale=axis_collectives.collect_along_axis(
                 w.sparse.post_attn_norm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping,
             ),
             moe=dsv3_types.DSv3MoEWeightsPytree(
                 router=dsv3_types.DSv3MoERouterWeightsPytree(
-                    kernel=ops.collect_along_axis(w.sparse.moe.router.kernel, ("dcn", "expert", "fsdp_moe"), axis_mapping),
+                    kernel=axis_collectives.collect_along_axis(
+                        w.sparse.moe.router.kernel, ("dcn", "expert", "fsdp_moe"), axis_mapping,
+                    ),
                     bias=w.sparse.moe.router.bias,
                 ),
                 routed=_collect_routed(w.sparse.moe.routed, axis_mapping),
-                shared=ops.collect_along_axis(w.sparse.moe.shared, ("dcn", "expert", "fsdp_moe"), axis_mapping),
+                shared=axis_collectives.collect_along_axis(
+                    w.sparse.moe.shared, ("dcn", "expert", "fsdp_moe"), axis_mapping,
+                ),
             ),
         ),
     )

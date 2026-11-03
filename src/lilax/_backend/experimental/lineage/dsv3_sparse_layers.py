@@ -13,6 +13,7 @@ from lilax._backend.experimental.lineage import dsv3_sparse_layer
 from lilax._backend.experimental.lineage import dsv3_types
 from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage.scan import weight_scan_prologue_epilogue
 
 
 class NormFn(Protocol):
@@ -109,7 +110,7 @@ def dsv3_sparse_layers(
       mesh=mesh, norm_fn=norm_fn, rope_fn=rope_fn, axis_mapping=axis_mapping,
       segment_ids=(segment_ids_0, segment_ids_1), quant=quant,
   )
-  _prologue = ops.PipelinedScanLayer(
+  _prologue = weight_scan_prologue_epilogue.PipelinedScanLayer(
       fwd=functools.partial(
           dsv3_sparse_layer.dsv3_sparse_layer_prologue_fwd,
           banks=(bank_0, bank_1), bank_offsets=(bank_offset_0, bank_offset_1), **attention_kwargs,
@@ -129,11 +130,11 @@ def dsv3_sparse_layers(
       topk_routing_group=topk_routing_group, topk_in_group=topk_in_group, gmm_fn=gmm_fn,
       expert_axis_name=expert_axis_name, capacity_factor=capacity_factor, router_dtype=router_dtype,
   )
-  _scan_body = ops.PipelinedScanLayer(
+  _scan_body = weight_scan_prologue_epilogue.PipelinedScanLayer(
       fwd=functools.partial(_scan_body_fwd, **sparse_kwargs),
       bwd=functools.partial(dsv3_sparse_layer.dsv3_sparse_layer_scan_body_bwd, **sparse_kwargs),
   )
-  _epilogue = ops.PipelinedScanLayer(
+  _epilogue = weight_scan_prologue_epilogue.PipelinedScanLayer(
       fwd=functools.partial(dsv3_sparse_layer.dsv3_sparse_layer_epilogue_fwd, **sparse_kwargs),
       bwd=functools.partial(dsv3_sparse_layer.dsv3_sparse_layer_epilogue_bwd, **sparse_kwargs),
   )
@@ -152,17 +153,17 @@ def dsv3_sparse_layers(
     _collect_w_ici_bwd = _with_expert_permutations(_collect_w_ici_bwd, accepts=False)
     _reduce_w_ici_sc1 = _with_expert_permutations(_reduce_w_ici_sc1, accepts=False)
     _reduce_w_ici_sc0 = _with_expert_permutations(_reduce_w_ici_sc0, accepts=False)
-    _prologue = ops.PipelinedScanLayer(
+    _prologue = weight_scan_prologue_epilogue.PipelinedScanLayer(
         fwd=_with_expert_permutations(_prologue.fwd, accepts=False),
         bwd=_with_expert_permutations(_prologue.bwd, accepts=False),
     )
-    _scan_body = ops.PipelinedScanLayer(
+    _scan_body = weight_scan_prologue_epilogue.PipelinedScanLayer(
         fwd=_with_expert_permutations(_scan_body.fwd), bwd=_with_expert_permutations(_scan_body.bwd, accepts=False),
     )
-    _epilogue = ops.PipelinedScanLayer(
+    _epilogue = weight_scan_prologue_epilogue.PipelinedScanLayer(
         fwd=_with_expert_permutations(_epilogue.fwd), bwd=_with_expert_permutations(_epilogue.bwd, accepts=False),
     )
-  (out_mb0, out_mb1), aux = ops.w_collect_pipelined_scan_prologue_epilogue(
+  (out_mb0, out_mb1), aux = weight_scan_prologue_epilogue.w_collect_pipelined_scan_prologue_epilogue(
       _prologue, _scan_body, _epilogue, (mb0, mb1), w, _collect_w_dcn, _collect_w_ici_fwd,
       functools.partial(dsv3_sparse_layer.reduce_w_dcn, axis_mapping=axis_mapping),
       _reduce_w_ici_sc1, _reduce_w_ici_sc0, _collect_w_ici_bwd,

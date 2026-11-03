@@ -20,6 +20,9 @@ from lilax._backend.experimental.lineage import dsv3_router
 from lilax._backend.experimental.lineage import dsv3_types
 from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage.scan import weight_scan_prologue_epilogue
+from lilax._backend.experimental.lineage.sharding import axis_collectives
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 
 class NormFn(Protocol):
@@ -236,8 +239,8 @@ def _dispatch_bwd(
   token_axis = dsv3_router.dsv3_get_token_axis(jax.typeof(moe_in_q).sharding.spec, num_model_dims=1) or (
       dsv3_router.dsv3_get_token_axis(jax.typeof(grad_out).sharding.spec, num_model_dims=1)
   )
-  token_spec_3d = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
-  scale_spec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None), axis_mapping)
+  token_spec_3d = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  scale_spec = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis, None), axis_mapping)
 
   def _impl(m_in, g_out):
     local_amax = quantization.ragged_absmax(g_out)
@@ -292,8 +295,8 @@ def init_activation_bank(
   assert w.moe.routed.gate is not None
   gate_dim = w.moe.routed.gate.shape[-1]
   token_axis = dsv3_router.dsv3_get_token_axis(x_pspec, num_model_dims=1)
-  bank_pspec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
-  offset_pspec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis), axis_mapping)
+  bank_pspec = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  offset_pspec = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis), axis_mapping)
 
   def _init_local(_):
     def _init():
@@ -551,7 +554,7 @@ def _w_dcn_axes() -> dsv3_types.DSv3SparseLayerWeightsPytree:
 def collect_w_dcn(
     w: dsv3_types.DSv3SparseLayerWeightsPytree, *, axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3SparseLayerWeightsPytree:
-  return ops.collect_along_axis(w, _w_dcn_axes(), axis_mapping)
+  return axis_collectives.collect_along_axis(w, _w_dcn_axes(), axis_mapping)
 
 
 @jt.jaxtyped(typechecker=typeguard.typechecked)
@@ -559,7 +562,7 @@ def reduce_w_dcn(
     grad_w: dsv3_types.DSv3SparseLayerWeightsPytree, like: dsv3_types.DSv3SparseLayerWeightsPytree,
     *, axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3SparseLayerWeightsPytree:
-  return ops.reduce_along_axis(grad_w, _w_dcn_axes(), axis_mapping, like)
+  return axis_collectives.reduce_along_axis(grad_w, _w_dcn_axes(), axis_mapping, like)
 
 
 _SC1_KWARGS = dict(compute_type="tpu_sparsecore", compiler_options={"sparse_core_config": {"core_ids": [1]}})
@@ -624,17 +627,17 @@ def collect_w_ici(
   flat_routed = w.moe.routed.gate.ndim == 2
   w = dataclasses.replace(w, moe=dataclasses.replace(w.moe, routed=routed_w_to_tiles(w.moe.routed)))
   if split:
-    pre_attn_norm_scale, mla = ops.collect_along_axis(
+    pre_attn_norm_scale, mla = axis_collectives.collect_along_axis(
         (w.pre_attn_norm_scale, w.mla), (w_axes.pre_attn_norm_scale, w_axes.mla), axis_mapping, **_SC1_KWARGS,
     )
-    post_attn_norm_scale, moe = ops.collect_along_axis(
+    post_attn_norm_scale, moe = axis_collectives.collect_along_axis(
         (w.post_attn_norm_scale, w.moe), (w_axes.post_attn_norm_scale, w_axes.moe), axis_mapping, **_SC1_KWARGS,
     )
     collected = dsv3_types.DSv3SparseLayerWeightsPytree(
         pre_attn_norm_scale=pre_attn_norm_scale, mla=mla, post_attn_norm_scale=post_attn_norm_scale, moe=moe,
     )
   else:
-    collected = ops.collect_along_axis(w, w_axes, axis_mapping, **_SC1_KWARGS)
+    collected = axis_collectives.collect_along_axis(w, w_axes, axis_mapping, **_SC1_KWARGS)
   if not flat_routed:
     return collected
   assert w.moe.router.kernel is not None
@@ -679,7 +682,7 @@ def reduce_w_ici_sc1(
       if flat_routed else routed_w_from_tiles(grad_w.moe.routed)
   )
   grad_w = dataclasses.replace(grad_w, moe=dataclasses.replace(grad_w.moe, routed=routed))
-  return ops.reduce_along_axis(
+  return axis_collectives.reduce_along_axis(
       grad_w, _w_ici_axes(), axis_mapping, like, axes=_sc1_reduce_axes(axis_mapping),
       split_scatters=_w_ici_split_scatters(), **_SC1_KWARGS,
   )
@@ -689,13 +692,13 @@ def reduce_w_ici_sc1(
 def reduce_w_ici_sc0(
     grad_w: dsv3_types.DSv3SparseLayerWeightsPytree, like: dsv3_types.DSv3SparseLayerWeightsPytree,
     *, axis_mapping: Mapping[str, str | tuple[str, ...]], defer: bool = False,
-) -> dsv3_types.DSv3SparseLayerWeightsPytree | tuple[ops.DeferredReduce, ops.DeferredReduce]:
+) -> dsv3_types.DSv3SparseLayerWeightsPytree | tuple[axis_collectives.DeferredReduce, axis_collectives.DeferredReduce]:
   mesh = jax.typeof(jax.tree.leaves(like)[0]).sharding.mesh
   axes = frozenset(mesh.axis_names) - _sc1_reduce_axes(axis_mapping)
   if not defer:
-    return ops.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, axes=axes, **_SC0_KWARGS)
+    return axis_collectives.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, axes=axes, **_SC0_KWARGS)
   return tuple(
-      ops.reduce_along_axis(grad_w_half, _w_ici_axes(), axis_mapping, like_half, axes=axes, defer=True)
+      axis_collectives.reduce_along_axis(grad_w_half, _w_ici_axes(), axis_mapping, like_half, axes=axes, defer=True)
       for grad_w_half, like_half in zip(_split_w_attention_moe(grad_w), _split_w_attention_moe(like))
   )
 
@@ -1368,7 +1371,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     w_next_expert_grad_unreduced: dsv3_types.DSv3SparseLayerWeightsPytree,
     reduce_ici_first_fn: Callable[[dsv3_types.DSv3SparseLayerWeightsPytree], dsv3_types.DSv3SparseLayerWeightsPytree],
     w_pending_grad_partial: dsv3_types.DSv3SparseLayerWeightsPytree | None,
-    reduce_ici_second_fn: Callable[..., tuple[ops.DeferredReduce, ops.DeferredReduce]],
+    reduce_ici_second_fn: Callable[..., tuple[axis_collectives.DeferredReduce, axis_collectives.DeferredReduce]],
     *, yarn_freqs: tuple[Any, Any], splash_kernel: Any, num_experts: int, num_experts_per_tok: int,
     routed_scaling_factor: float, n_routing_groups: int, topk_routing_group: int, topk_in_group: int,
     qk_head_dim: int, rope_head_dim: int, num_query_heads: int, mscale: float, kv_lora_rank: int,
@@ -1442,7 +1445,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     _, vjp_pre_norm_next_0 = jax.vjp(_fwd_pre_norm_next_0, res.mb0.mla.orig_x, w_next.pre_attn_norm_scale)
     grad_x_norm_next_0, grad_pre_attn_norm_scale_next_0 = vjp_pre_norm_next_0(grad_norm_x_next_0)
     grad_x_next_0 = grad_x_norm_next_0 + grad_orig_x_next_0
-    w_next_grad_unreduced = ops.combine_w_grads(
+    w_next_grad_unreduced = weight_scan_prologue_epilogue.combine_w_grads(
         dsv3_types.DSv3SparseLayerWeightsPytree(
             pre_attn_norm_scale=grad_pre_attn_norm_scale_next_0, mla=grad_w_mla_next_0,
             post_attn_norm_scale=None, moe=dsv3_types.DSv3MoEWeightsPytree(),
@@ -1644,7 +1647,10 @@ def dsv3_sparse_layer_scan_body_bwd(
       w_next_expert_grad_unreduced, w_pending_grad_partial,
   )
   w_next_grad_partial = reduce_ici_first_fn(w_next_grad_unreduced)
-  w_pending_grad = None if w_pending_grad_partial is None else ops.combine_w_grads(w_pending_grad_attention, w_pending_grad_moe)
+  w_pending_grad = (
+      None if w_pending_grad_partial is None
+      else weight_scan_prologue_epilogue.combine_w_grads(w_pending_grad_attention, w_pending_grad_moe)
+  )
   grad_outputs_mla_curr = (
       ((grad_mla_out_total_0, grad_mla_out_total_0), bank_0, bank_offset_0), (grad_mb1_wait, bank_1, bank_offset_1),
   )
@@ -1747,7 +1753,7 @@ def _dsv3_sparse_layer_bwd(
       segment_ids=(segment_ids_0, segment_ids_1), quant=quant,
   )
   grad_x = ops.merge_microbatches(grad_mb0_in, grad_mb1_in, mesh=mesh)
-  grad_w = ops.combine_w_grads(grad_w_prologue, grad_w_epilogue)
+  grad_w = weight_scan_prologue_epilogue.combine_w_grads(grad_w_prologue, grad_w_epilogue)
   return grad_x, grad_w, None, None, None, None
 
 

@@ -11,8 +11,8 @@ import typeguard
 
 from lilax._backend.experimental.lineage import dsv3_mla
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage.sharding import axis_collectives
 
 
 class NormFn(Protocol):
@@ -96,7 +96,7 @@ def collect_w_dcn(
     w: dsv3_types.DSv3DenseLayerWeightsPytree, *, axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3DenseLayerWeightsPytree:
   """Collects dense layer weights across the DCN mesh axis."""
-  return ops.collect_along_axis(w, "dcn", axis_mapping)
+  return axis_collectives.collect_along_axis(w, "dcn", axis_mapping)
 
 
 def _w_ici_axes() -> dsv3_types.DSv3DenseLayerWeightsPytree:
@@ -121,7 +121,7 @@ def collect_w_ici(
     w: dsv3_types.DSv3DenseLayerWeightsPytree, *, axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3DenseLayerWeightsPytree:
   """Collects dense layer weights across ICI mesh axes on SparseCore 1."""
-  return ops.collect_along_axis(
+  return axis_collectives.collect_along_axis(
       w, _w_ici_axes(), axis_mapping, compute_type="tpu_sparsecore",
       compiler_options={"sparse_core_config": {"core_ids": [1]}},
   )
@@ -135,7 +135,7 @@ def reduce_w_ici(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3DenseLayerWeightsPytree:
   """Reduces dense layer weight gradients across ICI mesh axes on SparseCore 0."""
-  return ops.reduce_along_axis(
+  return axis_collectives.reduce_along_axis(
       grad_w, _w_ici_axes(), axis_mapping, like, compute_type="tpu_sparsecore",
       compiler_options={"sparse_core_config": {"core_ids": [0]}},
   )

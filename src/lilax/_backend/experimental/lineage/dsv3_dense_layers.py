@@ -10,8 +10,8 @@ import typeguard
 
 from lilax._backend.experimental.lineage import dsv3_dense_layer
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage.scan import weight_scan
 
 
 class NormFn(Protocol):
@@ -68,5 +68,5 @@ def dsv3_dense_layers(
   def _scan_fn(x, w):
     return _dsv3_dense_layer(x, w), ()
 
-  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
+  x, _ = weight_scan.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
   return x

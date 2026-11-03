@@ -15,6 +15,8 @@ import typeguard
 from lilax._backend.experimental.lineage import dsv3_expert_shuffle
 from lilax._backend.experimental.lineage import dsv3_types
 from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage.sharding import axis_collectives
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 compute_on = jax.experimental.compute_on.compute_on
 ArrayType = jax.Array
@@ -469,7 +471,7 @@ def dsv3_combine_with_coeff_grads(
     expert_axis_name: str, axis_mapping: Mapping[str, str | tuple[str, ...]], mesh: jax.sharding.Mesh,
     out_specs: jax.sharding.PartitionSpec,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
-  out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
+  out_specs_phys = partition_specs.physical_pspec(out_specs, axis_mapping)
   coeffs_spec = jax.typeof(metadata.selected_experts).sharding.spec
   return jax.shard_map(
       functools.partial(
@@ -497,7 +499,7 @@ def _combine_with_coeff_grads_and_reduce_impl(
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def dsv3_combine_with_coeff_grads_and_reduce(
     grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"], grad_coeffs_ag: jt.Num[jax.Array, "R C"],
-    metadata: RouterMetadata[jax.Array], deferred_reduce: ops.DeferredReduce | None,
+    metadata: RouterMetadata[jax.Array], deferred_reduce: axis_collectives.DeferredReduce | None,
     *, local_seq_length: int, num_experts_per_tok: int, expert_axis_name: str,
     axis_mapping: Mapping[str, str | tuple[str, ...]], mesh: jax.sharding.Mesh, out_specs: jax.sharding.PartitionSpec,
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], Any]:
@@ -508,7 +510,7 @@ def dsv3_combine_with_coeff_grads_and_reduce(
         axis_mapping=axis_mapping, mesh=mesh, out_specs=out_specs,
     )
     return grad_x, grad_coeffs, None
-  out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
+  out_specs_phys = partition_specs.physical_pspec(out_specs, axis_mapping)
   coeffs_spec = jax.typeof(metadata.selected_experts).sharding.spec
   grad_x, grad_coeffs, reduced = jax.shard_map(
       functools.partial(
@@ -651,7 +653,7 @@ def dsv3_dispatch(
 ) -> jt.Num[jax.Array, "NBT D0 D1"]:
   x_pspec = jax.typeof(x).sharding.spec
   token_axis = dsv3_get_token_axis(x_pspec, num_model_dims=1)
-  x_ag_spec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  x_ag_spec = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
   return jax.shard_map(
       functools.partial(dsv3_dispatch_impl, expert_axis_name=expert_axis_name, axis_mapping=axis_mapping),
       mesh=mesh, out_specs=x_ag_spec,
@@ -680,7 +682,7 @@ def dsv3_aggregated_dispatches(
   x1_pspec = jax.typeof(moe_in).sharding.spec
   x2_pspec = jax.typeof(grad_out).sharding.spec
   token_axis = dsv3_get_token_axis(x1_pspec, num_model_dims=1) or dsv3_get_token_axis(x2_pspec, num_model_dims=1)
-  token_spec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  token_spec = partition_specs.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
   return jax.shard_map(
       functools.partial(dsv3_aggregated_dispatches_impl, expert_axis_name=expert_axis_name, axis_mapping=axis_mapping),
       mesh=mesh, out_specs=(token_spec, token_spec),
@@ -712,7 +714,7 @@ def dsv3_combine(
     out_specs: jax.sharding.PartitionSpec, combine_qtype: Any | None = None,
     combine_per_hop_scaling: bool = False,
 ) -> jt.Num[jax.Array, "B T D"]:
-  out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
+  out_specs_phys = partition_specs.physical_pspec(out_specs, axis_mapping)
   return jax.shard_map(
       functools.partial(
           dsv3_combine_impl, local_seq_length=local_seq_length, expert_axis_name=expert_axis_name,

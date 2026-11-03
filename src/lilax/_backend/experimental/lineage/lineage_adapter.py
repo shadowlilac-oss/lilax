@@ -267,7 +267,7 @@ class LineageTransformer(nnx.Module):
       raise ValueError("use_lineage=True does not support MaxText quantization.")
     validate_supported(config)
     from lilax._backend.experimental.lineage import dsv3_model
-    from lilax._backend.experimental.lineage import ops
+    from lilax._backend.experimental.lineage.sharding import partition_specs
 
     self.config = config
     self.mesh = mesh
@@ -275,7 +275,7 @@ class LineageTransformer(nnx.Module):
     cfg = dsv3_config_from_maxtext(config, mesh)
     if cfg.eval_sharding is not None:
       eval_sharding = cfg.eval_sharding
-      token_spec = ops.physical_pspec(eval_sharding.token, eval_sharding.axis_mapping)
+      token_spec = partition_specs.physical_pspec(eval_sharding.token, eval_sharding.axis_mapping)
       override_keys = {"activation_embed_and_logits_batch", "activation_norm_length"}
       base_rules = list(getattr(config, "logical_axis_rules_for_eval", ()))
       new_rules = tuple(

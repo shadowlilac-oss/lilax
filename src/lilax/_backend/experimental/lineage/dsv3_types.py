@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 Initializer: TypeAlias = jax.nn.initializers.Initializer
 ArrayType: TypeAlias = jax.Array | np.ndarray
@@ -33,7 +33,7 @@ def _resolve_shardings(
 
   def _to_sharding(s: Any) -> Any:
     if isinstance(s, jax.sharding.PartitionSpec):
-      return jax.sharding.NamedSharding(mesh, ops.physical_pspec(s, axis_mapping))
+      return jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(s, axis_mapping))
     return s
 
   return jax.tree.map(_to_sharding, out_shardings)

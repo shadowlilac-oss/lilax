@@ -21,6 +21,7 @@ from lilax._backend.experimental.lineage import dsv3_mtp_block
 from lilax._backend.experimental.lineage import dsv3_types
 from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage.gmmv2 import expert_mlp
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 P = jax.sharding.PartitionSpec
 T = TypeVar("T", dsv3_types.ArrayType, dsv3_types.ShardingType, dsv3_types.AxisNameType)
@@ -90,7 +91,7 @@ class DSv3LossAux:
 
 
 def _named_sharding(spec: P, cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -> jax.sharding.NamedSharding:
-  return jax.sharding.NamedSharding(mesh, ops.physical_pspec(spec, cfg.sharding.axis_mapping))
+  return jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(spec, cfg.sharding.axis_mapping))
 
 
 def _cast(tree: Any, dtype: jax.typing.DTypeLike) -> Any:

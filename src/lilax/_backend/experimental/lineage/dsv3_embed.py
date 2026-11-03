@@ -10,6 +10,7 @@ import jaxtyping as jt
 import typeguard
 
 from lilax._backend.experimental.lineage import dsv3_types, ops
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 ArrayType = dsv3_types.ArrayType
 ShardingType = dsv3_types.ShardingType
@@ -186,6 +187,6 @@ def _resolve(out_shardings: Any, mesh: jax.sharding.Mesh | jax.sharding.Abstract
   def _named(sharding):
     if not isinstance(sharding, jax.sharding.PartitionSpec):
       return sharding
-    return jax.sharding.NamedSharding(mesh, ops.physical_pspec(sharding, axis_mapping))
+    return jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(sharding, axis_mapping))
 
   return jax.tree.map(_named, out_shardings, is_leaf=lambda sharding: isinstance(sharding, jax.sharding.PartitionSpec))

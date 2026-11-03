@@ -19,6 +19,7 @@ from lilax._backend.experimental.lineage import mla_qkv_up_kernel
 from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
 from lilax._backend.experimental.lineage import tokamax_splash_attention_kernel
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 compute_on = jax.experimental.compute_on.compute_on
 
@@ -141,7 +142,7 @@ def q_down_projection(
 ) -> jt.Num[jax.Array, "B T Cq"]:
   x_sharding = getattr(jax.typeof(x), "sharding", None)
   assert isinstance(x_sharding, jax.sharding.NamedSharding)
-  physical_attention_axis = ops.physical_pspec(jax.sharding.PartitionSpec("attention"), axis_mapping)[0]
+  physical_attention_axis = partition_specs.physical_pspec(jax.sharding.PartitionSpec("attention"), axis_mapping)[0]
   out_spec = jax.sharding.PartitionSpec(x_sharding.spec[0], None, None)
 
   @compute_on(compute_type="device", out_memory_spaces=jax.memory.Space.Device)
@@ -312,7 +313,7 @@ def kv_down_projection(
 ) -> jt.Num[jax.Array, "B T Ckv_plus_R"]:
   x_sharding = getattr(jax.typeof(x), "sharding", None)
   assert isinstance(x_sharding, jax.sharding.NamedSharding)
-  physical_attention_axis = ops.physical_pspec(jax.sharding.PartitionSpec("attention"), axis_mapping)[0]
+  physical_attention_axis = partition_specs.physical_pspec(jax.sharding.PartitionSpec("attention"), axis_mapping)[0]
   out_spec = jax.sharding.PartitionSpec(x_sharding.spec[0], None, None)
 
   @compute_on(compute_type="device", out_memory_spaces=jax.memory.Space.Device)
@@ -527,7 +528,7 @@ def get_yarn_freqs(
     out_pspec: jax.sharding.PartitionSpec, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
     axis_mapping: Mapping[str, str | tuple[str, ...]], dtype: jt.DTypeLike = jnp.bfloat16,
 ) -> tuple[jt.Num[jax.Array, "B T 1 R"], jt.Num[jax.Array, "B T 1 R"]]:
-  out_sharding = jax.sharding.NamedSharding(mesh, ops.physical_pspec(out_pspec, axis_mapping))
+  out_sharding = jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(out_pspec, axis_mapping))
   half_dim = rope_head_dim // 2
   freqs = 1.0 / (rope_theta ** (2.0 * jnp.arange(0, half_dim, dtype=jnp.float32) / rope_head_dim))
   low = rope_head_dim * math.log(original_max_position_embeddings / (beta_fast * 2 * math.pi)) / (2 * math.log(rope_theta))
@@ -558,7 +559,7 @@ def init_splash_kernel(
     diag_band_skip: bool = True, dq_reduction_steps: int | None = 1, q_prescaled_log2e: bool = False,
 ) -> Any:
   del num_query_heads
-  physical_kernel_out_spec = ops.physical_pspec(kernel_out_spec, axis_mapping)
+  physical_kernel_out_spec = partition_specs.physical_pspec(kernel_out_spec, axis_mapping)
   kernel_out_sharding = jax.sharding.NamedSharding(mesh, physical_kernel_out_spec)
   seq_spec_dim = physical_kernel_out_spec[1]
 
@@ -606,7 +607,7 @@ def init_splash_kernel(
   def _reshard_leaf(arr: Any, spec: Any) -> Any:
     if arr is None:
       return None
-    sharding = jax.sharding.NamedSharding(mesh, ops.physical_pspec(spec, axis_mapping))
+    sharding = jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(spec, axis_mapping))
     return jax.reshard(arr, sharding)
   return jax.tree.map(_reshard_leaf, splash_kernel, kernel_pspec, is_leaf=lambda x: x is None)
 

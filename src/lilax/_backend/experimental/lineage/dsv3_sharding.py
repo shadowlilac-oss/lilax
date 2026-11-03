@@ -10,7 +10,7 @@ from jax.experimental import mesh_utils
 import numpy as np
 
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage.sharding import partition_specs
 
 P = jax.sharding.PartitionSpec
 AxisMapping = Mapping[str, str | tuple[str, ...]]
@@ -313,7 +313,7 @@ def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
 
 def named_shardings(specs: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh, axis_mapping: AxisMapping) -> Any:
   return jax.tree.map(
-      lambda spec: jax.sharding.NamedSharding(mesh, ops.physical_pspec(spec, axis_mapping)),
+      lambda spec: jax.sharding.NamedSharding(mesh, partition_specs.physical_pspec(spec, axis_mapping)),
       specs, is_leaf=lambda x: isinstance(x, P),
   )
 
