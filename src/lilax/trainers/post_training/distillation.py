@@ -13,10 +13,17 @@ from lilax.configuration import MaxTextConfig
 from lilax.models import MaxTextModel
 from lilax.runtime import Runtime
 
-from ._base import _PostTrainer
-from ._post_training_arguments import DistillationConfig
-from ._post_training_shared import _evaluate_tunix
-from .reporting import MetricReporter
+from .._base import _PostTrainer
+from ..reporting import MetricReporter
+from .arguments import _PostTrainingArguments
+from .evaluation import _evaluate_tunix
+
+
+class DistillationConfig(_PostTrainingArguments):
+  def __init__(self, *args, is_offline=False, offline_data_dir=None, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.is_offline = is_offline
+    self.offline_data_dir = offline_data_dir
 
 class _DistillationStudentModel(MaxTextModel):
   def materialize(self, *, runtime):
@@ -204,6 +211,3 @@ def run_distillation(*, config_path, overrides, resume_from_checkpoint):
   trainer = DistillationTrainer.from_config(config)
   return trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
-_DistillationStudentModel.__module__ = "lilax.trainers.post_training"
-DistillationTrainer.__module__ = "lilax.trainers.post_training"
-run_distillation.__module__ = "lilax.trainers.post_training"

@@ -50,7 +50,7 @@ Use `SFTConfig` for training settings and pass the dataset and tokenizer to `SFT
 ```python
 from datasets import load_dataset
 from transformers import AutoTokenizer
-from lilax.trainers.post_training import SFTConfig, SFTTrainer
+from lilax.trainers.post_training.sft import SFTConfig, SFTTrainer
 
 if __name__ == "__main__":
     model_id = "Qwen/Qwen3-0.6B"

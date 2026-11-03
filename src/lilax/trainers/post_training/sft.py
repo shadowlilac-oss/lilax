@@ -1,16 +1,14 @@
-"""Arguments for supervised, preference, and distillation training."""
+"""Supervised training through the native and Tunix paths."""
 
-from .training_args import TrainingArguments
+from lilax._backend.configs.runtime import resolve_initialized_config
+from lilax._backend.trainers.post_train.sft import train_sft, train_sft_native
+from lilax.peft import PeftModel
 
-class _PostTrainingArguments(TrainingArguments):
-  def __init__(self, *args, save_only_lora_params=None, restore_only_lora_params=None, **kwargs):
-    super().__init__(*args, **kwargs)
-    for name, value in (("save_only_lora_params", save_only_lora_params),
-                        ("restore_only_lora_params", restore_only_lora_params)):
-      if value is not None and type(value) is not bool:
-        raise ValueError(f"{name} must be None or a boolean.")
-    self.save_only_lora_params = save_only_lora_params
-    self.restore_only_lora_params = restore_only_lora_params
+from ..pre_training import Trainer as _NativeTrainer
+from ..training_args import MMAP_FIELDS
+from .arguments import _PostTrainingArguments
+from .data_options import _check_post_training_data_options
+from .managed import _ManagedPostTrainer
 
 
 class SFTConfig(_PostTrainingArguments):
@@ -143,18 +141,105 @@ class SFTConfig(_PostTrainingArguments):
     }
 
 
-class DPOConfig(_PostTrainingArguments):
-  pass
+class SFTTrainer(_ManagedPostTrainer):
+  _native_train = staticmethod(train_sft.train)
+  _tunix_config = staticmethod(train_sft.get_tunix_config)
+
+  def __init__(
+      self, model, args=None, train_dataset=None, eval_dataset=None, processing_class=None,
+      data_collator=None, optimizers=(None, None), callbacks=None, *, lifecycle="tunix",
+  ):
+    if lifecycle not in ("tunix", "native"):
+      raise ValueError("lifecycle must be 'tunix' or 'native'.")
+    if lifecycle == "native" and args is not None and (
+        getattr(args, "save_only_lora_params", None) is not None
+        or getattr(args, "restore_only_lora_params", None) is not None
+    ):
+      raise ValueError("LoRA checkpoint selection is only supported by the Tunix lifecycle.")
+    overrides = {"use_sft": True}
+    runtime = model.runtime
+    source = runtime.public_config.get_source_inputs()
+    if source is not None and source[0] is None:
+      defaults = {
+          "use_tunix_gradient_accumulation": True, "sft_train_on_completion_only": True,
+          "packing": True, "learning_rate": 2e-5,
+      }
+      overrides.update({key: value for key, value in defaults.items() if key not in runtime.public_config._explicit_keys})
+    if train_dataset is not None or eval_dataset is not None:
+      overrides["dataset_type"] = "hf"
+    if args is not None:
+      overrides.update(args._overrides())
+    if lifecycle == "native":
+      overrides["use_tunix_gradient_accumulation"] = False
+    data_overrides = runtime._overrides | overrides
+    explicit_data_fields = runtime.public_config._explicit_keys | data_overrides.keys()
+    unsupported = sorted(set(MMAP_FIELDS) & explicit_data_fields)
+    data_config = runtime.public_config.get_source_values() | data_overrides
+    if data_config["grain_file_type"] in ("mmap", "mmap_npy") and (
+        data_config["dataset_type"] == "grain" or "grain_file_type" in explicit_data_fields
+    ):
+      unsupported.append("grain_file_type")
+    if unsupported:
+      raise ValueError(f"SFT does not support these mmap data settings: {sorted(unsupported)}")
+    self._training_overrides = overrides
+    graph_config = model.existing_graph_config
+    if graph_config is not None:
+      self._check_precision_overrides(graph_config, overrides)
+      config = resolve_initialized_config(
+          runtime.public_config, runtime.config, overrides=runtime._overrides | overrides,
+          train_dataset_provided=train_dataset is not None, eval_dataset_provided=eval_dataset is not None,
+      )
+    else:
+      runtime.initialize(
+          overrides=overrides, train_dataset_provided=train_dataset is not None,
+          eval_dataset_provided=eval_dataset is not None,
+      )
+      self._check_precision_options(runtime.config, overrides)
+      config = runtime.config
+    _check_post_training_data_options(config, runtime, args)
+    super().__init__(
+        model, args, train_dataset, eval_dataset, processing_class, data_collator, optimizers, callbacks,
+        resolved_config=config, defer_materialization=True,
+    )
+    self.lifecycle = lifecycle
+    self._native_sft_trainer = None
+
+  def train(self, resume_from_checkpoint=None):
+    if self.lifecycle == "native":
+      lora = self.config.lora if isinstance(self.model, PeftModel) else None
+      args = train_sft_native.NativeSFTArguments(self.args, lora, self._training_overrides)
+      self._native_sft_trainer = _NativeTrainer(
+          self.model, args=args, train_dataset=self.train_dataset, eval_dataset=self.eval_dataset,
+          processing_class=self.processing_class,
+      )
+      config = args.resolve(
+          self.model.runtime, train_dataset_provided=self.train_dataset is not None,
+          eval_dataset_provided=self.eval_dataset is not None,
+      )
+      self._native_sft_trainer.config = (
+          self._with_model_config(config, self.model) if self.model.is_materialized else config
+      )
+      state = train_sft_native.train(self._native_sft_trainer, resume_from_checkpoint)
+      self.config = self._native_sft_trainer.config
+      self.native_trainer = self._native_sft_trainer
+      return state
+    trainer = super().train(resume_from_checkpoint)
+    self.model.native_model = trainer.model
+    return trainer
+
+  def evaluate(self, eval_dataset=None):
+    if self._native_sft_trainer is not None:
+      return self._native_sft_trainer.evaluate(eval_dataset)
+    return super().evaluate(eval_dataset)
+
+  def save_model(self, output_dir=None):
+    if self._native_sft_trainer is not None:
+      return self._native_sft_trainer.save_model(output_dir)
+    return super().save_model(output_dir)
+
+  def save_state(self):
+    if self._native_sft_trainer is not None:
+      return self._native_sft_trainer.save_state()
+    return super().save_state()
 
 
-class DistillationConfig(_PostTrainingArguments):
-  def __init__(self, *args, is_offline=False, offline_data_dir=None, **kwargs):
-    super().__init__(*args, **kwargs)
-    self.is_offline = is_offline
-    self.offline_data_dir = offline_data_dir
-
-
-_PostTrainingArguments.__module__ = "lilax.trainers.post_training"
-SFTConfig.__module__ = "lilax.trainers.post_training"
-DPOConfig.__module__ = "lilax.trainers.post_training"
-DistillationConfig.__module__ = "lilax.trainers.post_training"

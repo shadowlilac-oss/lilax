@@ -5,12 +5,12 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from lilax.operations import setup_extras
+from lilax.operations.setup import extras
 
 
 def select_python(python):
   """Select an existing virtual-environment interpreter running Python 3.12 or newer."""
-  python = setup_extras._target_python(python)
+  python = extras._target_python(python)
   result = subprocess.run(
       [python, "-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"],
       check=True, capture_output=True, text=True,
@@ -23,7 +23,7 @@ def select_python(python):
 
 def create_python_312_environment(bootstrap_python, environment_path):
   """Create the source's seeded Python 3.12 environment using uv in a selected venv."""
-  bootstrap_python = setup_extras._target_python(bootstrap_python)
+  bootstrap_python = extras._target_python(bootstrap_python)
   environment_path = Path(environment_path).expanduser()
   subprocess.run([bootstrap_python, "-m", "uv", "venv", "--python", "3.12", str(environment_path), "--seed"],
                  check=True)

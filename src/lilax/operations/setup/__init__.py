@@ -10,7 +10,7 @@ import subprocess
 import time
 import warnings
 
-from lilax.operations import setup_extras, setup_host
+from lilax.operations.setup import extras, host
 
 
 _JAX_INDEX = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/"
@@ -128,7 +128,7 @@ def _install(python, source, device, mode, workflow, with_tf, jax_version, libtp
         requirements = asset("requirements", "generated_requirements", "tpu-post-train-requirements.txt")
         _pip(python, "install", "--resolution=lowest", "-r", str(requirements), env=env)
         github = asset("extra_deps", "post_train_github_deps.txt")
-        setup_extras.install_tpu_posttrain_extras(python, github, vllm_adapter)
+        extras.install_tpu_posttrain_extras(python, github, vllm_adapter)
         _pip(python, "install", "--no-deps", "setuptools>=84.0.0")
         _cleanup(python, allow_system_changes=allow_system_changes)
       finally:
@@ -149,7 +149,7 @@ def _install(python, source, device, mode, workflow, with_tf, jax_version, libtp
         or os.environ.get("WITH_TF", "").lower() in ("true", "1", "yes")
     ) if with_tf is None else with_tf
     tf = asset("extra_deps", "tf_requirements.txt") if install_tf else None
-    setup_extras.install_pretrain_extras(python, github, with_tf=install_tf, tf_requirements=tf)
+    extras.install_pretrain_extras(python, github, with_tf=install_tf, tf_requirements=tf)
     if (source / "pyproject.toml").is_file():
       _pip(python, "install", "--no-deps", "-e", str(source))
     _cleanup(python, allow_system_changes=allow_system_changes)
@@ -180,7 +180,7 @@ def _install(python, source, device, mode, workflow, with_tf, jax_version, libtp
 
 def install_overlay(python, source_project, *, workflow="pre-training", vllm_adapter=None):
   """Install editable code and optional adapter metadata without changing image files."""
-  python = setup_extras._target_python(python)
+  python = extras._target_python(python)
   source = Path(source_project)
   if not source.is_absolute() or not source.is_dir():
     raise ValueError("source_project must be an absolute path to an existing source directory")
@@ -197,7 +197,7 @@ def setup(python, source_project, *, device=None, mode=None, workflow=None, with
           jax_version=None, libtpu_version=None, libtpu_gcs_path=None, vllm_adapter=None,
           max_attempts=1, retry_delay=5, allow_system_changes=False):
   """Install the selected workflow into a venv; system changes require explicit opt-in."""
-  python = setup_host.select_python(python)
+  python = host.select_python(python)
   source = Path(source_project)
   if not source.is_absolute() or not source.is_dir():
     raise ValueError("source_project must be an absolute path to an existing source directory")
