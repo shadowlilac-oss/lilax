@@ -1,6 +1,6 @@
 import re
 
-from lilax._backend.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING, VLLM_HOOK_FNS
+from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import PARAM_MAPPING, VLLM_HOOK_FNS
 from lilax._backend.integration.tunix import weight_mapping
 
 

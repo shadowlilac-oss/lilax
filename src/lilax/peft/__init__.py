@@ -16,8 +16,8 @@ from lilax._backend.checkpoint_conversion.to_huggingface import _get_model_mappi
 from lilax._backend.checkpoint_conversion.to_maxtext import (
     convert_hf_lora_key_to_maxtext, convert_lora_to_maxtext_adapter,
 )
-from lilax._backend.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from lilax._backend.checkpoint_conversion.utils.param_mapping import PARAM_MAPPING
+from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
+from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import PARAM_MAPPING
 from lilax._backend.checkpoint_conversion.utils.utils import (
     extract_nnx_weights, load_hf_dict_from_safetensors, save_adapter_files,
 )

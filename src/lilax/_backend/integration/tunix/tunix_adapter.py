@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from flax import nnx
 from jax import Array
 
-from lilax._backend.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
 from lilax._backend.integration.tunix.utils import VllmWeightMapping
 from lilax._backend.models.models import Transformer
 

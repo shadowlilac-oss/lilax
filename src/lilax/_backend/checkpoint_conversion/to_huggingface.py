@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 from transformers import AutoProcessor, AutoTokenizer
 
-from lilax._backend.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from lilax._backend.checkpoint_conversion.utils.hf_shape import HF_SHAPE
-from lilax._backend.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import HOOK_FNS, PARAM_MAPPING
+from lilax._backend.checkpoint_conversion.model_families.hf_shape_registry import HF_SHAPE
+from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
 from lilax._backend.checkpoint_conversion.utils.utils import (
     validate_and_filter_param_map_keys,
     process_maxtext_param,

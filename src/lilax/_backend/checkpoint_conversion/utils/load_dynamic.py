@@ -11,8 +11,8 @@ import flax.traverse_util
 from google.cloud import storage
 import huggingface_hub
 import jax
-from lilax._backend.checkpoint_conversion.utils import hf_model_configs
-from lilax._backend.checkpoint_conversion.utils import param_mapping
+from lilax._backend.checkpoint_conversion.model_families import hf_model_config_registry
+from lilax._backend.checkpoint_conversion.model_families import param_mapping_registry
 from lilax._backend.checkpoint_conversion.utils import tensor_handling
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import globals as maxtext_globals
@@ -21,7 +21,7 @@ from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
 
-HF_MODEL_CONFIGS = hf_model_configs.HF_MODEL_CONFIGS
+HF_MODEL_CONFIGS = hf_model_config_registry.HF_MODEL_CONFIGS
 get_hf_loading_function = tensor_handling.get_hf_loading_function
 
 
@@ -69,10 +69,10 @@ def get_hf_config_and_mappings(maxtext_config):
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
 
-  param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
+  param_map_mt_to_hf = param_mapping_registry.PARAM_MAPPING[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
   )
-  hook_fn_map_mt = param_mapping.HOOK_FNS[model_key](
+  hook_fn_map_mt = param_mapping_registry.HOOK_FNS[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers, saving_to_hf=False
   )
   return param_map_mt_to_hf, hook_fn_map_mt

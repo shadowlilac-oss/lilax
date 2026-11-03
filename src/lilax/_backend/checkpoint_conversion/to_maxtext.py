@@ -17,8 +17,8 @@ from huggingface_hub import hf_hub_download, list_repo_files
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
-from lilax._backend.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from lilax._backend.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
+from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import HOOK_FNS, PARAM_MAPPING
 from lilax._backend.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from lilax._backend.checkpoint_conversion.utils.utils import (
     MemoryMonitorTqdm, load_hf_dict_from_safetensors, load_hf_dict_from_transformers, param_key_parts_from_path,
