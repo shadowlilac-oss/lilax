@@ -16,6 +16,10 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
+from lilax._backend.configs.batch_sizes import derive_batch_sizes
+from lilax._backend.configs.mesh_parallelism import (
+    DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, validate_optimizer_sharding,
+)
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
@@ -2209,48 +2213,6 @@ class LayoutAndSharding(BaseModel):
   )
 
 
-class DcnParallelism(BaseModel):
-  """Parallelism dimensions across the DCN (Data Center Network)."""
-
-  dcn_diloco_parallelism: int = Field(1, description="DCN axis for Diloco parallelism.")
-  dcn_data_parallelism: int = Field(-1, description="DCN axis for data parallelism.")
-  dcn_fsdp_parallelism: int = Field(1, description="DCN axis for FSDP.")
-  dcn_fsdp_transpose_parallelism: int = Field(1, description="DCN axis for FSDP transpose.")
-  dcn_sequence_parallelism: int = Field(1, description="DCN axis for sequence parallelism (not recommended).")
-  dcn_context_parallelism: int = Field(1, description="DCN axis for context parallelism.")
-  dcn_context_usp_ulysses_parallelism: int = Field(
-      1, description="DCN axis for the Ulysses dimension of USP context parallelism."
-  )
-  dcn_context_autoregressive_parallelism: int = Field(1, description="DCN axis for context autoregressive parallelism.")
-  dcn_tensor_parallelism: int = Field(1, description="DCN axis for tensor parallelism (not recommended).")
-  dcn_tensor_sequence_parallelism: int = Field(
-      1, description="DCN axis for tensor sequence parallelism (not recommended)."
-  )
-  dcn_pipeline_parallelism: int = Field(1, description="DCN axis for pipeline parallelism.")
-  dcn_expert_parallelism: int = Field(1, description="DCN axis for expert parallelism.")
-  dcn_autoregressive_parallelism: int = Field(1, description="DCN axis for autoregressive parallelism (not recommended).")
-
-
-class IciParallelism(BaseModel):
-  """Parallelism dimensions within the ICI (Inter-Chip Interconnect)."""
-
-  ici_diloco_parallelism: int = Field(1, description="ICI axis for Diloco parallelism.")
-  ici_data_parallelism: int = Field(1, description="ICI axis for data parallelism.")
-  ici_fsdp_parallelism: int = Field(-1, description="ICI axis for FSDP.")
-  ici_fsdp_transpose_parallelism: int = Field(1, description="ICI axis for FSDP transpose.")
-  ici_sequence_parallelism: int = Field(1, description="ICI axis for sequence parallelism.")
-  ici_context_parallelism: int = Field(1, description="ICI axis for context parallelism.")
-  ici_context_usp_ulysses_parallelism: int = Field(
-      1, description="ICI axis for the Ulysses dimension of USP context parallelism."
-  )
-  ici_context_autoregressive_parallelism: int = Field(1, description="ICI axis for context autoregressive parallelism.")
-  ici_tensor_parallelism: int = Field(1, description="ICI axis for tensor parallelism.")
-  ici_tensor_sequence_parallelism: int = Field(1, description="ICI axis for tensor sequence parallelism.")
-  ici_autoregressive_parallelism: int = Field(1, description="ICI axis for autoregressive parallelism.")
-  ici_pipeline_parallelism: int = Field(1, description="ICI axis for pipeline parallelism.")
-  ici_expert_parallelism: int = Field(1, description="ICI axis for expert parallelism.")
-
-
 class PipelineParallelism(BaseModel):
   """Configuration for pipeline parallelism."""
 
@@ -2754,6 +2716,34 @@ class Distillation(BaseModel):
       description="a list of model param name templates to finetune in the student model. "
       "The other parameters will be frozen if this attribute is non empty)",
   )
+
+  def validate_distillation(self):
+    """Validate distillation settings after runtime HLO defaults are prepared."""
+    if self.distill_beta > 0.0:
+      if not self.scan_layers:
+        raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
+    if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
+      raise ValueError(f"distill_alpha_end must be in [0, 1], got {self.distill_alpha_end}")
+    if self.distill_temperature_end is not None and self.distill_temperature_end <= 0.0:
+      raise ValueError(f"distill_temperature_end must be > 0, got {self.distill_temperature_end}")
+    if self.distill_beta_end is not None and self.distill_beta_end < 0.0:
+      raise ValueError(f"distill_beta_end must be >= 0, got {self.distill_beta_end}")
+    if self.distill_beta == 0.0 and self.distill_beta_end is not None and self.distill_beta_end > 0.0:
+      raise ValueError(
+          f"distill_beta=0.0 but distill_beta_end={self.distill_beta_end}. "
+          "Feature extraction is disabled when distill_beta starts at 0.0. "
+          "Set distill_beta to a small positive value (e.g., 1e-6) to enable feature extraction."
+      )
+    for param_name, schedule, end_value in [
+        ("distill_alpha", self.distill_alpha_schedule, self.distill_alpha_end),
+        ("distill_temperature", self.distill_temperature_schedule, self.distill_temperature_end),
+        ("distill_beta", self.distill_beta_schedule, self.distill_beta_end),
+    ]:
+      if schedule != "constant" and end_value is None:
+        raise ValueError(
+            f"{param_name}_schedule is '{schedule}' but {param_name}_end is None. "
+            f"Set {param_name}_end to a target value or use schedule='constant'."
+        )
 
 
 class TrainingLoop(BaseModel):
@@ -4269,27 +4259,6 @@ def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
   return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
 
 
-def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int], mesh_axes: list[str]) -> list[int]:
-  """Per-axis parallelism list for `mesh_axes` (preserves explicit list for custom physical mesh axes)."""
-  if configured and len(configured) == len(mesh_axes) and any(axis not in axis_map for axis in mesh_axes):
-    return list(configured)
-  return [axis_map.get(axis, 1) for axis in mesh_axes]
-
-
-def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
-  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
-
-  `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
-  other axes leave over, so config validation has to do the same to see the sizes a run will
-  really get. A -1 that cannot be resolved here (an unknown device count, say) counts as 1;
-  mesh creation raises on its own if it is still unresolvable there.
-  """
-  specified = prod(size for size in parallelism if size != -1)
-  leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
-  sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
-  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
-
-
 class MaxTextConfig(
     RunInfo,
     Checkpointing,
@@ -5050,31 +5019,7 @@ class MaxTextConfig(
     if not (info.context or {}).get("hlo_defaults_prepared"):
       validate_and_set_hlo_dump_defaults(self)
 
-    if self.distill_beta > 0.0:
-      if not self.scan_layers:
-        raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
-    if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
-      raise ValueError(f"distill_alpha_end must be in [0, 1], got {self.distill_alpha_end}")
-    if self.distill_temperature_end is not None and self.distill_temperature_end <= 0.0:
-      raise ValueError(f"distill_temperature_end must be > 0, got {self.distill_temperature_end}")
-    if self.distill_beta_end is not None and self.distill_beta_end < 0.0:
-      raise ValueError(f"distill_beta_end must be >= 0, got {self.distill_beta_end}")
-    if self.distill_beta == 0.0 and self.distill_beta_end is not None and self.distill_beta_end > 0.0:
-      raise ValueError(
-          f"distill_beta=0.0 but distill_beta_end={self.distill_beta_end}. "
-          "Feature extraction is disabled when distill_beta starts at 0.0. "
-          "Set distill_beta to a small positive value (e.g., 1e-6) to enable feature extraction."
-      )
-    for param_name, schedule, end_value in [
-        ("distill_alpha", self.distill_alpha_schedule, self.distill_alpha_end),
-        ("distill_temperature", self.distill_temperature_schedule, self.distill_temperature_end),
-        ("distill_beta", self.distill_beta_schedule, self.distill_beta_end),
-    ]:
-      if schedule != "constant" and end_value is None:
-        raise ValueError(
-            f"{param_name}_schedule is '{schedule}' but {param_name}_end is None. "
-            f"Set {param_name}_end to a target value or use schedule='constant'."
-        )
+    self.validate_distillation()
 
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
     self.emb_dim = (2**emb_scale) * self.base_emb_dim
@@ -5136,80 +5081,7 @@ class MaxTextConfig(
       except RuntimeError:
         self.quantization_local_shard_count = 1
 
-    def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
-      """Helper to calculate global and micro batch sizes for training and loading."""
-      if per_device_batch_size < 1.0:
-        micro_batch_to_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
-      else:
-        micro_batch_to_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
-      micro_batch_to_train = int(num_devices * per_device_batch_size)
-      global_batch_to_load = int(micro_batch_to_load * grad_accum_steps)
-      global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
-      return global_batch_to_load, global_batch_to_train, micro_batch_to_train
-
-    (
-        self.global_batch_size_to_load,
-        self.global_batch_size_to_train_on,
-        self.micro_batch_size_to_train_on,
-    ) = calculate_global_batch_sizes(
-        self.per_device_batch_size,
-        self.expansion_factor_real_data,
-        self.num_target_devices,
-        self.gradient_accumulation_steps,
-    )
-    (
-        self.global_batch_size_to_load_eval,
-        self.global_batch_size_to_eval_on,
-        self.micro_batch_size_to_eval_on,
-    ) = calculate_global_batch_sizes(
-        self.eval_per_device_batch_size,
-        self.expansion_factor_real_data,
-        self.num_target_devices,
-        1,
-    )
-
-    if self.enable_rampup_batch_size:
-      (
-          self.global_batch_size_to_load_start,
-          _,
-          _,
-      ) = calculate_global_batch_sizes(
-          self.per_device_batch_size_start,
-          self.expansion_factor_real_data,
-          self.num_target_devices,
-          self.gradient_accumulation_steps,
-      )
-      (
-          self.global_batch_size_to_load_increment,
-          _,
-          _,
-      ) = calculate_global_batch_sizes(
-          self.per_device_batch_size_increment,
-          self.expansion_factor_real_data,
-          self.num_target_devices,
-          self.gradient_accumulation_steps,
-      )
-      diff_batch_size = self.global_batch_size_to_load - self.global_batch_size_to_load_start
-      if self.global_batch_size_to_load_increment > 0:
-        num_increments = diff_batch_size // self.global_batch_size_to_load_increment
-        if num_increments > 0:
-          rampup_samples_per_increment = self.global_rampup_samples / num_increments
-          self.rampup_samples_per_increment_to_load = rampup_samples_per_increment
-          total_rampup_steps = 0
-          current_batch_size = self.global_batch_size_to_load_start
-          for _ in range(int(num_increments)):
-            steps_for_this_stage = (
-                math.ceil(rampup_samples_per_increment / current_batch_size) if current_batch_size > 0 else 0
-            )
-            total_rampup_steps += steps_for_this_stage
-            current_batch_size += self.global_batch_size_to_load_increment
-          self.rampup_end_step = total_rampup_steps
-        else:
-          self.rampup_end_step = 0
-      else:
-        self.rampup_end_step = 0
-    else:
-      self.rampup_end_step = 0
+    derive_batch_sizes(self)
 
     # G. CALCULATE/SET OTHER DERIVED VALUES, E.G. PIPELINE CONFIG
     if self.remat_policy == "custom":
@@ -6442,23 +6314,7 @@ class MaxTextConfig(
     }
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
-    # Zero-1 (`shard_optimizer_over_data`) shards the optimizer moments over the "data"
-    # axis on top of whatever layout the parameters already have. FSDP shards the
-    # parameters over "fsdp", so combining the two leaves the gradients sharded
-    # P('fsdp', ...) while the moments they are added to are sharded P(('data', 'fsdp'), ...).
-    # Under `shard_mode=explicit` that add is a hard type error, and under `auto` GSPMD
-    # only papers over it with an extra collective. Keep the two mutually exclusive.
-    if self.shard_optimizer_over_data:
-      fsdp_size = _resolved_fsdp_size(
-          self.mesh_axes, self.ici_parallelism, self.num_target_devices // max(self.num_slices, 1)
-      ) * _resolved_fsdp_size(self.mesh_axes, self.dcn_parallelism, self.num_slices)
-      if fsdp_size > 1:
-        raise ValueError(
-            "`shard_optimizer_over_data` (Zero-1) cannot be combined with FSDP: the resolved "
-            f"fsdp/fsdp_transpose mesh axes have a combined size of {fsdp_size}. Set "
-            "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
-            "counterparts) to 1, or turn off `shard_optimizer_over_data`."
-        )
+    validate_optimizer_sharding(self)
 
     if self.quantization in JAX_MX_QUANTIZATIONS:
       self._validate_jax_mx_quantization()
