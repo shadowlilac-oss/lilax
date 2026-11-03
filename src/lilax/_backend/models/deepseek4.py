@@ -7,10 +7,11 @@ from jax.sharding import Mesh
 
 from lilax._backend.common.common_types import Config, AttentionType
 from lilax._backend.common.common_types import HyperConnectionType
-from lilax._backend.layers import attention_compressed
+from lilax._backend.layers.compressed_attention.attention import CompressedAttention
 from lilax._backend.layers import initializers
 from lilax._backend.layers import moe
-from lilax._backend.layers import quantizations
+from lilax._backend.layers.quantization.aqt import AqtQuantization
+from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.models import deepseek
 from lilax._backend.utils.sharding import with_logical_constraint
 from jax.ad_checkpoint import checkpoint_name
@@ -85,7 +86,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
       model_mode: str,
       mesh: Mesh,
       rngs: nnx.Rngs,
-      quant: Optional[quantizations.AqtQuantization] = None,
+      quant: Optional[AqtQuantization] = None,
       layer_idx: int = -1,
       compress_ratio: Optional[int] = None,
       is_hash_routing: Optional[bool] = None,
@@ -116,7 +117,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
     if compress_ratio is None:
       compress_ratio = config.compress_ratios[layer_idx]
 
-    self.self_attention = attention_compressed.CompressedAttention(
+    self.self_attention = CompressedAttention(
         config=self.config,
         compress_ratio=compress_ratio,
         num_query_heads=self.config.num_query_heads,
@@ -136,7 +137,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         q_lora_rank=self.config.q_lora_rank,
         name=f"compressed_attention_layer_{layer_idx}",
         quant=quant,
-        kv_quant=quantizations.configure_kv_quant(config),
+        kv_quant=configure_kv_quant(config),
         model_mode=model_mode,
         rngs=rngs,
     )
@@ -207,7 +208,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
       mesh: Mesh,
       model_mode: str,
       rngs: nnx.Rngs,
-      quant: None | quantizations.AqtQuantization = None,
+      quant: None | AqtQuantization = None,
       remat_policy_fn: Any = None,
       prevent_cse_in_remat: Optional[bool] = None,
   ):

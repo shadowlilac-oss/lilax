@@ -13,7 +13,10 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import elastic_utils, gpu_collective_overlap_pass, max_logging
+from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils.gpu_collective_overlap_pass.registration import (
+    register as register_gpu_collective_overlap_pass,
+)
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
 from lilax._backend.utils.diagnostics import system_info
@@ -45,7 +48,7 @@ def train_sft_omni(config_path, *, devices=None, **overrides):
     config = runtime.config
     system_info.print_system_information()
     train_utils.validate_train_config(config)
-    gpu_collective_overlap_pass.register()
+    register_gpu_collective_overlap_pass()
     jax.config.update("jax_default_prng_impl", config.prng_impl)
     jax.config.update("jax_use_shardy_partitioner", config.shardy)
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)

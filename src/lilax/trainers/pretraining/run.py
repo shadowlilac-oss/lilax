@@ -13,7 +13,9 @@ from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import run as native_run
-from lilax._backend.utils import gpu_collective_overlap_pass
+from lilax._backend.utils.gpu_collective_overlap_pass.registration import (
+    register as register_gpu_collective_overlap_pass,
+)
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
 from lilax._backend.utils.diagnostics import system_info
@@ -46,7 +48,7 @@ def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):
     native_config = resolve_runtime_config(config, overrides=overrides)
     system_info.print_system_information()
     train_utils.validate_train_config(native_config)
-    gpu_collective_overlap_pass.register()
+    register_gpu_collective_overlap_pass()
     jax.config.update("jax_default_prng_impl", native_config.prng_impl)
     jax.config.update("jax_use_shardy_partitioner", native_config.shardy)
     jax.config.update("jax_remove_size_one_mesh_axis_from_type", native_config.remove_size_one_mesh_axis_from_type)
