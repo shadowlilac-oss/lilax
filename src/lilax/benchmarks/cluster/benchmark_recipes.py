@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 from lilax._backend.benchmarks.catalog import AVAILABLE_MODELS
 from lilax._backend.benchmarks.cluster_runner import MaxTextModel, PathwaysConfig, WorkloadConfig
 from lilax._backend.benchmarks.recipes.user_configs import BenchmarkRecipeConfig, build_user_models
-from lilax.operations import benchmark_disruption, benchmark_metrics, benchmark_runner
+from lilax.benchmarks.cluster import benchmark_disruption, benchmark_metrics, benchmark_runner
 
 
 def _validate_bigquery(config: BenchmarkRecipeConfig) -> bool:
@@ -176,7 +176,7 @@ def standard_workloads(config: BenchmarkRecipeConfig, *, disruption_method=None,
 
 def upload_workload_metrics(workload: WorkloadConfig, *, db_project: str, db_dataset: str):
   """Upload a completed workload's metrics from its training process environment."""
-  config_file = str(Path(__file__).resolve().parents[1] / "_backend" / "configs" / "base.yml")
+  config_file = str(Path(__file__).resolve().parents[2] / "_backend" / "configs" / "base.yml")
   config = OmegaConf.load(config_file)
   tuning = workload.model.tuning_params
   batch_size = tuning.get("per_device_batch_size", config.per_device_batch_size)

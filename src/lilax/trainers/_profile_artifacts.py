@@ -3,7 +3,7 @@
 import trackio
 import wandb
 
-from lilax.operations.profiling import stage_xprof_logdir
+from lilax.diagnostics.profiling import stage_xprof_logdir
 
 
 def log_profile_artifacts(logdir, step, process_index, trackio_enabled, wandb_run):

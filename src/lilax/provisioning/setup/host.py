@@ -5,7 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 
-from lilax.operations.setup import extras
+from lilax.provisioning.setup import extras
 
 
 def select_python(python):

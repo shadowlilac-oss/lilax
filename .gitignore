@@ -22,5 +22,6 @@ htmlcov/
 logs/
 tmp/
 checkpoints/
+!src/lilax/checkpoints/
 wandb/
 .DS_Store

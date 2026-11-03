@@ -18,7 +18,7 @@ Public modules use these canonical names:
 - `data`: native data backends and direct Hugging Face Dataset/IterableDataset adaptation.
 - `trainers`: `Trainer`, `TrainingArguments`, SFT/DPO/GRPO/distillation classes and configs.
 - `peft`: native adapter APIs preserving supported combinations.
-- `generation`, `serving`, `evaluation`, `operations`: specialized callable Python capabilities.
+- `generation`, `serving`, `evaluation`, `benchmarks`, `diagnostics`, `launch` and `provisioning`: specialized callable Python capabilities.
 
 Peer owners (disjoint ownership, not permanent agent quotas):
 
@@ -26,7 +26,7 @@ Peer owners (disjoint ownership, not permanent agent quotas):
 - Models Terra-high coordinator: `_backend/models`, `_backend/layers`, `_backend/kernels`, `_backend/multimodal`, public `models`, `hub`.
 - Training Terra-high coordinator: `_backend/trainers`, `_backend/training_engine`, `_backend/optimizers`, `_backend/integration/tunix`, public `trainers`, `peft`.
 - Infrastructure Terra-high coordinator: `_backend/common`, `_backend/utils`, `_backend/input_pipeline`, `_backend/checkpoint_conversion`, public `data`, checkpoint operations.
-- Inference Terra-high coordinator: `_backend/inference`, `_backend/integration/vllm`, `_backend/eval`, `_backend/experimental`, `_backend/m3`, `_backend/diffusion`, public `generation`, `serving`, `evaluation`, `operations` except checkpoint operations.
+- Inference Terra-high coordinator: `_backend/inference`, `_backend/integration/vllm`, `_backend/eval`, `_backend/experimental`, `_backend/m3`, `_backend/diffusion`, public `generation`, `serving`, `evaluation`, benchmarking and launch capabilities except checkpoint operations.
 
 Each owner may split its independent files among workers and must publish exact subownership before editing.
 The main agent coordinates these peer owners. Each owner retains its own Terra/Luna children; foundation does not manage other owners' workers.

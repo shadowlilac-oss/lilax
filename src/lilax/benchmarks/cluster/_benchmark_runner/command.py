@@ -72,7 +72,7 @@ def build_metrics_upload_command(workload_config: WorkloadConfig) -> str:
       ), "db_project": workload_config.db_project, "db_dataset": workload_config.db_dataset,
   })
   python = (
-      "import json; from lilax.operations.benchmark_runner import "
+      "import json; from lilax.benchmarks.cluster.benchmark_runner import "
       "MaxTextModel, PathwaysConfig, WorkloadConfig, upload_workload_metrics; "
       f"data = json.loads({payload!r}); data['model'] = MaxTextModel(**data['model']); "
       "data['pathways_config'] = PathwaysConfig(**data['pathways_config']) if data['pathways_config'] else None; "

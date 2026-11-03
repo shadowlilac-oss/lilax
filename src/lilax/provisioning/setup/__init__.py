@@ -10,7 +10,7 @@ import subprocess
 import time
 import warnings
 
-from lilax.operations.setup import extras, host
+from lilax.provisioning.setup import extras, host
 
 
 _JAX_INDEX = "https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/"
