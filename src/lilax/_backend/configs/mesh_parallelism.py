@@ -48,6 +48,10 @@ class IciParallelism(BaseModel):
   ici_expert_parallelism: int = Field(1, description="ICI axis for expert parallelism.")
 
 
+DcnParallelism.__module__ = "lilax._backend.configs.types"
+IciParallelism.__module__ = "lilax._backend.configs.types"
+
+
 def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int], mesh_axes: list[str]) -> list[int]:
   """Per-axis parallelism list for `mesh_axes` (preserves explicit list for custom physical mesh axes)."""
   if configured and len(configured) == len(mesh_axes) and any(axis not in axis_map for axis in mesh_axes):

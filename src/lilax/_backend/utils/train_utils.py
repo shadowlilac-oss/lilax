@@ -31,8 +31,8 @@ from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import sharding
-from lilax._backend.utils._train_compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
-from lilax._backend.utils.rampup_batch import create_rampup_manager
+from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
+from lilax._backend.utils.training.rampup_batch import create_rampup_manager
 
 
 def prepare_before_run_start(

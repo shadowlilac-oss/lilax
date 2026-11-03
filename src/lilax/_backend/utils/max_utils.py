@@ -33,7 +33,7 @@ from lilax._backend.common.cloud import is_decoupled
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, ReorderStrategy
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import max_logging
-from lilax._backend.utils._pytree_diagnostics import (
+from lilax._backend.utils.diagnostics.pytree import (
     _bytes_of,
     calculate_bytes_from_pytree,
     calculate_num_params_from_pytree,

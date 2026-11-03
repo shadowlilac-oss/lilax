@@ -4,7 +4,6 @@
 
 import copy
 import datetime
-import enum
 from enum import Enum
 from jinja2 import Environment, TemplateSyntaxError
 import logging
@@ -17,10 +16,14 @@ from typing import Any, Literal, NewType, Optional
 
 import jax
 from lilax._backend.configs.batch_sizes import derive_batch_sizes
+from lilax._backend.configs.checkpoint_validation import validate_checkpoint_source_config, validate_checkpoint_storage_config
+from lilax._backend.configs.context_parallel_validation import validate_context_parallelism
+from lilax._backend.configs.diagnostics_fields import ManagedMLDiagnostics
 from lilax._backend.configs.mesh_parallelism import (
     DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, validate_optimizer_sharding,
 )
 from lilax._backend.configs import moe_routing
+from lilax._backend.configs import attention_validation
 from lilax._backend.configs.training_validation import validate_training_objective
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from lilax._backend.utils import gcs_utils
@@ -37,12 +40,7 @@ from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
 from pydantic import ValidationInfo
 
 
-class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
-  """Enum for XProfTPUPowerTraceMode."""
-
-  POWER_TRACE_NONE = 0
-  POWER_TRACE_NORMAL = 1
-  POWER_TRACE_SPI = 2
+from lilax._backend.configs.profiling_types import XProfTPUPowerTraceMode
 
 
 logger = logging.getLogger(__name__)
@@ -252,12 +250,7 @@ class SamplingStrategy(str, Enum):
   COMPOSITE = "composite"
 
 
-class ProfilerType(str, Enum):
-  """Supported performance profilers."""
-
-  NONE = ""
-  XPLANE = "xplane"
-  NSYS = "nsys"
+from lilax._backend.configs.profiling_types import ProfilerType
 
 
 # ----------------------------------------------------------------------------
@@ -3320,46 +3313,7 @@ class DevelopmentAndDebugging(BaseModel):
   _validate_config = field_validator("constant_bound_config", mode="before")(_clean_empty_string_for_list)
 
 
-class ProfilingCore(BaseModel):
-  """Profiler backend selection shared by every trainer."""
-
-  profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
-
-
-class Profiling(ProfilingCore):
-  """Configuration for step-window performance profiling (`common/profiler.py`)."""
-
-  upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
-  skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
-  profiler_steps: int = Field(5, description="Number of steps to profile.")
-  profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
-  profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
-  hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
-  enable_continuous_profiling: bool = Field(False, description="If true, it will support saving profile > 2GB.")
-  enable_jax_profiler: bool = Field(False, description="Enable the JAX live profiler.")
-  jax_profiler_port: int = Field(9999, description="Port for the JAX profiler.")
-  enable_tpu_profiling_options: bool = Field(False, description="Enable TPU advanced profiling options.")
-  tpu_num_chips_to_profile_per_task: int = Field(1, description="Specifies the number of TPU chips to profile per task.")
-  tpu_num_sparse_cores_to_trace: int = Field(2, description="Specifies the number of TPU chips to profile per task.")
-  tpu_num_sparse_core_tiles_to_trace: int = Field(
-      1,
-      description="Specifies the number of tiles within each sparse core to trace on the TPU.",
-  )
-  xprof_tpu_power_trace_level: XProfTPUPowerTraceMode = Field(
-      XProfTPUPowerTraceMode.POWER_TRACE_NONE,
-      description=(
-          "TPU power trace level. The value should be 0 (POWER_TRACE_NONE), 1"
-          " (POWER_TRACE_NORMAL), or 2 (POWER_TRACE_SPI)"
-      ),
-  )
-  xprof_e2e_enable_fw_throttle_event: bool = Field(False, description="Enable FW throttle event.")
-  xprof_e2e_enable_fw_power_level_event: bool = Field(False, description="Enable FW power level event.")
-  xprof_e2e_enable_fw_thermal_event: bool = Field(False, description="Enable FW thermal event.")
-  profile_power_events: bool = Field(
-      False,
-      description="Enable TPU-specific power/thermal profiling events."
-      " Defaults to False to avoid breaking GPU xplane tracing.",
-  )
+from lilax._backend.configs.profiling_fields import Profiling, ProfilingCore
 
 
 class HloDump(BaseModel):
@@ -3398,23 +3352,6 @@ class Metrics(BaseModel):
   enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")
   wandb_project_name: str = Field("maxtext", description="Weights & Biases project name.")
   wandb_run_name: str = Field("", description="Weights & Biases run name. If empty, a default name is generated.")
-
-
-class ManagedMLDiagnostics(BaseModel):
-  """Configuration for managed mldiagnostics."""
-
-  managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
-  managed_mldiagnostics_on_demand_profiling: bool = Field(
-      True,
-      description=("Enable on-demand profiling server when managed mldiagnostics is" " enabled."),
-  )
-  managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
-  managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
-  managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
-  managed_mldiagnostics_metric_only_run: bool = Field(
-      False,
-      description="Whether to create a metric-only run.",
-  )
 
 
 class Goodput(BaseModel):
@@ -4596,38 +4533,7 @@ class MaxTextConfig(
           "at least one eval_accuracy event)."
       )
 
-  def validate_splash_diag_skip(self):
-    """Validates Tokamax Splash diagonal sub-tile skipping and warns when it cannot take effect."""
-    if self.sa_qk_diag_grid < 2 or (self.sa_qk_diag_grid & (self.sa_qk_diag_grid - 1)) != 0:
-      raise ValueError(f"sa_qk_diag_grid must be a power of 2 and >= 2, got {self.sa_qk_diag_grid}.")
-    if not (self.use_tokamax_splash and (self.sa_qk_diag_skip or self.sa_sv_diag_skip)):
-      return
-    # Tokamax checks square training blocks when the kernel is built at startup, but `eval_sa_*` blocks are
-    # only used under custom eval rules and first traced at the first eval step, so check them here.
-    uses_eval_sa_blocks = bool(self.logical_axis_rules_for_eval) and (
-        self.logical_axis_rules_for_eval != self.logical_axis_rules
-    )
-    if uses_eval_sa_blocks and not self.eval_sa_block_q == self.eval_sa_block_kv == self.eval_sa_block_kv_compute:
-      raise ValueError(
-          "sa_qk_diag_skip/sa_sv_diag_skip with custom eval logical axis rules require square eval blocks "
-          "(eval_sa_block_q == eval_sa_block_kv == eval_sa_block_kv_compute); got "
-          f"{self.eval_sa_block_q}/{self.eval_sa_block_kv}/{self.eval_sa_block_kv_compute}."
-      )
-    # The skip only runs when the Splash kernel gets a pure `CausalMask`; otherwise it is silently disabled.
-    cp_size = self.ici_context_parallelism * self.dcn_context_parallelism
-    strategy = self.context_parallel_strategy.lower()
-    if self.attention_type not in (AttentionType.GLOBAL.value, AttentionType.MLA.value):
-      reason = f"attention_type={self.attention_type!r} (only 'global' and 'mla' are supported)"
-    elif cp_size > 1 and strategy in ("ring", "usp"):
-      reason = f"context_parallel_strategy={strategy!r} (ring/USP attention does not use the flags)"
-    elif cp_size > 1 and strategy == "all_gather" and self.context_parallel_load_balance:
-      reason = "load-balanced all_gather context parallelism (it uses LoadBalancedCausalMask)"
-    else:
-      return
-    max_logging.warning(
-        f"sa_qk_diag_skip={self.sa_qk_diag_skip}, sa_sv_diag_skip={self.sa_sv_diag_skip} have no effect with "
-        f"{reason}. Diagonal sub-tile skipping requires a pure causal mask."
-    )
+  validate_splash_diag_skip = attention_validation.validate_splash_diag_skip
 
   def validate_num_moe_emb_chunks(self):
     """
@@ -5161,13 +5067,7 @@ class MaxTextConfig(
       self.local_sa_use_base2_exp = self.sa_use_base2_exp
 
     # I. RUN ALL CROSS-FIELD VALIDATIONS
-    if self.load_parameters_path and self.load_full_state_path:
-      raise ValueError("At most one of `load_parameters_path` or `load_full_state_path` should be set.")
-    if self.source_checkpoint_layout == "safetensors_dynamic" and self.enable_single_controller:
-      raise ValueError(
-          "`source_checkpoint_layout='safetensors_dynamic'` is not supported"
-          " on the Pathways backend (`enable_single_controller=True`)."
-      )
+    validate_checkpoint_source_config(self)
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
     if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
@@ -5223,37 +5123,7 @@ class MaxTextConfig(
     # gates. `load_parameters_path` is a warm start: it restores through its own
     # `ocp.Checkpointer` in `model_creation_utils.from_pretrained`, before the manager is
     # ever consulted, so it stays legal with saving turned off.
-    if self.load_full_state_path and not self.enable_checkpointing:
-      raise ValueError("You must set enable_checkpointing=True to resume from load_full_state_path.")
-    if self.enable_multi_tier_checkpointing:
-      if not self.local_checkpoint_directory:
-        raise ValueError("`local_checkpoint_directory` must be set for multi-tier checkpointing.")
-      if self.local_checkpoint_period <= 0:
-        raise ValueError("`local_checkpoint_period` must be > 0 for multi-tier checkpointing.")
-      if (self.multi_tier_checkpointing_backup_interval_minutes is None) == (
-          self.multi_tier_checkpointing_backup_interval_steps is None
-      ):
-        raise ValueError(
-            "Exactly one of `multi_tier_checkpointing_backup_interval_minutes`"
-            " or `multi_tier_checkpointing_backup_interval_steps` must be"
-            " specified."
-        )
-      if (
-          self.multi_tier_checkpointing_backup_interval_steps is not None
-          and self.multi_tier_checkpointing_backup_interval_steps < self.local_checkpoint_period
-      ):
-        raise ValueError(
-            "`multi_tier_checkpointing_backup_interval_steps`"
-            f" ({self.multi_tier_checkpointing_backup_interval_steps}) must be"
-            f" >= `local_checkpoint_period` ({self.local_checkpoint_period})."
-        )
-    if self.colocated_python_checkpointing and not self.enable_single_controller:
-      raise ValueError("`colocated_python_checkpointing` is only supported with `enable_single_controller` set to True.")
-    if self.enable_emergency_checkpoint:
-      if not self.local_checkpoint_directory:
-        raise ValueError("`local_checkpoint_directory` must be set for emergency checkpointing.")
-      if self.local_checkpoint_period <= 0:
-        raise ValueError("`local_checkpoint_period` must be > 0 for emergency checkpointing.")
+    validate_checkpoint_storage_config(self)
     if self.moba and self.attention not in ("dot_product"):
       raise ValueError("MoBA is only supported with dot_product attention.")
     if self.decoder_block == DecoderBlockType.DEEPSEEK4:
@@ -5367,27 +5237,7 @@ class MaxTextConfig(
       )
       if has_quant:
         raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with quantization or FP8 options.")
-    if self.attention_type == AttentionType.CHUNK.value and (
-        not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
-    ):
-      raise ValueError("`chunk_attn_window_size` must be an integer > 0 for 'chunk' attention.")
-    if self.attention_type == AttentionType.LOCAL_SLIDING.value and (
-        not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
-    ):
-      raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
-    if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
-      if self.packing:
-        # Document-local block origins inside a packed sequence are not tracked
-        # in attention metadata; packing without realignment would cause
-        # cross-document block-attention leakage.
-        raise ValueError("Block-diffusion attention does not support packing; set `packing=False`.")
-      if self.attention not in ("autoselected", "dot_product", "flash"):
-        raise ValueError("Block-diffusion attention is supported only by dot_product attention and TPU Splash attention.")
-      if self.attention in ("autoselected", "flash") and self.hardware != "tpu":
-        raise ValueError(
-            "Block-diffusion attention with attention='autoselected' or attention='flash' requires hardware='tpu'; "
-            "use attention='dot_product' on other hardware."
-        )
+    attention_validation.validate_attention_type(self)
     validate_training_objective(self)
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
@@ -5630,163 +5480,7 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
-    if self.attention_type == AttentionType.COMPRESSED.value:
-      # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
-      # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
-      # layer is actually compressed. `compress_ratios` defaults to [] for every other model.
-      if any(ratio > 0 for ratio in self.compress_ratios) and context_parallel_size > 1:
-        raise ValueError(
-            f"Context parallelism (context_parallel_size={context_parallel_size}) is not supported with "
-            "attention_type='compressed' and a non-zero compress_ratio. Set every entry of compress_ratios "
-            "to 0, or disable context parallelism."
-        )
-      # The Tokamax Splash backward kernel only accepts dq_reduction_steps of 3 or None; 0 means
-      # "unset" here and is mapped to the kernel default downstream.
-      if self.dq_reduction_steps not in (0, 3):
-        raise ValueError(
-            f"attention_type='compressed' requires dq_reduction_steps to be 0 or 3, got {self.dq_reduction_steps}."
-        )
-    context_parallel_strategy = self.context_parallel_strategy.lower()
-    if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
-      raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
-    self.context_parallel_strategy = context_parallel_strategy
-    if (
-        context_parallel_strategy == "ring"
-        and "gpu" not in self.hardware
-        and "tpu" not in self.hardware
-        and context_parallel_size > 1
-    ):
-      raise ValueError(
-          "Ring context parallelism strategy (context_parallel_strategy='ring') is only supported on GPUs "
-          "or TPU with attention=flash and use_tokamax_splash=True."
-      )
-    if context_parallel_strategy == "ring" and "gpu" not in self.hardware and "tpu" in self.hardware:
-      if context_parallel_size <= 1:
-        raise ValueError("TPU Tokamax ring attention requires context_parallel_size > 1.")
-      if self.context_sharding != "context":
-        raise ValueError("TPU Tokamax ring attention requires context_sharding='context'.")
-      if self.use_indexer and self.dq_reduction_steps != 0:
-        raise ValueError("TPU Tokamax ring attention with sparse indexer mask only supports dq_reduction_steps=0.")
-      if self.dq_reduction_steps not in (0, 3):
-        raise ValueError("TPU Tokamax ring attention requires dq_reduction_steps to be 0 or 3.")
-      if self.max_target_length % (context_parallel_size * context_parallel_size) != 0:
-        raise ValueError(
-            "TPU Tokamax ring attention requires max_target_length to be divisible by context_parallel_size squared."
-        )
-      if self.attention != "flash":
-        raise ValueError("TPU ring context parallelism requires attention=flash.")
-      if not self.use_tokamax_splash:
-        raise ValueError("TPU ring context parallelism requires use_tokamax_splash=True.")
-      if self.use_jax_splash:
-        raise ValueError("TPU ring context parallelism requires use_jax_splash=False.")
-      if self.attention_type not in ("global", "mla"):
-        raise ValueError("TPU Tokamax ring attention supports only attention_type='global' or 'mla'.")
-      if self.attention_type == "mla":
-        if self.packing:
-          raise ValueError("TPU Tokamax ring attention with MLA does not support packing yet.")
-        if self.use_batch_split_schedule:
-          raise ValueError("TPU Tokamax ring attention with MLA does not support the DeepSeek batch-split schedule.")
-      if self.context_parallel_load_balance:
-        if context_parallel_size % 2 != 0:
-          raise ValueError("TPU Tokamax ring load balancing requires an even context_parallel_size.")
-        if self.mtp_num_layers > 0:
-          raise ValueError("TPU Tokamax ring attention with context_parallel_load_balance=True does not support MTP.")
-      if self.use_ragged_attention:
-        raise ValueError("TPU Tokamax ring attention does not support ragged attention.")
-      if self.attention_sink:
-        raise ValueError("TPU Tokamax ring attention does not support attention sinks.")
-      if self.use_chunked_prefill:
-        raise ValueError("TPU Tokamax ring attention does not support chunked prefill yet.")
-      if self.moba:
-        raise ValueError("TPU Tokamax ring attention does not support MoBA.")
-      if self.use_multimodal:
-        raise ValueError("TPU Tokamax ring attention does not support multimodal attention.")
-      if self.use_qk_clip:
-        raise ValueError("TPU Tokamax ring attention does not support QK-Clip statistics yet.")
-      if self.enable_dropout and self.dropout_rate > 0.0:
-        raise ValueError("TPU Tokamax ring attention does not support dropout yet.")
-    if context_parallel_strategy not in ("ring", "usp") and self.ring_scan_unroll != 1:
-      raise ValueError(
-          f"ring_scan_unroll={self.ring_scan_unroll} was specified, but is only supported when "
-          "context_parallel_strategy='ring' or 'usp'."
-      )
-    if context_parallel_strategy == "ulysses":
-      if self.hardware != "tpu":
-        raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
-      if self.context_sharding != "context":
-        raise ValueError("TPU Ulysses attention requires context_sharding='context'.")
-      ici_context_parallel_size = self.ici_context_parallelism
-      dcn_context_parallel_size = self.dcn_context_parallelism
-      if ici_context_parallel_size <= 0 or dcn_context_parallel_size <= 0:
-        raise ValueError(
-            "TPU Ulysses attention requires explicit positive ici/dcn context parallelism values; "
-            "inferred (-1) sizes are not supported."
-        )
-      if context_parallel_size <= 1:
-        raise ValueError("TPU Ulysses attention requires context_parallel_size > 1.")
-      if dcn_context_parallel_size != 1:
-        raise ValueError("TPU Ulysses attention does not support dcn context parallelism yet.")
-      if self.attention != "flash":
-        raise ValueError("TPU Ulysses attention requires attention=flash.")
-      if not self.use_tokamax_splash:
-        raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
-      if self.use_jax_splash:
-        raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
-      if self.use_indexer:
-        raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
-      if self.attention_type != "global":
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
-      if self.context_parallel_load_balance:
-        raise ValueError(
-            "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "
-            "attends over the full sequence in natural order, so the load-balancing reorder is unnecessary and "
-            "would corrupt the causal mask."
-        )
-      if self.use_ragged_attention:
-        raise ValueError("TPU Ulysses attention does not support ragged attention.")
-      if self.attention_sink:
-        raise ValueError("TPU Ulysses attention does not support attention sinks.")
-      if self.use_chunked_prefill:
-        raise ValueError("TPU Ulysses attention does not support chunked prefill yet.")
-      if self.use_multimodal:
-        raise ValueError("TPU Ulysses attention does not support multimodal attention.")
-      if self.enable_dropout and self.dropout_rate > 0.0:
-        raise ValueError("TPU Ulysses attention does not support dropout yet.")
-      if self.dq_reduction_steps not in (0, 3):
-        raise ValueError("TPU Ulysses attention requires dq_reduction_steps to be 0 or 3.")
-      if self.use_qk_clip:
-        raise ValueError("TPU Ulysses attention does not support QK-Clip statistics yet.")
-      if self.max_target_length % context_parallel_size != 0:
-        raise ValueError(
-            "TPU Ulysses attention requires max_target_length "
-            f"({self.max_target_length}) to be divisible by context_parallel_size ({context_parallel_size})."
-        )
-      if self.num_query_heads % context_parallel_size != 0:
-        raise ValueError(
-            "TPU Ulysses attention requires num_query_heads "
-            f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
-        )
-      if self.num_kv_heads == 1:
-        raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if self.num_kv_heads % context_parallel_size != 0:
-        raise ValueError(
-            "TPU Ulysses attention requires num_kv_heads "
-            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
-        )
-    self._validate_usp_context_parallelism()
-    # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
-    # AUTO is resolved in training because test code paths may load the same
-    # config but use a different reorder path.
-    if (
-        context_parallel_size > 1
-        and "gpu" not in self.hardware
-        and self.context_parallel_load_balance
-        and self.context_parallel_reorder_strategy == ReorderStrategy.STRIPED
-    ):
-      raise ValueError(
-          "STRIPED reorder strategy requires Transformer Engine and is only supported on GPUs. "
-          f"Got hardware={self.hardware!r}."
-      )
+    validate_context_parallelism(self, context_parallel_size)
     if self.hardware == "gpu" and self.packing and self.attention == "cudnn_flash_te" and self.max_segments_per_seq <= 0:
       raise ValueError("max_segments_per_seq must be set when using TransformerEngine attention and packing")
     dcn_product = (
