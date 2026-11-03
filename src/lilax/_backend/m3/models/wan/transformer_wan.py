@@ -20,7 +20,8 @@ from lilax._backend.m3.core.sharding import Sharding, TensorType
 from lilax._backend.utils import max_logging
 from .transformer_attention_dot_product import _dot_product_attention
 from .transformer_attention_flash import _pad_axis, _splash_block_sizes, unflatten_heads
-from .transformer_embeddings import apply_rope, get_1d_rotary_pos_embed, get_sinusoidal_embeddings
+from .transformer_embeddings import apply_rope, embed_model_conditioning, get_1d_rotary_pos_embed, get_sinusoidal_embeddings
+from .transformer_model_execution import combine_conditioning, compute_layer_kv_cache, run_transformer_blocks
 from .transformer_timestep_embedding import TimestepEmbedding
 from .utils_wan import (BlockSizes, CONTEXT, CROSS_ATTN_HEAD, CROSS_ATTN_KV_LENGTH, CROSS_ATTN_Q_LENGTH,
                         SELF_ATTN_HEAD, SELF_ATTN_KV_LENGTH, SELF_ATTN_Q_LENGTH, TpuType, constrain, get_activation,
@@ -854,28 +855,9 @@ class WanModel(nnx.Module):
     with self.conditional_named_scope("condition_embedder"):
       _, _, encoder_hidden_states, encoder_hidden_states_image, encoder_attention_mask = self.condition_embedder(
           timestep, encoder_hidden_states, encoder_hidden_states_image)
-    if encoder_hidden_states_image is not None:
-      encoder_hidden_states = jnp.concatenate([encoder_hidden_states_image, encoder_hidden_states], axis=1)
-      if encoder_attention_mask is not None:
-        text_mask = jnp.ones((encoder_hidden_states.shape[0],
-                              encoder_hidden_states.shape[1] - encoder_hidden_states_image.shape[1]), dtype=jnp.int32)
-        encoder_attention_mask = jnp.concatenate([encoder_attention_mask, text_mask], axis=1)
-    if self.scan_layers:
-      @nnx.vmap(in_axes=(0, None, None), out_axes=0, transform_metadata={nnx.PARTITION_NAME: None})
-      def _compute_kv(block, enc_states, enc_mask):
-        return block.compute_kv(enc_states, enc_mask)
-
-      kv_cache = _compute_kv(self.blocks, encoder_hidden_states, encoder_attention_mask)
-    else:
-      kv_cache_list = []
-      for block in self.blocks:
-        kv_cache_list.append(block.compute_kv(encoder_hidden_states, encoder_attention_mask))
-      keys = kv_cache_list[0].keys()
-      kv_cache = {}
-      for k in keys:
-        k_list = [d[k][0] for d in kv_cache_list]
-        v_list = [d[k][1] for d in kv_cache_list]
-        kv_cache[k] = (jnp.stack(k_list, axis=0), jnp.stack(v_list, axis=0))
+    encoder_hidden_states, encoder_attention_mask = combine_conditioning(
+        encoder_hidden_states, encoder_hidden_states_image, encoder_attention_mask)
+    kv_cache = compute_layer_kv_cache(self.blocks, self.scan_layers, encoder_hidden_states, encoder_attention_mask)
     return kv_cache, encoder_attention_mask
 
   @jax.named_scope("WanModel")
@@ -900,73 +882,14 @@ class WanModel(nnx.Module):
       hidden_states = jax.lax.collapse(hidden_states, 1, -1)
     per_token_t = timestep.ndim == 2
     with self.conditional_named_scope("condition_embedder"):
-      if per_token_t:
-        bt, sl = timestep.shape
-        t_flat = timestep.reshape(-1)
-        t_sinusoidal = self.condition_embedder.timesteps_proj(t_flat)
-        t_sinusoidal = t_sinusoidal.reshape(bt, sl, -1)
-        temb = self.condition_embedder.time_embedder(t_sinusoidal)
-        with jax.named_scope("time_proj"):
-          timestep_proj = self.condition_embedder.time_proj(self.condition_embedder.act_fn(temb))
-        timestep_proj = timestep_proj.reshape(bt, sl, 6, -1)
-        if kv_cache is None:
-          encoder_hidden_states_out = self.condition_embedder.text_embedder(encoder_hidden_states)
-        else:
-          encoder_hidden_states_out = encoder_hidden_states
-        encoder_hidden_states_image_out = None
-        encoder_attention_mask_out = None
-      else:
-        temb, timestep_proj, encoder_hidden_states_out, encoder_hidden_states_image_out, encoder_attention_mask_out = (
-            self.condition_embedder(timestep, encoder_hidden_states, encoder_hidden_states_image,
-                                    skip_embeddings=(kv_cache is not None)))
-        timestep_proj = timestep_proj.reshape(timestep_proj.shape[0], 6, -1)
+      temb, timestep_proj, encoder_hidden_states_out, encoder_hidden_states_image_out, encoder_attention_mask_out = (
+          embed_model_conditioning(self.condition_embedder, timestep, encoder_hidden_states,
+                                   encoder_hidden_states_image, kv_cache is not None))
     if encoder_attention_mask is None:
       encoder_attention_mask = encoder_attention_mask_out
-    if encoder_hidden_states_image_out is not None:
-      encoder_hidden_states = jnp.concatenate([encoder_hidden_states_image_out, encoder_hidden_states_out], axis=1)
-      if kv_cache is None and encoder_attention_mask is not None:
-        text_mask = jnp.ones((encoder_hidden_states.shape[0],
-                              encoder_hidden_states.shape[1] - encoder_hidden_states_image_out.shape[1]), dtype=jnp.int32)
-        encoder_attention_mask = jnp.concatenate([encoder_attention_mask, text_mask], axis=1)
-      encoder_hidden_states = encoder_hidden_states.astype(hidden_states.dtype)
-    else:
-      encoder_hidden_states = encoder_hidden_states_out.astype(hidden_states.dtype)
-
-    def _run_all_blocks(h):
-      if self.scan_layers:
-        def scan_fn(carry, block_input):
-          hidden_states_carry, rngs_carry = carry
-          if kv_cache is not None:
-            block, layer_kv_cache = block_input
-          else:
-            block = block_input
-            layer_kv_cache = None
-          hidden_states = block(hidden_states_carry, encoder_hidden_states, timestep_proj, rotary_emb, deterministic,
-                                rngs_carry, encoder_attention_mask, cached_kv=layer_kv_cache)
-          new_carry = (hidden_states, rngs_carry)
-          return new_carry, None
-
-        initial_carry = (h, rngs)
-        if kv_cache is not None:
-          scan_input = (self.blocks, kv_cache)
-        else:
-          scan_input = self.blocks
-        final_carry, _ = nnx.scan(scan_fn, length=self.num_layers, in_axes=(nnx.Carry, 0),
-                                  out_axes=(nnx.Carry, 0))(initial_carry, scan_input)
-        h_out, _ = final_carry
-      else:
-        h_out = h
-        for i, block in enumerate(self.blocks):
-          layer_kv_cache = None
-          if kv_cache is not None:
-            layer_kv_cache = jax.tree.map(lambda x: x[i], kv_cache)
-
-          def layer_forward(hidden_states, l_kv):
-            return block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, deterministic, rngs,
-                         encoder_attention_mask=encoder_attention_mask, cached_kv=l_kv)
-
-          h_out = layer_forward(h_out, layer_kv_cache)
-      return h_out
+    encoder_hidden_states, encoder_attention_mask = combine_conditioning(
+        encoder_hidden_states_out, encoder_hidden_states_image_out, encoder_attention_mask, extend_mask=kv_cache is None)
+    encoder_hidden_states = encoder_hidden_states.astype(hidden_states.dtype)
 
     hidden_states_before_blocks = hidden_states
     if skip_blocks:
@@ -974,7 +897,9 @@ class WanModel(nnx.Module):
         raise ValueError("cached_residual must be provided when skip_blocks is True")
       hidden_states = hidden_states + cached_residual
     else:
-      hidden_states = _run_all_blocks(hidden_states)
+      hidden_states = run_transformer_blocks(
+          self.blocks, self.scan_layers, self.num_layers, hidden_states, encoder_hidden_states, timestep_proj,
+          rotary_emb, deterministic, rngs, encoder_attention_mask, kv_cache)
     residual_x = hidden_states - hidden_states_before_blocks
     if per_token_t:
       combined_head = jnp.expand_dims(self.scale_shift_table, 0) + jnp.expand_dims(temb, 2)

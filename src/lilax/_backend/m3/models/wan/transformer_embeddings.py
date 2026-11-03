@@ -3,11 +3,34 @@
 import math
 from typing import Any, Union
 
+import jax
 import jax.numpy as jnp
 
 from lilax._backend.common import common_types
 
 Array = common_types.Array
+
+
+def embed_model_conditioning(condition_embedder, timestep, encoder_hidden_states, encoder_hidden_states_image,
+                             has_kv_cache):
+  if timestep.ndim == 2:
+    bt, sl = timestep.shape
+    t_flat = timestep.reshape(-1)
+    t_sinusoidal = condition_embedder.timesteps_proj(t_flat)
+    t_sinusoidal = t_sinusoidal.reshape(bt, sl, -1)
+    temb = condition_embedder.time_embedder(t_sinusoidal)
+    with jax.named_scope("time_proj"):
+      timestep_proj = condition_embedder.time_proj(condition_embedder.act_fn(temb))
+    timestep_proj = timestep_proj.reshape(bt, sl, 6, -1)
+    if not has_kv_cache:
+      encoder_hidden_states = condition_embedder.text_embedder(encoder_hidden_states)
+    encoder_hidden_states_image = None
+    encoder_attention_mask = None
+  else:
+    temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image, encoder_attention_mask = (
+        condition_embedder(timestep, encoder_hidden_states, encoder_hidden_states_image, skip_embeddings=has_kv_cache))
+    timestep_proj = timestep_proj.reshape(timestep_proj.shape[0], 6, -1)
+  return temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image, encoder_attention_mask
 
 
 def apply_rope(xq: Array, xk: Array, freqs_cis: Any) -> tuple[Array, Array]:
