@@ -37,7 +37,7 @@ import jax
 import numpy as np
 from tqdm import tqdm
 
-from lilax._backend.input_pipeline import _mmap_datasource, _megatron_blending
+from lilax._backend.input_pipeline.mmap import _mmap_datasource, _megatron_blending
 
 log = logging.getLogger(__name__)
 

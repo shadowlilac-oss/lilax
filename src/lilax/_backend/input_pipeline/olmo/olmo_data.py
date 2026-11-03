@@ -35,7 +35,7 @@ from typing import BinaryIO, Generator, List, NamedTuple, Optional, Sequence, Tu
 
 import numpy as np
 
-from lilax._backend.input_pipeline._olmo_repetition import (
+from lilax._backend.input_pipeline.olmo._olmo_repetition import (
     RepetitionTuple,
     _find_end_first_consecutive_true,
     _find_start_last_consecutive_true,

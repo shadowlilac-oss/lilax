@@ -34,7 +34,7 @@ from lilax._backend.input_pipeline import input_pipeline_utils
 from lilax._backend.input_pipeline import grain_tokenizer
 from lilax._backend.input_pipeline import dpo_utils
 from lilax._backend.input_pipeline import multihost_dataloading
-from lilax._backend.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
+from lilax._backend.input_pipeline.mmap._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
 

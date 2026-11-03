@@ -38,7 +38,7 @@ dependencies = [
 ]
 
 [project.scripts]
-jaxcoord = "lilax.launcher:main"
+jaxcoord = "lilax.launch.jaxcoord:main"
 
 [project.urls]
 Repository = "https://github.com/AI-Hypercomputer/maxtext.git"

@@ -8,8 +8,8 @@ import jax
 from etils import epath
 
 from lilax._backend.input_pipeline import multihost_dataloading
-from lilax._backend.input_pipeline.olmo_data import load_index
-from lilax._backend.input_pipeline.olmo_data_grain import make_olmo_grain_data_loader
+from lilax._backend.input_pipeline.olmo.olmo_data import load_index
+from lilax._backend.input_pipeline.olmo.olmo_data_grain import make_olmo_grain_data_loader
 from lilax._backend.utils import max_logging
 
 

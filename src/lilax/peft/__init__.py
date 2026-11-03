@@ -23,7 +23,7 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
 )
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils.globals import HF_IDS
-from lilax.models import MaxTextModel
+from lilax.modeling.models import MaxTextModel
 
 
 @dataclass

@@ -8,7 +8,7 @@ from jax.sharding import PartitionSpec as P
 from lilax._backend.configs import pyconfig
 from lilax._backend.input_pipeline.grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from lilax._backend.input_pipeline.hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
-from lilax._backend.input_pipeline.olmo_grain_data_processing import (
+from lilax._backend.input_pipeline.olmo.olmo_grain_data_processing import (
     make_olmo_grain_train_iterator,
     make_olmo_grain_eval_iterator,
 )
@@ -58,8 +58,8 @@ def create_data_iterator(
       "olmo_grain": (make_olmo_grain_train_iterator, make_olmo_grain_eval_iterator),
   }
   if config.dataset_type in ("tfds", "c4_mlperf"):
-    from lilax._backend.input_pipeline.tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator  # pylint: disable=import-outside-toplevel
-    from lilax._backend.input_pipeline.tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator  # pylint: disable=import-outside-toplevel
+    from lilax._backend.input_pipeline.tfds.tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator  # pylint: disable=import-outside-toplevel
+    from lilax._backend.input_pipeline.tfds.tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator  # pylint: disable=import-outside-toplevel
 
     dataset_type_to_train_eval_iterator["tfds"] = (make_tfds_train_iterator, make_tfds_eval_iterator)
     dataset_type_to_train_eval_iterator["c4_mlperf"] = (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator)

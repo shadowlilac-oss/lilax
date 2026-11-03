@@ -27,7 +27,7 @@ import requests
 from google.cloud import storage
 from requests.exceptions import RequestException
 
-from lilax._backend.input_pipeline.olmo_data import (
+from lilax._backend.input_pipeline.olmo.olmo_data import (
     build_index,
     has_npy_magic,
     parse_npy_header,

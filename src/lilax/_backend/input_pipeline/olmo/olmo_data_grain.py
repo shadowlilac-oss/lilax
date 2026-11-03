@@ -29,7 +29,7 @@ import numpy as np
 
 import grain
 
-from lilax._backend.input_pipeline.olmo_data import (
+from lilax._backend.input_pipeline.olmo.olmo_data import (
     OlmoNpyIndex,
     global_to_local,
     is_clean_instance,

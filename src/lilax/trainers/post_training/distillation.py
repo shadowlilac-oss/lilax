@@ -5,12 +5,12 @@ from contextlib import nullcontext
 import jax
 from orbax import checkpoint as ocp
 
-from lilax.data import create_data_iterator
+from lilax.data_pipeline.api import create_data_iterator
 from lilax._backend.configs import pyconfig
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.trainers.post_train.distillation import distillation_utils, save_top_k_teacher_logits, train_distill
 from lilax.configuration import MaxTextConfig
-from lilax.models import MaxTextModel
+from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime
 
 from .._base import _PostTrainer

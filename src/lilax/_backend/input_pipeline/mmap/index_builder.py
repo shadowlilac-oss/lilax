@@ -2,7 +2,7 @@
 
 import os
 
-from lilax._backend.input_pipeline._mmap_index_utils import (
+from lilax._backend.input_pipeline.mmap._mmap_index_utils import (
     build_document_index,
     build_indices,
     build_sample_index,

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from lilax.configuration.schema import MaxTextConfig
 from lilax.configuration.values import load_config_values
-from lilax.hub import resolve_model_name, resolve_model_snapshot
+from lilax.modeling.hub import resolve_model_name, resolve_model_snapshot
 
 
 class AutoConfig:

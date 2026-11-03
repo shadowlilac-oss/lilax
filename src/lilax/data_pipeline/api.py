@@ -21,7 +21,7 @@ from lilax._backend.input_pipeline.tokenizer import (
     TikTokenTokenizer,
     build_tokenizer,
 )
-from lilax._backend.utils.mmap_index_builder import (
+from lilax._backend.input_pipeline.mmap.index_builder import (
     build_blend_indices,
     build_document_index,
     build_indices,

@@ -10,7 +10,7 @@ import orbax.checkpoint as ocp
 
 from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggingface
 from lilax.configuration import QwixQATConfig
-from lilax.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
+from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 
 
 def checkpoint_qat_config(path):

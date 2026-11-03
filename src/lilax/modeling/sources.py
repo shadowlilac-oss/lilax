@@ -6,9 +6,9 @@ from etils import epath
 
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
 from lilax.configuration import AutoConfig
-from lilax.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
+from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 from lilax.runtime import Runtime
-from lilax import model_persistence
+from lilax.modeling import persistence as model_persistence
 
 
 def resolve_pretrained_source(

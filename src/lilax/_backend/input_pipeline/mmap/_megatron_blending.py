@@ -256,4 +256,4 @@ class MegatronBlendedDataSource:
       raise IndexError(f"Index {idx} out of range for blend of size {self._size}")
     return self._datasets[int(self._dataset_index[idx])][int(self._dataset_sample_index[idx])]
 
-from lilax._backend.input_pipeline import _mmap_index_utils
+from lilax._backend.input_pipeline.mmap import _mmap_index_utils

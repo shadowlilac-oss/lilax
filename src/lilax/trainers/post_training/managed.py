@@ -1,6 +1,6 @@
 """Managed post-training lifecycle."""
 
-from lilax.data import create_data_iterator
+from lilax.data_pipeline.api import create_data_iterator
 from lilax._backend.trainers.post_train.checkpoint_selection import TrainingCheckpointManager
 
 from .._base import _PostTrainer

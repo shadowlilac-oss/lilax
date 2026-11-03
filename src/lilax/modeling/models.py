@@ -19,12 +19,12 @@ from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggi
 from lilax._backend.utils import maxtext_utils_nnx, model_creation_utils
 from lilax.configuration import AutoConfig, QwixQATConfig
 from lilax.generation.engine import generate as generate_tokens
-from lilax.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
+from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 from lilax.runtime import Runtime
-from lilax import model_persistence
-from lilax import model_construction
-from lilax import model_qat_application
-from lilax.model_sources import resolve_checkpoint_path, resolve_pretrained_source
+from lilax.modeling import persistence as model_persistence
+from lilax.modeling import construction as model_construction
+from lilax.modeling import qat_application as model_qat_application
+from lilax.modeling.sources import resolve_checkpoint_path, resolve_pretrained_source
 
 
 class MaxTextModel:

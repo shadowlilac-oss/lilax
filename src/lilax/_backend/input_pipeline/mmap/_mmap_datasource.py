@@ -28,8 +28,8 @@ import struct
 import numpy as np
 import grain.python as grain
 
-from lilax._backend.input_pipeline import _mmap_index_utils
-from lilax._backend.input_pipeline._megatron_blending import MegatronBlendedDataSource
+from lilax._backend.input_pipeline.mmap import _mmap_index_utils
+from lilax._backend.input_pipeline.mmap._megatron_blending import MegatronBlendedDataSource
 
 log = logging.getLogger(__name__)
 
