@@ -1,4 +1,5 @@
-from lilax.configuration.domain_types import QuantizationType, RematLocation
+from lilax.configuration.domain_types import QuantizationType
+from lilax.configuration.domains.model_moe import RematLocation
 
 
 def validate_attention_indexer(self):

@@ -1,4 +1,4 @@
-from lilax.configuration.domain_types import RematLocation
+from lilax.configuration.domains.model_moe import RematLocation
 
 
 def validate_shard_embed_moe_on_fsdp(self):

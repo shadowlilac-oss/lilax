@@ -4,7 +4,7 @@ import os
 import yaml
 
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
-from lilax.configuration.domains.execution_sharding import CustomRule
+from lilax.configuration.domains.execution_mesh import CustomRule
 
 logger = logging.getLogger("lilax.configuration.schema")
 

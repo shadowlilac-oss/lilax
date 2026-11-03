@@ -1,7 +1,7 @@
 from lilax.configuration.domain_types import DecoderBlockType, DType
 
 
-def validate_moe_options(self):
+def validate_moe_options(self) -> "MaxTextConfig":
   if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
     raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
   if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:

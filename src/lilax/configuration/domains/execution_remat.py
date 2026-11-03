@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from lilax.configuration.domain_types import RematLocation
+from lilax.configuration.domains.model_moe import RematLocation
 
 
 class RematAndOffload(BaseModel):

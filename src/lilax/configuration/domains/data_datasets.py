@@ -122,5 +122,5 @@ class OlmoGrainDataset(BaseModel):
 
   olmo_index_path: str = Field("", description="Path or gs:// URI to the JSON index from build_olmo_npy_index.py.")
   olmo_path_remap_from: str = Field("", description="If set, rewrite index file paths starting with this prefix to olmo_path_remap_to.")
-  olmo_path_remap_to: str = Field("", description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/...).")
+  olmo_path_remap_to: str = Field("", description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/.../).")
   olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")

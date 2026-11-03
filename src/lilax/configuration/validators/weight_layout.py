@@ -1,5 +1,5 @@
 from lilax.configuration.domain_types import DType
-from lilax.configuration.domains.execution_sharding import ShardMode
+from lilax.configuration.domains.execution_mesh import ShardMode
 
 
 def validate_weight_layout_options(self):

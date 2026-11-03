@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 class DevelopmentAndDebugging(BaseModel):
   """General settings for development and debugging."""
+  __module__ = "lilax.configuration.schema"
 
   constant_bound_config: list = Field([], description="Legacy configuration for constant bounds.")
   jax_cache_dir: str | None = Field("~/jax_cache", description="Directory for JAX compilation cache.")
@@ -29,6 +30,7 @@ class DevelopmentAndDebugging(BaseModel):
 
 class HloDump(BaseModel):
   """Configuration for dumping HLO modules for debugging."""
+  __module__ = "lilax.configuration.schema"
 
   dump_hlo: bool = Field(False, description="Enable HLO dumping.")
   dump_step: int = Field(-1, description="Dump HLO at a specific step. -1 disables step-specific dump.")

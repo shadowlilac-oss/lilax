@@ -1,7 +1,7 @@
 from lilax.configuration.domain_types import DatasetType
 
 
-def validate_attention_kernel_options(self):
+def validate_attention_kernel_options(self) -> "MaxTextConfig":
   if self.force_q_layout and not self.use_jax_splash:
     raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
   if self.use_qk_clip and self.attention_type != "mla":

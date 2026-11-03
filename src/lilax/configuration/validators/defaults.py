@@ -4,7 +4,7 @@ from jinja2 import Environment, TemplateSyntaxError
 
 from lilax._backend.utils.globals import MAXTEXT_ASSETS_ROOT
 from lilax.configuration.domain_types import TokenizerType
-from lilax.configuration.domains.execution_sharding import CustomRule
+from lilax.configuration.domains.execution_mesh import CustomRule
 
 
 def resolve_inert_defaults(self):

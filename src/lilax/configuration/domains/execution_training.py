@@ -8,6 +8,7 @@ class ElasticTraining(BaseModel):
 
   Elastic training is Pathways-specific and does not work on McJAX.
   """
+  __module__ = "lilax.configuration.schema"
 
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
   elastic_backup_kind: str = Field("snapshot", description=(
@@ -30,6 +31,7 @@ class ElasticTraining(BaseModel):
 
 class TrainingLoop(BaseModel):
   """Configuration for the main training loop, evaluation, and reproducibility."""
+  __module__ = "lilax.configuration.schema"
 
   training_objective: Literal["causal_lm", "block_diffusion"] = Field("causal_lm", description="The token-prediction objective used to prepare targets and compute loss.")
   block_diffusion_mask_id: int = Field(-1, description="The tokenizer mask-token id required by the block-diffusion training objective.")
