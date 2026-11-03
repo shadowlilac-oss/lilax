@@ -7,21 +7,21 @@ from flax.core.spmd import logical_axis_rules
 from lilax._backend.utils import sharding
 
 
-def transfer_model_state(engine, model, rest_state):
-  if type(model) is not type(engine.model):
+def transfer_model_state(model, prefill_model, ar_model, mesh, axis_rules, rest_state):
+  if type(model) is not type(prefill_model):
     raise ValueError("The loaded model is incompatible with the inference model type.")
   persistent = lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
   source = nnx.state(model).filter(persistent)
-  prefill = nnx.state(engine.model).filter(persistent)
-  autoregressive = nnx.state(engine.model_ar).filter(persistent)
+  prefill = nnx.state(prefill_model).filter(persistent)
+  autoregressive = nnx.state(ar_model).filter(persistent)
   source_vars = dict(nnx.to_flat_state(source))
   prefill_vars = dict(nnx.to_flat_state(prefill))
   ar_vars = dict(nnx.to_flat_state(autoregressive))
   if source_vars.keys() != prefill_vars.keys() or prefill_vars.keys() != ar_vars.keys():
     raise ValueError("Loaded model persistent state does not match both inference graphs.")
-  with logical_axis_rules(engine.config.logical_axis_rules):
-    prefill_shardings = dict(nnx.to_flat_state(sharding.nnx_construct_named_sharding(prefill, engine._mesh)))
-    ar_shardings = dict(nnx.to_flat_state(sharding.nnx_construct_named_sharding(autoregressive, engine._mesh)))
+  with logical_axis_rules(axis_rules):
+    prefill_shardings = dict(nnx.to_flat_state(sharding.nnx_construct_named_sharding(prefill, mesh)))
+    ar_shardings = dict(nnx.to_flat_state(sharding.nnx_construct_named_sharding(autoregressive, mesh)))
   transferred = []
   for path, target in prefill_vars.items():
     original = source_vars[path]

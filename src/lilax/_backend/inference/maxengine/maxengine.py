@@ -256,16 +256,27 @@ class MaxEngine(engine_api.Engine):
         `train` mode, full-precision kernel loaded; AQT layers quantize per
         forward. Same output as serve mode (absmax calibration), slower.
     """
-    rest_state = maxengine_params.initialize_model_state(self)
+    with logical_axis_rules(self.config.logical_axis_rules):
+      graphdef, rest_state, concrete_model = maxengine_params.initialize_model_state(
+          self.model, self._mesh, self._create_model_fn
+      )
+      self.graphdef = graphdef
+      del concrete_model
 
     if model is not None:
-      params_state = maxengine_model_transfer.transfer_model_state(self, model, rest_state)
+      params_state = maxengine_model_transfer.transfer_model_state(
+          model, self.model, self.model_ar, self._mesh, self.config.logical_axis_rules, rest_state
+      )
       self._nnx_rest_state = rest_state
     elif params:
-      params_state = maxengine_params.reshard_params(self, params)
+      params_state = maxengine_params.reshard_params(self.model, self.config, self._mesh, params)
       self._nnx_rest_state = rest_state
     else:
-      params_state = maxengine_params.load_checkpoint(self, rest_state)
+      params_state, nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict = maxengine_params.load_checkpoint(
+          self.config, self._mesh, self._nnx_quant_mode_str, rest_state
+      )
+      self._nnx_rest_state = rest_state
+      del nnx_model, loaded_rest_state, loaded_rest_dict, rest_dict
 
     self.abstract_params = jax.tree.map(
         lambda x: jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype, sharding=x.sharding)
@@ -274,7 +285,22 @@ class MaxEngine(engine_api.Engine):
         params_state,
     )
 
-    maxengine_cache_sharding.initialize_cache_shardings(self)
+    self.prefill_kv_cache_annotations = maxtext_utils.get_prefill_kv_cache_annotations_nnx(
+        self.model, self.config, self._mesh
+    )
+    self.prefill_kv_cache_shardings = maxengine_cache_sharding.named_cache_shardings(
+        self.prefill_kv_cache_annotations, self._mesh
+    )
+    if self.config.stack_prefill_result_cache and not self.config.scan_layers:
+      self.prefill_kv_cache_shardings = maxengine_cache_sharding.add_prefill_stack_axis(
+          self.prefill_kv_cache_shardings, self._mesh
+      )
+      self.prefill_kv_cache_shardings = maxengine_prefill_cache.stacked_prefill_cache_shardings(
+          self.prefill_kv_cache_shardings
+      )
+    self.kv_cache_annotations = maxtext_utils.get_kv_cache_annotations_nnx(self.model_ar, self.config, self._mesh)
+    self.kv_cache_shardings = maxengine_cache_sharding.named_cache_shardings(self.kv_cache_annotations, self._mesh)
+    self.state_mesh_annotations = None
 
     self.print_stats("After load_params (NNX)")
     return params_state
@@ -286,7 +312,7 @@ class MaxEngine(engine_api.Engine):
     `<adapter_path>/0/items`. The returned `params` follows the same tree
     shape as `self.abstract_params` (NNX or Linen, depending on the engine).
     """
-    params, config = maxengine_adapters.load_single_adapter(self, adapter_path)
+    params, config = maxengine_adapters.load_single_adapter(self.config, self.abstract_params, adapter_path)
     self.print_stats("After load_single_adapter.")
 
     return params, config

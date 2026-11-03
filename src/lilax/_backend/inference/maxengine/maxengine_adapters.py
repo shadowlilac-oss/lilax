@@ -5,11 +5,11 @@ import os.path
 from lilax._backend.utils import lora_utils
 
 
-def load_single_adapter(engine, adapter_path):
+def load_single_adapter(config, abstract_params, adapter_path):
   adapter_config_path = os.path.join(adapter_path, "adapter_config.json")
   adapter_weights_path = os.path.join(adapter_path, "0", "items")
 
-  params, config = lora_utils.load_adapter(engine.config, engine.abstract_params, adapter_config_path, adapter_weights_path)
+  params, config = lora_utils.load_adapter(config, abstract_params, adapter_config_path, adapter_weights_path)
 
   if config is None:
     raise ValueError(f"Failed to read lora_config from {adapter_config_path}")
