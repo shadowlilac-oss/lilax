@@ -8,15 +8,11 @@ from pydantic.main import BaseModel
 class ProfilingCore(BaseModel):
   """Profiler backend selection shared by every trainer."""
 
-  __module__ = "lilax._backend.configs.types"
-
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
 
 
 class Profiling(ProfilingCore):
   """Configuration for step-window performance profiling (`common/profiler.py`)."""
-
-  __module__ = "lilax._backend.configs.types"
 
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")

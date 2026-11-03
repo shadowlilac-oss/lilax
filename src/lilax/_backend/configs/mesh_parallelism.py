@@ -48,15 +48,58 @@ class IciParallelism(BaseModel):
   ici_expert_parallelism: int = Field(1, description="ICI axis for expert parallelism.")
 
 
-DcnParallelism.__module__ = "lilax._backend.configs.types"
-IciParallelism.__module__ = "lilax._backend.configs.types"
-
-
 def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int], mesh_axes: list[str]) -> list[int]:
   """Per-axis parallelism list for `mesh_axes` (preserves explicit list for custom physical mesh axes)."""
   if configured and len(configured) == len(mesh_axes) and any(axis not in axis_map for axis in mesh_axes):
     return list(configured)
   return [axis_map.get(axis, 1) for axis in mesh_axes]
+
+
+def resolve_parallelism_lists(config):
+  """Resolve `ici_parallelism` and `dcn_parallelism` from the per-axis parallelism fields."""
+  ici_map = {
+      "diloco": config.ici_diloco_parallelism,
+      "data": config.ici_data_parallelism,
+      "stage": config.ici_pipeline_parallelism,
+      "fsdp": config.ici_fsdp_parallelism,
+      "fsdp_transpose": config.ici_fsdp_transpose_parallelism,
+      "sequence": config.ici_sequence_parallelism,
+      "context": config.ici_context_parallelism,
+      "context_usp_ulysses": config.ici_context_usp_ulysses_parallelism,
+      "context_autoregressive": config.ici_context_autoregressive_parallelism,
+      "tensor": config.ici_tensor_parallelism,
+      "tensor_sequence": config.ici_tensor_sequence_parallelism,
+      "model": config.ici_tensor_parallelism,
+      "expert": config.ici_expert_parallelism,
+      "autoregressive": config.ici_autoregressive_parallelism,
+      "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+      "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+      "dcp": (1),
+      "pcp": (1),
+  }
+  config.ici_parallelism = _resolve_parallelism(config.ici_parallelism, ici_map, config.mesh_axes)
+
+  dcn_map = {
+      "diloco": config.dcn_diloco_parallelism,
+      "data": config.dcn_data_parallelism,
+      "stage": config.dcn_pipeline_parallelism,
+      "fsdp": config.dcn_fsdp_parallelism,
+      "fsdp_transpose": config.dcn_fsdp_transpose_parallelism,
+      "sequence": config.dcn_sequence_parallelism,
+      "context": config.dcn_context_parallelism,
+      "context_usp_ulysses": config.dcn_context_usp_ulysses_parallelism,
+      "context_autoregressive": config.dcn_context_autoregressive_parallelism,
+      "tensor": config.dcn_tensor_parallelism,
+      "tensor_sequence": config.dcn_tensor_sequence_parallelism,
+      "model": config.dcn_tensor_parallelism,
+      "expert": config.dcn_expert_parallelism,
+      "autoregressive": config.dcn_autoregressive_parallelism,
+      "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
+      "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
+      "dcp": (1),
+      "pcp": (1),
+  }
+  config.dcn_parallelism = _resolve_parallelism(config.dcn_parallelism, dcn_map, config.mesh_axes)
 
 
 def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:

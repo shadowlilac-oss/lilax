@@ -7,7 +7,6 @@ import datetime
 from enum import Enum
 from jinja2 import Environment, TemplateSyntaxError
 import logging
-import math
 from math import prod
 import os
 from tempfile import gettempdir
@@ -23,16 +22,40 @@ from lilax._backend.configs.diagnostics_fields import ManagedMLDiagnostics
 from lilax._backend.configs.inference_fields import (
     Decoding, InferenceBenchmark, InferenceGeneral, InferenceLayout, InferenceServer, PrefixCaching, SamplingStrategy,
 )
-from lilax._backend.configs.positional_embedding import PositionalEmbedding, Rope, RopeType, YarnRope
+from lilax._backend.configs.positional_embedding import PositionalEmbedding, Rope, YarnRope
 from lilax._backend.configs.mesh_parallelism import (
-    DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, validate_optimizer_sharding,
+    DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, resolve_parallelism_lists,
+    validate_optimizer_sharding,
 )
 from lilax._backend.configs import moe_routing
 from lilax._backend.configs import moe_quantization_validation
 from lilax._backend.configs import attention_validation
+from lilax._backend.configs import deepseek_attention_validation
 from lilax._backend.configs.training_validation import validate_training_objective
 from lilax._backend.configs.splash_defaults import resolve_local_splash_defaults
-from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
+from lilax._backend.configs.precision_types import DType, MatmulPrecision
+from lilax._backend.configs.quantization_types import (
+    JAX_MX_QUANTIZATIONS, KvQuantAxis, QuantizationType, TeCommGemmOverlapPolicy, TEGroupedGemmQuantizationType,
+)
+from lilax._backend.configs.remat_types import RematLocation, RematPolicy
+from lilax._backend.configs.dataset_types import DatasetType
+from lilax._backend.configs.profiling_types import ProfilerType, XProfTPUPowerTraceMode
+from lilax._backend.configs.model_scaling import get_individual_scales
+from lilax._backend.configs.mtp_validation import validate_mtp_main_hidden_state
+from lilax._backend.configs.training_quantization_validation import validate_training_quantization
+from lilax._backend.configs.engram_validation import validate_engram
+from lilax._backend.configs.moe_architecture_validation import validate_moe_architecture
+from lilax._backend.configs.moe_kernel_validation import validate_gmm_v2, validate_moe_kernel_options
+from lilax._backend.configs.diloco_settings import (
+    resolve_diloco_replicas, validate_diloco_grouped_matmul, validate_streaming_diloco,
+)
+from lilax._backend.configs.multimodal_validation import validate_multimodal_support
+from lilax._backend.configs.alignment_validation import validate_alignment_objectives
+from lilax._backend.configs.explicit_sharding_validation import validate_explicit_sharding
+from lilax._backend.configs.decoder_block_validation import validate_decoder_block_constraints
+from lilax._backend.configs.splash_attention_validation import validate_splash_attention_flags
+from lilax._backend.configs.lineage_validation import validate_lineage
+from lilax._backend.common.common_types import DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import max_utils
@@ -45,9 +68,6 @@ from pydantic.functional_validators import field_validator, model_validator
 from pydantic.main import BaseModel
 from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
 from pydantic import ValidationInfo
-
-
-from lilax._backend.configs.profiling_types import XProfTPUPowerTraceMode
 
 
 logger = logging.getLogger(__name__)
@@ -98,105 +118,6 @@ PathStr = str
 AxisNames = NewType("AxisNames", str)
 
 
-class DType(str, Enum):
-  """Supported data types for weights and activations."""
-
-  BFLOAT16 = "bfloat16"
-  FLOAT32 = "float32"
-  FLOAT16 = "float16"
-  FLOAT8_E4M3FN = "float8_e4m3fn"
-  FLOAT8_E5M2 = "float8_e5m2"
-
-
-class MatmulPrecision(str, Enum):
-  """Precision levels for matrix multiplications."""
-
-  DEFAULT = "default"
-  HIGH = "high"
-  HIGHEST = "highest"
-  # same as default
-  BFLOAT16 = "bfloat16"
-  # same as highest
-  FLOAT32 = "float32"
-
-
-class QuantizationType(str, Enum):
-  """Supported quantization schemes."""
-
-  NONE = ""
-  FP4 = "fp4"
-  INT4 = "int4"
-  INT8 = "int8"
-  INTMP = "intmp"
-  FP8_E5M2 = "fp8_e5m2"
-  FP8_E4M3 = "fp8_e4m3"
-  FP8 = "fp8"
-  NANOO_FP8 = "nanoo_fp8"
-  FP8_NANO_V2 = "fp8_nanoo"
-  FP8_GPU = "fp8_gpu"
-  FP8_FULL = "fp8_full"
-  TE_NO_QUANT = "te_no_quant"
-  TE_FP8_DS = "te_fp8_delayedscaling"
-  TE_FP8_CS = "te_fp8_currentscaling"
-  TE_MXFP8 = "te_mxfp8"
-  JAX_MXFP8 = "jax_mxfp8"
-  JAX_MXFP4 = "jax_mxfp4"
-  TE_NVFP4 = "te_nvfp4"
-  TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
-  SERVE_FP8_WEIGHT = "serve_fp8_weight"
-
-
-# The OCP MX recipes that run through jax.nn.scaled_dot_general.
-JAX_MX_QUANTIZATIONS = (QuantizationType.JAX_MXFP8.value, QuantizationType.JAX_MXFP4.value)
-
-
-class TEGroupedGemmQuantizationType(str, Enum):
-  """Supported quantization schemes for TE grouped GEMM in MoE layers."""
-
-  EMPTY = ""
-  TE_NO_QUANT = "te_no_quant"  # Default precision, e.g. BF16, without quantization
-  TE_MXFP8 = "te_mxfp8"
-
-
-class TeCommGemmOverlapPolicy(str, Enum):
-  """Transformer Engine collective GEMM overlap scope."""
-
-  DISABLED = "disabled"
-  MLP = "mlp"
-  FULL = "full"
-
-
-class KvQuantAxis(str, Enum):
-  """Axes to quantize over for the Key-Value cache."""
-
-  NONE = ""
-  DKV = "dkv"
-  HEADS_AND_DKV = "heads_and_dkv"
-
-
-class RematPolicy(str, Enum):
-  """Available rematerialization (gradient checkpointing) policies."""
-
-  FULL = "full"
-  MINIMAL = "minimal"
-  SAVE_DOT_WITH_CONTEXT_EXCEPT_MLP = "save_dot_with_context_except_mlp"
-  SAVE_DOT_EXCEPT_MLPWI = "save_dot_except_mlpwi"
-  SAVE_DOT_EXCEPT_MLP = "save_dot_except_mlp"
-  SAVE_QKV_PROJ = "save_qkv_proj"
-  QKV_PROJ_OFFLOADED = "qkv_proj_offloaded"
-  CUSTOM = "custom"
-  MINIMAL_OFFLOADED = "minimal_offloaded"
-  SAVE_OUT_PROJ = "save_out_proj"
-
-
-class RematLocation(str, Enum):
-  """Specifies where to store activations for rematerialization."""
-
-  REMAT = "remat"
-  DEVICE = "device"
-  OFFLOAD = "offload"
-
-
 class OptimizerType(str, Enum):
   """Supported optimizer algorithms."""
 
@@ -226,20 +147,6 @@ class TokenizerType(str, Enum):
   SENTENCEPIECE = "sentencepiece"
   HUGGINGFACE = "huggingface"
   TIKTOKEN = "tiktoken"
-
-
-class DatasetType(str, Enum):
-  """Supported data loading pipelines."""
-
-  SYNTHETIC = "synthetic"
-  HF = "hf"
-  GRAIN = "grain"
-  TFDS = "tfds"
-  C4MLPERF = "c4_mlperf"
-  OLMO_GRAIN = "olmo_grain"
-
-
-from lilax._backend.configs.profiling_types import ProfilerType
 
 
 # ----------------------------------------------------------------------------
@@ -4006,25 +3913,6 @@ def ep_enabled(config):
   return ep_rank != 1
 
 
-def get_individual_scales(scale: int) -> tuple[int, int, int, int]:
-  """Choose appropriate scales for individual dimensions based on global scale."""
-  if scale == 0:
-    raise ValueError("Global parameter scale cannot be zero.")
-  log_2_scale = math.floor(math.log2(scale))
-  if 2**log_2_scale != scale:
-    raise ValueError(
-        "Global parameter scale should be a power of two. If you want finer grained control of the model sizes "
-        "then you can explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads, "
-        "base_mlp_dim, base_num_decoder_layers and/or head_dim."
-    )
-  base_scale, rem = divmod(log_2_scale, 3)
-  num_head_scale = base_scale + int(rem > 0)
-  mlp_dim_scale = num_head_scale
-  emb_scale = base_scale + int(rem > 1)
-  layer_scale = base_scale
-  return emb_scale, num_head_scale, mlp_dim_scale, layer_scale
-
-
 class MaxTextConfig(
     RunInfo,
     Checkpointing,
@@ -4853,245 +4741,25 @@ class MaxTextConfig(
     # `ocp.Checkpointer` in `model_creation_utils.from_pretrained`, before the manager is
     # ever consulted, so it stays legal with saving turned off.
     validate_checkpoint_storage_config(self)
-    if self.moba and self.attention not in ("dot_product"):
-      raise ValueError("MoBA is only supported with dot_product attention.")
-    if self.decoder_block == DecoderBlockType.DEEPSEEK4:
-      match (self.attention, self.use_tokamax_splash):
-        case ("dot_product", _):
-          pass
-        case ("flash", True):
-          pass
-        case _:
-          raise ValueError(
-              "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
-              "with `use_tokamax_splash=True`."
-          )
+    attention_validation.validate_attention_backend_support(self)
     if self.te_mhc and self.hardware not in ("gpu", "gpu_multiprocess"):
       raise ValueError("`te_mhc=True` requires NVIDIA GPU hardware.")
-    if self.mla_qk_head_chunk_size > 0:
-      if self.mla_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.mla_qk_head_chunk_size != 0:
-        raise ValueError(
-            f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
-            f"`num_query_heads` ({self.num_query_heads})."
-        )
-      if self.use_indexer and (
-          self.mla_qk_head_chunk_size > self.indexer_n_heads or self.indexer_n_heads % self.mla_qk_head_chunk_size != 0
-      ):
-        raise ValueError(
-            f"`mla_qk_head_chunk_size` ({self.mla_qk_head_chunk_size}) must cleanly divide exactly into "
-            f"`indexer_n_heads` ({self.indexer_n_heads})."
-        )
-    if self.csa_qk_head_chunk_size > 0:
-      if self.csa_qk_head_chunk_size > self.num_query_heads or self.num_query_heads % self.csa_qk_head_chunk_size != 0:
-        raise ValueError(
-            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
-            f"`num_query_heads` ({self.num_query_heads})."
-        )
-      if self.use_indexer and (
-          self.csa_qk_head_chunk_size > self.indexer_n_heads or self.indexer_n_heads % self.csa_qk_head_chunk_size != 0
-      ):
-        raise ValueError(
-            f"`csa_qk_head_chunk_size` ({self.csa_qk_head_chunk_size}) must cleanly divide exactly into "
-            f"`indexer_n_heads` ({self.indexer_n_heads})."
-        )
-
-    if self.use_indexer:
-      if self.attention_type not in (AttentionType.MLA.value, AttentionType.COMPRESSED.value):
-        raise ValueError(
-            f"`use_indexer=True` requires `attention_type='{AttentionType.MLA.value}'` or "
-            f"`attention_type='{AttentionType.COMPRESSED.value}'`, since only MLA and "
-            "Compressed Attention indexers produce this mask."
-        )
-      if self.q_lora_rank == 0:
-        raise NotImplementedError("Sparse indexer has not implemented for q_lora_rank = 0.")
-      supports_dot_product = self.attention == "dot_product"
-      supports_flash_splash = self.attention == "flash" and self.use_tokamax_splash
-      if not (supports_dot_product or supports_flash_splash):
-        raise ValueError(
-            f"Sparse indexer with {self.attention_type} is only supported with dot_product attention or flash "
-            "attention with tokamax splash."
-        )
-      if self.attention_type == AttentionType.MLA.value:
-        if (
-            self.attention == "flash"
-            and self.context_parallel_strategy == "all_gather"
-            and self.ici_context_parallelism * self.dcn_context_parallelism > 1
-            and self.attention_sink
-        ):
-          raise ValueError(
-              "Sparse indexer with all-gather context parallelism for flash attention does not support attention sinks."
-          )
-        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= self.max_target_length:
-          raise ValueError(
-              f"`indexer_topk` ({self.indexer_topk}) must be < `max_target_length` ({self.max_target_length}) "
-              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
-              "short-circuits to select all tokens and no indexer loss is produced."
-          )
-      elif self.attention_type == AttentionType.COMPRESSED.value:
-        # DeepSeek-V4 CSA natively uses a compression rate of 4 for the indexer blocks.
-        compress_rate = 4
-        max_blocks = self.max_target_length // compress_rate
-        if self.indexer_loss_scaling_factor > 0.0 and self.indexer_topk >= max_blocks:
-          raise ValueError(
-              f"`indexer_topk` ({self.indexer_topk}) must be < total compressed blocks ({max_blocks}) "
-              f"(max_target_length={self.max_target_length} // compress_rate={compress_rate}) "
-              "when indexer loss is enabled (`indexer_loss_scaling_factor > 0.0`); otherwise the indexer "
-              "short-circuits to select all compressed blocks and no indexer loss is produced."
-          )
-    if not self.use_indexer and self.indexer_cutoff_threshold != RematLocation.REMAT:
-      raise ValueError(
-          f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
-          "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
-      )
-    if self.use_mla_absorbed_mqa:
-      if self.attention_type != AttentionType.MLA.value:
-        raise ValueError(
-            f"`use_mla_absorbed_mqa=True` requires `attention_type='{AttentionType.MLA.value}'`, "
-            f"but found attention_type='{self.attention_type}'."
-        )
-      if self.attention not in ("dot_product", "autoselected"):
-        raise ValueError(
-            f"`use_mla_absorbed_mqa=True` requires `attention` to be 'dot_product' or 'autoselected', "
-            f"but found attention='{self.attention}'."
-        )
-      if self.mla_naive_kvcache:
-        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with `mla_naive_kvcache=True`.")
-      has_quant = (
-          self.quantize_kvcache
-          or self.use_qwix_quantization
-          or self.use_manual_quantization
-          or self.experimental_sa_quant_q_fp8
-          or self.experimental_sa_quant_k_fp8
-          or (self.quantization and self.quantization not in (QuantizationType.NONE, QuantizationType.TE_NO_QUANT))
-      )
-      if has_quant:
-        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with quantization or FP8 options.")
+    deepseek_attention_validation.validate_qk_head_chunking(self)
+    deepseek_attention_validation.validate_sparse_indexer(self)
+    deepseek_attention_validation.validate_mla_absorbed_mqa(self)
     attention_validation.validate_attention_type(self)
     validate_training_objective(self)
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
-    if self.mtp_reuse_input_embedding and self.use_multimodal:
-      raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
-    if self.mtp_norm_main_hidden_state:
-      if self.num_vocab_tiling > 1:
-        raise ValueError(
-            "`mtp_norm_main_hidden_state` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
-            " decoder skips `apply_output_head` in train mode and `decoder_norm` runs later inside"
-            " `vocab_tiling_nnx_loss`, so the MTP block would still receive the un-normalized hidden state."
-        )
-      if self.mhc_expansion_rate > 1:
-        raise ValueError(
-            "`mtp_norm_main_hidden_state` is not supported with `mhc_expansion_rate > 1`: the MTP layers expect"
-            " the expanded 4D hyper-connection state, which the decoder's final norm collapses to 3D."
-        )
-    if self.quantize_mtp:
-      if self.mtp_num_layers <= 0:
-        raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
-      if self.quantization != "fp8_full":
-        raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
-    if self.quantize_logits_proj:
-      if self.logits_via_embedding:
-        raise ValueError(
-            "`quantize_logits_proj` cannot be enabled when input and output embeddings are tied"
-            " (`logits_via_embedding=True`)."
-        )
-      if self.quantization != "fp8_full":
-        raise ValueError("`quantize_logits_proj` can only be enabled when `quantization='fp8_full'`.")
-      if self.num_vocab_tiling > 1:
-        raise ValueError(
-            "`quantize_logits_proj` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
-            " decoder skips `apply_output_head` in train mode, so `logits_dense` is absent from the forward"
-            " pass that `qwix.quantize_model` traces, and the projection runs later inside"
-            " `vocab_tiling_nnx_loss` on a merged model copy. Whether interception survives that path is"
-            " unverified; this combination is rejected until it is tested."
-        )
-      if self.logits_dot_in_fp32:
-        raise ValueError(
-            "`logits_dot_in_fp32=True` is rejected with `quantize_logits_proj=True`: the fp32 cast on"
-            " the logits operands is undone by requantization at the projection matmul, so the projection"
-            " remains quantized while believing you configured fp32. Set `quantize_logits_proj=False` to keep"
-            " the projection in fp32."
-        )
-    if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
-      raise ValueError(
-          "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
-          " the gate operands is undone by requantization at the projection matmul, so the projection"
-          " remains quantized while believing you configured fp32. The flag's remaining effects (bias"
-          " add, score function, gemma4 router norm) are second-order next to the quantization error."
-          " Set `quantize_router_proj=False` to keep the projection in fp32."
-      )
-    if (
-        self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
-        and self.gradient_accumulation_steps > 1
-    ):
-      raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
-    if self.engram_layers:
-      if not self.hf_access_token or not self.tokenizer_path:
-        raise ValueError(
-            "Engram requires both 'hf_access_token' and 'tokenizer_path' " "to load the Hugging Face tokenizer."
-        )
-      if len(self.engram_vocab_bases) != (self.engram_max_ngram_size - 1):
-        raise ValueError(
-            f"Engram vocab size mismatch: expected {self.engram_max_ngram_size - 1} (max_ngram_size - 1), "
-            f"but got {self.engram_vocab_bases}."
-        )
+    validate_mtp_main_hidden_state(self)
+    validate_training_quantization(self)
+    validate_engram(self)
     if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
       raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
     if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:
       raise ValueError("te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True.")
     if self.num_experts > 1:
-      if self.moe_mlp_dim <= 0:
-        raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
-      is_fully_moe = (
-          self.interleave_moe_layer_step == 1
-          and self.first_num_dense_layers == 0
-          and self.inhomogeneous_layer_cycle_interval == 1
-      )
-      if is_fully_moe and self.base_mlp_dim != self.base_moe_mlp_dim:
-        if self.decoder_block == DecoderBlockType.QWEN3_MOE:
-          self.base_mlp_dim = self.base_moe_mlp_dim
-          _, _, mlp_dim_scale, _ = get_individual_scales(self.global_parameter_scale)
-          self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
-        elif self.decoder_block != DecoderBlockType.GEMMA4:
-          # Allow Gemma 4 to keep distinct shared and routed MLP dimensions
-          raise ValueError(
-              "For a fully MoE model, base_mlp_dim must equal base_moe_mlp_dim. "
-              f"Got base_mlp_dim={self.base_mlp_dim}, base_moe_mlp_dim={self.base_moe_mlp_dim}."
-          )
-      if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
-        raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if (
-          self.routed_bias
-          and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
-      ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
-      if self.te_moe_block and not self.sparse_matmul:
-        raise ValueError("te_moe_block=True requires sparse_matmul=True.")
-      if self.te_moe_quantize_before_fsdp_all_gather:
-        if not self.te_moe_block or self.te_gmm_quantization != TEGroupedGemmQuantizationType.TE_MXFP8:
-          raise ValueError(
-              "te_moe_quantize_before_fsdp_all_gather=True requires te_moe_block=True and te_gmm_quantization=te_mxfp8."
-          )
-        if self.use_2d_fsdp_sharding:
-          raise ValueError("te_moe_quantize_before_fsdp_all_gather=True does not support 2D FSDP weight sharding.")
-      if self.te_moe_block and not self.prefuse_moe_weights:
-        raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
-      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
-        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
-      if self.te_moe_block and self.norm_topk_prob:
-        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
-      if self.te_moe_block and self.use_random_routing:
-        raise ValueError("te_moe_block=True does not support use_random_routing=True.")
-      if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
-        raise ValueError("te_moe_block=True does not currently support Llama4 routing semantics.")
-      if self.te_moe_block and not self.te_gmm_quantization:
-        raise ValueError(
-            "te_gmm_quantization must be specified when te_moe_block=True. "
-            "te_gmm_quantization=te_no_quant is supported for BF16."
-        )
-      if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
-        raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
+      validate_moe_architecture(self)
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
       self.validate_moe_log_max_load_ratio()
@@ -5106,97 +4774,16 @@ class MaxTextConfig(
     if self.warmup_skip_train_dropless and not self.warmup_programs_in_init:
       raise ValueError("warmup_skip_train_dropless=True requires warmup_programs_in_init=True.")
 
-    if self.enable_streaming_diloco:
-      if not self.scan_layers:
-        raise ValueError("enable_streaming_diloco=True requires scan_layers=True.")
-      if self.num_diloco_fragments is not None and self.num_diloco_fragments > 1:
-        num_transformer_fragments = self.num_diloco_fragments - 1
-        if self.num_decoder_layers % num_transformer_fragments != 0:
-          raise ValueError(
-              f"The number of decoder layers ({self.num_decoder_layers}) must be divisible by "
-              f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
-          )
-      if self.diloco_bucketize_non_scanned and self.shard_optimizer_over_data:
-        # train_compile.py derives the outer param shardings after the Zero-1 overlay, the runtime path before it,
-        # so the bucket split axes could differ between AOT and training.
-        raise ValueError("diloco_bucketize_non_scanned does not support shard_optimizer_over_data (Zero-1).")
+    validate_streaming_diloco(self)
 
     # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with scanned layers.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
           f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
-    if self.use_multimodal:
-      # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
-      # support is pending clipped-linears in the vision encoder.
-      if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
-        raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
-      valid_mm_models = (
-          "gemma3-4b", "gemma3-12b", "gemma3-27b", "gemma4-26b", "gemma4-31b", "llama4-17b-16e",
-          "llama4-17b-128e", "qwen3-omni-30b-a3b", "qwen3-vl-2b", "qwen3-vl-4b", "qwen3-vl-30b-a3b",
-          "qwen3.5-9b", "qwen3.5-35b-a3b", "qwen3.5-397b-a17b", "maxtext-omni-gemma3-qwen3", "weaver-mini",
-          "weaver-max", "weaver-mini-diffuser", "ming-3.0-audio-tiny",
-      )
-      if self.model_name not in valid_mm_models and self.model_name != "default":
-        raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
-      if self.use_sft:
-        if not self.sft_train_on_completion_only:
-          raise ValueError("For multimodal SFT, `sft_train_on_completion_only` must be True.")
-        if self.packing:
-          raise ValueError("For multimodal SFT, `packing` is not yet supported.")
-    if self.use_dpo:
-      if self.packing:
-        raise ValueError("For DPO/ORPO, `packing` is not supported.")
-      if self.dpo.max_prompt_length is None:
-        self.dpo.max_prompt_length = self.max_target_length // 2
-      if self.dpo.max_prompt_length >= self.max_target_length:
-        raise ValueError(
-            f"dpo.max_prompt_length ({self.dpo.max_prompt_length}) must be less than max_target_length"
-            f" ({self.max_target_length})."
-        )
-    if self.use_sft and self.use_dpo:
-      raise ValueError("Only one of `use_sft` or `use_dpo` can be True.")
-    if self.shard_mode == ShardMode.EXPLICIT:
-      supported_decoders = {
-          "simple", "simple_mlp", "llama2", "llama4", "deepseek", "gpt3", "gpt_oss", "mistral", "mixtral",
-          "qwen2", "qwen3", "qwen3_moe", "qwen3_custom_moe", "qwen3_5", "qwen3_next", "gemma", "gemma2",
-          "gemma3", "gemma4", "gemma4_small",
-      }
-      if self.decoder_block.value not in supported_decoders:
-        raise ValueError(
-            f"Decoder '{self.decoder_block.value}' is not supported with 'explicit' sharding. "
-            f"Supported options are: {sorted(supported_decoders)}."
-        )
-      if self.use_multimodal:
-        raise ValueError(
-            "'explicit' sharding is not supported with `use_multimodal`; the vision and audio encoders "
-            "have not been onboarded to explicit sharding yet."
-        )
-      # Both hybrid decoders share the same GatedDeltaNet sublayers, so the same gaps.
-      if self.decoder_block in (DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_NEXT):
-        decoder_name = self.decoder_block.value
-        if self.num_experts > 1 and not self.sparse_matmul:
-          raise ValueError(
-              f"'explicit' sharding with the '{decoder_name}' decoder requires"
-              " `sparse_matmul=True`; the dense matmul MoE path has not been"
-              " onboarded to explicit sharding yet."
-          )
-        gdn_context_parallel_size = (
-            self.ici_context_parallelism
-            * self.dcn_context_parallelism
-            * self.ici_context_usp_ulysses_parallelism
-            * self.dcn_context_usp_ulysses_parallelism
-        )
-        if gdn_context_parallel_size > 1:
-          raise ValueError(
-              f"'explicit' sharding with the '{decoder_name}' decoder does not"
-              " support context parallelism yet. The GatedDeltaNet short"
-              " convolution left-pads the sequence by `gdn_conv_kernel_dim -"
-              " 1` and slices the result back, which explicit sharding cannot"
-              " express on a sharded sequence axis. Use `shard_mode=auto` when"
-              " `ici_context_parallelism` or"
-              " `ici_context_usp_ulysses_parallelism` is set."
-          )
+    validate_multimodal_support(self)
+    validate_alignment_objectives(self)
+    validate_explicit_sharding(self)
     if self.context_sharding not in ("context", "expert"):
       raise ValueError(f"Assigned context_sharding f{self.context_sharding} is not supported.")
     if self.ulysses_context_sharding != "context_usp_ulysses":
@@ -5229,43 +4816,7 @@ class MaxTextConfig(
     if abs(dcn_product) > 1:
       if not self.num_slices > 1:
         raise ValueError("DCN parallelism requested but only one slice available.")
-    if self.decoder_block == DecoderBlockType.LLAMA4:
-      if self.capacity_factor >= 0:
-        raise ValueError(
-            "Llama4 decoder has not been tested with capacity_factor >= 0 -- please set that value to -1 for now!"
-        )
-      if self.num_experts_per_tok > 1:
-        raise ValueError("Only top-1 routing is supported for Llama4 for now!")
-      if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
-        raise ValueError(
-            f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
-            f"({self.interleave_moe_layer_step})"
-        )
-    if self.decoder_block == DecoderBlockType.ENVY:
-      if self.base_num_decoder_layers % self.interleave_moe_layer_step != 0:
-        raise ValueError(
-            f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
-            f"({self.interleave_moe_layer_step})"
-        )
-    if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
-      if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
-        raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
-      rotary_dim = int(self.head_dim * self.partial_rotary_factor)
-      if rotary_dim % 2 != 0:
-        raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
-      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
-      if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
-        raise ValueError(
-            "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
-            "layers carry a recurrence, so device order is sequence order: device i composes the state left by "
-            "device i-1. DUAL_CHUNK_SWAP hands device 0 the first and last chunks, device 1 the second and "
-            "second-to-last, and so on, which composes the segments out of order. Softmax attention tolerates the "
-            "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
-            "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
-        )
-    else:
-      if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
-        raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+    validate_decoder_block_constraints(self)
 
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
@@ -5346,99 +4897,7 @@ class MaxTextConfig(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
           f"`python3 -m lilax._backend.optimizers.muon_config.dimensions {self.model_name} True`"
       )
-    if self.force_q_layout and not self.use_jax_splash:
-      raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
-    if self.use_qk_clip and self.attention_type != "mla":
-      raise ValueError(
-          f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
-      )
-    if self.use_qk_clip and self.attn_logits_soft_cap is not None:
-      raise ValueError(
-          "QK-Clip monitors raw dot products, but attn_logits_soft_cap is enabled. "
-          "Recording pre-cap max_logits is not fully supported yet. "
-          "Please disable attn_logits_soft_cap when using use_qk_clip."
-      )
-    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
-      raise ValueError(
-          "Q quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
-      )
-    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
-      raise ValueError(
-          "K quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
-      )
-    if self.sa_qproj_bwd_bf16 and not (
-        self.quantization == "fp8_full" and self.use_qwix_quantization and not self.use_batch_split_schedule
-    ):
-      raise ValueError(
-          "sa_qproj_bwd_bf16=True only takes effect with quantization='fp8_full', use_qwix_quantization=True and"
-          " use_batch_split_schedule=False."
-      )
-    if self.sa_q_prescaled_log2e:
-      if not (
-          self.experimental_sa_quant_q_fp8
-          and self.sa_use_base2_exp
-          and self.use_tokamax_splash
-          and self.attention == "flash"
-      ):
-        raise ValueError(
-            "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
-            " use_tokamax_splash=True and attention='flash'."
-        )
-      # The LOG2E fold is only in the MLA query path (attention_mla.py).
-      if self.attention_type != "mla":
-        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
-      if self.use_mla_absorbed_mqa:
-        raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
-      # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no
-      # q_prescaled_log2e), which would apply the LOG2E-scaled q as natural-exp logits.
-      if self.context_parallel_strategy.lower() in ("ring", "usp"):
-        raise ValueError(
-            "sa_q_prescaled_log2e is not supported with context_parallel_strategy"
-            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
-        )
-      if self.sa_dkv_reuse_scaled_q:
-        raise ValueError("sa_q_prescaled_log2e subsumes sa_dkv_reuse_scaled_q; set only one of them.")
-    if self.sa_dkv_reuse_scaled_q:
-      if not (self.sa_use_base2_exp and self.use_tokamax_splash and self.attention == "flash"):
-        raise ValueError(
-            "sa_dkv_reuse_scaled_q only takes effect with sa_use_base2_exp=True, use_tokamax_splash=True and"
-            " attention='flash'."
-        )
-      if self.context_parallel_strategy.lower() in ("ring", "usp"):
-        raise ValueError(
-            "sa_dkv_reuse_scaled_q is not supported with context_parallel_strategy"
-            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
-        )
-    if self.sa_ignore_segment_ids:
-      # Mirrors the use_stream_chunking=None resolution in tfds_data_processing_c4_mlperf.py: stream
-      # chunking (uniform segment ids per row) is the default for pre-tokenized data.
-      def _stream_chunked(tokenize_data: bool) -> bool:
-        return self.use_stream_chunking is True or (self.use_stream_chunking is None and not tokenize_data)
-
-      if not (
-          self.dataset_type == DatasetType.C4MLPERF
-          and _stream_chunked(self.tokenize_train_data)
-          and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
-      ):
-        raise ValueError(
-            "sa_ignore_segment_ids requires dataset_type='c4_mlperf' with"
-            " stream chunking for train and eval (use_stream_chunking=True, or"
-            " None with pre-tokenized data); packed sequences need the segment"
-            " mask."
-        )
-      if self.attention != "flash":
-        raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
-      # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
-      if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
-        raise ValueError(
-            "sa_ignore_segment_ids supports attention_type in ('global',"
-            " 'mla', 'local_sliding', 'chunk'); got"
-            f" attention_type='{self.attention_type}'."
-        )
-      if self.use_lineage:
-        raise ValueError("sa_ignore_segment_ids is not supported with use_lineage=True.")
+    validate_splash_attention_flags(self)
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
@@ -5464,12 +4923,7 @@ class MaxTextConfig(
       if self.use_qwix_quantization:
         raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
 
-    # Validation for GMM v2
-    if self.use_gmm_v2:
-      if not self.use_tokamax_gmm:
-        raise ValueError("GMM v2 requires `use_tokamax_gmm=True`.")
-      if self.use_batch_split_schedule:
-        raise ValueError("GMM v2 is not supported with a batch split schedule.")
+    validate_gmm_v2(self)
     self._validate_te_grouped_gemm()
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
@@ -5481,90 +4935,9 @@ class MaxTextConfig(
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `fused_qkv`.")
       if self.share_kv_projections:
         raise ValueError("`num_kv_shared_layers > 0` is not compatible with `share_kv_projections`.")
-    if self.num_moe_token_chunks > 1:
-      if self.max_target_length % self.num_moe_token_chunks != 0:
-        raise ValueError(
-            f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
-            f"max_target_length={self.max_target_length}."
-        )
-    if self.moe_accumulate_chunk_wgrad and not (
-        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
-    ):
-      raise ValueError(
-          "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
-          " and prefuse_moe_weights=False."
-      )
-    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
-      raise ValueError(
-          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
-      )
-    if self.moe_bwd_prequant_before_unsort and not (
-        self.moe_tc_ragged_3d_dispatch and self.moe_tc_ragged_weights_on_activation
-    ):
-      raise ValueError(
-          "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
-          " moe_tc_ragged_weights_on_activation=True."
-      )
-    if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
-      raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
-    if self.moe_bwd_prequant_before_unsort and self.quantization:
-      # The fused unsort applies the weight / act / bwd scales to the token-order cotangent, so they must be
-      # per-tensor; the config's qwix rule keeps channelwise axes, so only fixed calibration gives that. With
-      # moe_combine_bwd_direct_qarray, each EP shard also scales its cotangent before the all-gather, so a dynamic
-      # (shard-local) scale would differ across shards.
-      dynamic = [
-          f"{name}_quantization_calibration_method={method!r}"
-          for name in ("weight", "act", "bwd")
-          if not (method := getattr(self, f"{name}_quantization_calibration_method")).lower().startswith("fixed")
-      ]
-      if dynamic:
-        raise ValueError(
-            "moe_bwd_prequant_before_unsort=True with quantization requires fixed weight, act and bwd calibration,"
-            f" got {', '.join(dynamic)}."
-        )
-    if self.moe_combine_bwd_direct_qarray and self.moe_quantize_combine_bwd_method:
-      raise ValueError(
-          f"moe_quantize_combine_bwd_method={self.moe_quantize_combine_bwd_method!r} has no effect with"
-          " moe_combine_bwd_direct_qarray=True: the fused EP combine quantizes the cotangent with the gmm bwd rule."
-          " Unset moe_quantize_combine_bwd_method."
-      )
-    if self.moe_3d_dlhs_partial_sum and not (self.moe_accumulate_wi_dlhs and self.moe_tc_ragged_3d_gmm):
-      raise ValueError("moe_3d_dlhs_partial_sum=True requires moe_accumulate_wi_dlhs=True and moe_tc_ragged_3d_gmm=True.")
-    if self.moe_flat_fsdp_weights:
-      if not (
-          self.sparse_matmul
-          and (self.shard_embed_moe_on_fsdp or not self.quantization)
-          and ((self.use_tokamax_gmm and self.use_gmm_v2) or self.prefetch_fsdp_weights)
-          and not self.prefuse_moe_weights
-      ):
-        raise ValueError(
-            "moe_flat_fsdp_weights=True requires sparse_matmul=True, (shard_embed_moe_on_fsdp=True or unquantized),"
-            " ((use_tokamax_gmm=True and use_gmm_v2=True) or prefetch_fsdp_weights=True) and prefuse_moe_weights=False."
-        )
-      # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
-      if (
-          self.shard_exp_on_fsdp
-          or self.use_2d_fsdp_sharding
-          or self.use_batch_split_schedule
-          or self.weight_dtype in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2)
-          or self.decoder_block == DecoderBlockType.GEMMA4
-      ):
-        raise ValueError(
-            "moe_flat_fsdp_weights=True is incompatible with shard_exp_on_fsdp, use_2d_fsdp_sharding,"
-            " use_batch_split_schedule, fp8 weight_dtype and the gemma4 decoder block."
-        )
+    validate_moe_kernel_options(self)
 
-    if self.use_lineage:
-      if not self.scan_layers:
-        raise ValueError("use_lineage=True requires scan_layers=True.")
-      if self.decoder_block != DecoderBlockType.DEEPSEEK:
-        raise ValueError(f"use_lineage=True requires decoder_block='deepseek', got decoder_block={self.decoder_block!r}.")
-      if self.attention_type != "mla":
-        raise ValueError(f"use_lineage=True requires attention_type='mla', got attention_type={self.attention_type!r}.")
-      if self.rope_type != RopeType.YARN:
-        raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
-      if self.capacity_factor <= 0:
-        raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+    validate_lineage(self)
 
     # The freqs_cis table lookup clamps positions >= max_position_embeddings to the last row, while
     # rope_direct_position_freqs uses the true angle; keep positions in range so both settings agree.
@@ -5575,49 +4948,7 @@ class MaxTextConfig(
       )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
-    ici_map = {
-        "diloco": self.ici_diloco_parallelism,
-        "data": self.ici_data_parallelism,
-        "stage": self.ici_pipeline_parallelism,
-        "fsdp": self.ici_fsdp_parallelism,
-        "fsdp_transpose": self.ici_fsdp_transpose_parallelism,
-        "sequence": self.ici_sequence_parallelism,
-        "context": self.ici_context_parallelism,
-        "context_usp_ulysses": self.ici_context_usp_ulysses_parallelism,
-        "context_autoregressive": self.ici_context_autoregressive_parallelism,
-        "tensor": self.ici_tensor_parallelism,
-        "tensor_sequence": self.ici_tensor_sequence_parallelism,
-        "model": self.ici_tensor_parallelism,
-        "expert": self.ici_expert_parallelism,
-        "autoregressive": self.ici_autoregressive_parallelism,
-        "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
-        "dcp": (1),
-        "pcp": (1),
-    }
-    self.ici_parallelism = _resolve_parallelism(self.ici_parallelism, ici_map, self.mesh_axes)
-
-    dcn_map = {
-        "diloco": self.dcn_diloco_parallelism,
-        "data": self.dcn_data_parallelism,
-        "stage": self.dcn_pipeline_parallelism,
-        "fsdp": self.dcn_fsdp_parallelism,
-        "fsdp_transpose": self.dcn_fsdp_transpose_parallelism,
-        "sequence": self.dcn_sequence_parallelism,
-        "context": self.dcn_context_parallelism,
-        "context_usp_ulysses": self.dcn_context_usp_ulysses_parallelism,
-        "context_autoregressive": self.dcn_context_autoregressive_parallelism,
-        "tensor": self.dcn_tensor_parallelism,
-        "tensor_sequence": self.dcn_tensor_sequence_parallelism,
-        "model": self.dcn_tensor_parallelism,
-        "expert": self.dcn_expert_parallelism,
-        "autoregressive": self.dcn_autoregressive_parallelism,
-        "attn_dp": (1),  # initialized to 1, vLLM will auto calculate this value based on TP and num_kv_heads
-        "attn_dp_expert": (1),  # initialized to 1, vLLM will auto calculate this value based on EP
-        "dcp": (1),
-        "pcp": (1),
-    }
-    self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
+    resolve_parallelism_lists(self)
 
     validate_optimizer_sharding(self)
 
@@ -5625,32 +4956,8 @@ class MaxTextConfig(
       self._validate_jax_mx_quantization()
 
     # Diloco params
-    # Resolve dcn_diloco_parallelism=-1 if left unspecified, using the same convention as dcn_data_parallelism.
-    # num_diloco_replicas must be computed after this resolution, so we resolve it here rather than
-    # relying on fill_unspecified_mesh_axes (which runs later during mesh creation).
-    if self.dcn_diloco_parallelism == -1:
-      other_dcn_product = prod(v for v in self.dcn_parallelism if v != -1)
-      assert other_dcn_product > 0 and self.num_slices % other_dcn_product == 0, (
-          f"Cannot resolve dcn_diloco_parallelism=-1: num_slices={self.num_slices} is not divisible "
-          f"by the product of other DCN parallelism values ({other_dcn_product})."
-      )
-      self.dcn_diloco_parallelism = self.num_slices // other_dcn_product
-      # Keep dcn_parallelism list consistent with the resolved value.
-      diloco_idx = self.dcn_parallelism.index(-1)
-      self.dcn_parallelism[diloco_idx] = self.dcn_diloco_parallelism
-    self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
-
-    # (b/496973624) use_tokamax_gmm is incompatible with enable_diloco: drjax.map_fn wraps
-    # the train step in jax.vmap over the diloco axis, which causes JAX to batch through
-    # lax.scan (layer scan).
-    # Tokamax's vmap_rule then tries to reconstruct GroupSizes with a batched 2-D value, but
-    # GroupSizes.__post_init__ requires exactly a 1-D shape.
-    if self.enable_diloco and self.use_tokamax_gmm:
-      raise ValueError(
-          "use_tokamax_gmm=True is not compatible with enable_diloco=True due to a known "
-          "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "
-          "Please set use_tokamax_gmm=False."
-      )
+    resolve_diloco_replicas(self)
+    validate_diloco_grouped_matmul(self)
 
     self._validate_check_vma_is_supported()
     if self.defer_small_all_reduces:

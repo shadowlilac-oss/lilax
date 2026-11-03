@@ -69,12 +69,12 @@ from lilax._backend.kernels.attention import ulysses_attention
 from lilax._backend.kernels.attention import usp_attention
 from lilax._backend.kernels.attention.ragged_attention import ragged_gqa
 from lilax._backend.kernels.attention.ragged_attention import ragged_mha
-from lilax._backend.layers import attention_masks
 from lilax._backend.layers import nnx_wrappers
+from lilax._backend.layers.attention_masks import dense_masks
+from lilax._backend.layers.attention_masks import splash_mask_policy
 from lilax._backend.layers.quantizations import AqtQuantization as Quant
 from lilax._backend.utils import max_utils
 from lilax._backend.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
-import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 
@@ -171,244 +171,6 @@ def _inject_te_softmax_offset(dpa_layer, softmax_offset: Array) -> None:
         f"{sorted('/'.join(map(str, path)) for path, _ in flat_state)}."
     )
   nnx.update(dpa_layer, nnx.from_flat_state([(offset_path, nnx.Param(softmax_offset))]))
-
-
-# TODO(agagik): change splash_attention_mask._ComputableMask to be non protected
-class ChunkedCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access
-  """Lazy chunked causal mask.
-
-  Attention is causal within each chunk (0, K), (K, 2K), (2K, 3K), ... tokens
-  attend to each other but not across chunks.
-  Llama4 models use interleaved chunk attention along with global attention.
-
-  This mask class inherits from splash_attention_mask._ComputableMask and is
-  designed to be used with Splash Attention.
-  It allows the mask logic to be computed on-the-fly or fused into the attention
-  kernel, avoiding the memory cost of
-  materializing the full (sequence_length, sequence_length) boolean mask array,
-  which can be prohibitive for long sequences.
-  """
-
-  #: The size of each attention chunk.
-  chunk_size: int
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      chunk_size: int,
-      shard_count: int = 1,
-  ):
-    if chunk_size <= 0:
-      raise ValueError("chunk_size must be positive")
-    self.chunk_size = chunk_size
-
-    # Define the mask function for chunk attention
-    def chunked_causal_mask_function(q_ids, kv_ids):
-      """Computes the mask logic for the given slice indices."""
-      if q_ids.size == 0 or kv_ids.size == 0:
-        return np.empty((q_ids.shape[0], kv_ids.shape[1]), dtype=np.bool_)
-
-      # Condition 1: Same chunk
-      q_chunk = q_ids // self.chunk_size
-      kv_chunk = kv_ids // self.chunk_size
-      same_chunk = q_chunk == kv_chunk
-
-      # Condition 2: Causal
-      causal = q_ids >= kv_ids
-
-      return same_chunk & causal
-
-    # Initialize the parent ComputableMask with this function
-    super().__init__(
-        shape=shape,
-        mask_function=chunked_causal_mask_function,
-        shard_count=shard_count,
-    )
-
-  # Implement equality and hashing based on relevant attributes
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-    # Compare shape, chunk_size, and the underlying q_sequence array
-    return (
-        self.shape == other.shape
-        and self.chunk_size == other.chunk_size
-        and np.array_equal(self.q_sequence, other.q_sequence)
-    )
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.chunk_size,
-            self.q_sequence.tobytes() if self.q_sequence is not None else None,
-        )
-    )
-
-
-class BlockCausalMask(splash_attention_mask._ComputableMask):  # pylint: disable=protected-access,abstract-method
-  """Lazy mask with bidirectional attention within causal blocks."""
-
-  causal_block_size: int
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      causal_block_size: int,
-      shard_count: int = 1,
-  ):
-    if causal_block_size <= 0:
-      raise ValueError("causal_block_size must be positive")
-    self.causal_block_size = causal_block_size
-
-    def block_causal_mask_function(q_ids, kv_ids):
-      return (q_ids // self.causal_block_size) >= (kv_ids // self.causal_block_size)
-
-    super().__init__(
-        shape=shape,
-        mask_function=block_causal_mask_function,
-        shard_count=shard_count,
-    )
-
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-    return (
-        self.shape == other.shape
-        and self.causal_block_size == other.causal_block_size
-        and np.array_equal(self.q_sequence, other.q_sequence)
-    )
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.causal_block_size,
-            self.q_sequence.tobytes() if self.q_sequence is not None else None,
-        )
-    )
-
-
-class HCAStaticMask(splash_attention_mask.Mask):
-  """Static compile-time mask for DeepSeek-V4 Heavily Compressed Attention (HCA).
-
-  Defines coarse-block coordinates and deduplicated partial block patterns for
-  Splash Attention with pre-packed bitmasks loaded into VMEM/SMEM. Evaluates
-  analytical boolean slices on host CPU during compilation, eliminating runtime VPU
-  arithmetic overhead without materializing dense boolean mask arrays in HBM.
-
-  Attributes:
-    shape: (seq_len, aligned_kv_len) tuple.
-    local_kv_len: Unpadded local sequence length.
-    compressed_kv_len: Number of active compressed tokens.
-    pad_kv_total: Prepend tile padding tokens between local and compressed KV.
-    compress_ratio: Compression ratio for HCA (e.g. 128). Must be positive.
-    local_window: Local sliding-window size (e.g. 128).
-  """
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      local_kv_len: Optional[int] = None,
-      compressed_kv_len: Optional[int] = None,
-      pad_kv_total: int = 0,
-      compress_ratio: int = 128,
-      local_window: Optional[int] = 128,
-      shard_count: int = 1,
-  ):
-    # shard_count is retained for Splash Attention Mask API compatibility;
-    # HCA static coordinates do not shard local window math across sequence axes.
-    del shard_count
-    if compress_ratio <= 0:
-      raise ValueError(f"compress_ratio must be positive, got {compress_ratio}")
-    self._shape = shape
-    self.local_kv_len = local_kv_len if local_kv_len is not None else shape[0]
-    if self._shape[0] > self.local_kv_len and pad_kv_total <= 0:
-      raise ValueError(
-          f"pad_kv_total must be > 0 when query sequence is padded (shape[0]={self._shape[0]} > local_kv_len={self.local_kv_len})."
-      )
-    self.compressed_kv_len = (
-        compressed_kv_len if compressed_kv_len is not None else max(0, self.local_kv_len // compress_ratio)
-    )
-    self.pad_kv_total = pad_kv_total
-    self.compress_ratio = compress_ratio
-    self.local_window = local_window
-
-  @property
-  def shape(self) -> tuple[int, int]:
-    return self._shape
-
-  def __getitem__(self, idx: tuple[slice, slice]) -> np.ndarray:
-    if len(idx) != 2:
-      raise NotImplementedError(f"Unsupported slice: {idx}")
-    q_slice, kv_slice = idx
-    if not isinstance(q_slice, slice) or not isinstance(kv_slice, slice):
-      raise NotImplementedError(f"Unsupported slice: {idx}")
-
-    q_slice = splash_attention_mask._fill_slice(q_slice, self.shape[0])
-    kv_slice = splash_attention_mask._fill_slice(kv_slice, self.shape[1])
-
-    rows = np.arange(q_slice.start, q_slice.stop, dtype=np.int32)[:, None]
-    cols = np.arange(kv_slice.start, kv_slice.stop, dtype=np.int32)[None, :]
-
-    if rows.size == 0 or cols.size == 0:
-      return np.empty((rows.shape[0], cols.shape[1]), dtype=np.bool_)
-
-    valid_row = rows < self.local_kv_len
-
-    diff = rows - cols
-    if self.local_window is None:
-      local_m = valid_row & (diff >= 0) & (cols < self.local_kv_len)
-    elif self.local_window > 0:
-      local_m = valid_row & (diff >= 0) & (diff < self.local_window) & (cols < self.local_kv_len)
-    else:
-      local_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
-
-    c_idx = cols - self.local_kv_len - self.pad_kv_total
-    c_thresh = (rows + 1) // self.compress_ratio
-    comp_m = valid_row & (c_idx >= 0) & (c_idx < c_thresh) & (c_idx < self.compressed_kv_len)
-
-    # Map each padded query row 1-to-1 to a distinct padding KV column (softmax denominator = 1.0, logsumexp = 0.0).
-    # This eliminates 0 * inf = NaN in backward dkv without cross-talk or gradient bleed into real tokens.
-    if self.pad_kv_total > 0:
-      pad_cols = self.local_kv_len + ((rows - self.local_kv_len) % self.pad_kv_total)
-      pad_m = (~valid_row) & (cols == pad_cols)
-    else:
-      pad_m = np.zeros((rows.shape[0], cols.shape[1]), dtype=np.bool_)
-
-    return local_m | comp_m | pad_m
-
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-    return (
-        self.shape == other.shape
-        and self.local_kv_len == other.local_kv_len
-        and self.compressed_kv_len == other.compressed_kv_len
-        and self.pad_kv_total == other.pad_kv_total
-        and self.compress_ratio == other.compress_ratio
-        and self.local_window == other.local_window
-    )
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.local_kv_len,
-            self.compressed_kv_len,
-            self.pad_kv_total,
-            self.compress_ratio,
-            self.local_window,
-        )
-    )
-
-  def __bool__(self) -> bool:
-    raise NotImplementedError(
-        "Conversion to bool is unsupported. Could be caused by using logical" " instead of bitwise operations on masks."
-    )
 
 
 class AttentionOp(nnx.Module):
@@ -1026,6 +788,7 @@ class AttentionOp(nnx.Module):
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
+    position_row_ids = position_col_ids = None
     if use_segment_positions:
       position_row_ids = segment_positions[:, :, None]
       position_col_ids = segment_positions[:, None, :]
@@ -1060,22 +823,10 @@ class AttentionOp(nnx.Module):
       if self.sliding_window_size is None:
         raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
 
-      if use_segment_positions:
-        row_ids_sliding = position_row_ids
-        col_ids_sliding = position_col_ids
-      else:
-        row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
-        col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
-      sliding_mask = (col_ids_sliding > (row_ids_sliding - self.sliding_window_size)) & (
-          col_ids_sliding <= row_ids_sliding
+      sliding_mask = dense_masks.local_sliding_attention_mask(
+          q_seq_len, kv_seq_len, next_pos, self.sliding_window_size, use_segment_positions, position_row_ids,
+          position_col_ids, segment_positions, model_mode, decoder_segment_ids, kv_cache_part,
       )
-      if use_segment_positions:
-        sliding_mask = sliding_mask[:, None, None, :, :]
-      if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
-        decode_positions = attention_masks._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
-        if decode_positions is not None:
-          distance = decode_positions[0] - decode_positions[1]
-          sliding_mask = ((distance >= 0) & (distance < self.sliding_window_size))[:, None, None, :, :]
       output_mask = sliding_mask * output_mask
     elif attention_type == AttentionType.COMPRESSED:
       # DeepSeek-V4 Compressed Attention decomposes the full KV sequence of length
@@ -1093,91 +844,12 @@ class AttentionOp(nnx.Module):
       c_len = compressed_mask.shape[-1] if compressed_mask is not None else 0
       s_len = kv_seq_len - c_len
 
-      def get_sliding_mask(s_len):
-        """Constructs the causal and sliding window boolean mask for uncompressed tokens.
+      uncompressed_mask = dense_masks.compressed_sliding_window_mask(
+          q_seq_len, s_len, next_pos, self.sliding_window_size, use_segment_positions, position_row_ids,
+          position_col_ids, segment_positions, model_mode, decoder_segment_ids, kv_cache_part,
+      )
 
-        Handles three distinct operational modes:
-          Case 1 (Autoregressive single-token decoding):
-            Queries arrive one token at a time (q_seq_len == 1). In the KV cache,
-            active cached tokens are located at indices 0..max_valid. We map cached
-            indices to logical positions relative to abs_q, and enforce the causal
-            sliding window: 0 <= (abs_q - abs_k) < sliding_window_size.
-          Case 2 (Load-balanced Context Parallelism):
-            Tokens are distributed non-contiguously across TPU devices.
-            `segment_positions` contains the original global token indices for each
-            local slice, so row/col coordinates are derived from `position_row_ids`
-            and `position_col_ids`.
-          Case 3 (Training & standard prefill on packed sequences):
-            In packed datasets (e.g. C4), multiple documents are concatenated into
-            a single contiguous sequence buffer [0..L-1].
-            - We compute causal distance using contiguous global buffer coordinates:
-                row_ids = [0..Q-1] + next_pos,  col_ids = [0..S-1]
-                distance = row_ids - col_ids
-                in_window = (0 <= distance < sliding_window_size)
-            - IMPORTANT: We do NOT use per-document `segment_positions` (which reset
-              to 0 at each document boundary) for row_ids or col_ids here. If per-doc
-              positions were used with buffer indices, subtraction across packed
-              document boundaries would produce negative values (e.g. pos_q - col_k < 0),
-              erroneously masking out valid intra-document tokens and causing training
-              loss explosions. Document boundary isolation is handled strictly and
-              independently by `decoder_segment_ids`.
-        """
-        if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
-          # --- CASE 1: Single-token Autoregressive Decoding ---
-          decode_positions = attention_masks._decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
-          if decode_positions is not None:
-            distance = decode_positions[0] - decode_positions[1]
-            in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
-            return in_window & (distance >= 0)
-          # Safely use segment_positions if provided, or fall back to next_pos
-          if segment_positions is not None:
-            abs_q = segment_positions[:, :, None]
-          else:
-            local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
-            abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
-
-          if decoder_segment_ids is not None:
-            # Find the highest valid slot index in the KV cache for each sequence in the batch
-            is_valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
-            valid_indices = jnp.where(is_valid, jnp.arange(s_len)[None, :], -1)
-            max_valid = jnp.max(valid_indices, axis=-1, keepdims=True)  # [batch, 1]
-
-            # Determine whether each sequence in the batch is actively decoding (has valid cache slots)
-            is_ar_cache = max_valid[:, :, None] >= 0  # [batch, 1, 1]
-
-            # Active decode: align cache slot indices `i` so slot `max_valid` corresponds to `abs_q`
-            i = jnp.arange(s_len)[None, None, :]
-            abs_k_ar = abs_q - max_valid[:, :, None] + i
-            abs_k_prefill = jnp.broadcast_to(i, abs_k_ar.shape)
-
-            abs_k = jnp.where(is_ar_cache, abs_k_ar, abs_k_prefill)
-          else:
-            abs_k = jnp.arange(s_len)[None, None, :]
-
-          distance = abs_q - abs_k
-          in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
-          return in_window & (distance >= 0)
-
-        # --- CASE 2 & 3: Prefill and Training Phases (q_seq_len > 1) ---
-        if use_segment_positions:
-          # Case 2: Context Parallelism — use global token positions from CP sharding
-          row_ids = position_row_ids
-          col_ids = position_col_ids[:, :, :s_len]
-        else:
-          # Case 3: Standard Training / Prefill on Packed Sequences.
-          # Use contiguous global buffer coordinates so causal/sliding distance is valid
-          # across all packed documents. Cross-document masking is handled by decoder_segment_ids.
-          local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
-          row_ids = jnp.arange(q_seq_len)[None, :, None] + local_next
-          col_ids = jnp.arange(s_len)[None, None, :]
-
-        distance = row_ids - col_ids
-        in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
-        return in_window & (distance >= 0)
-
-      uncompressed_mask = get_sliding_mask(s_len)
-
-      return attention_masks.combine_compressed_attention_masks(
+      return dense_masks.combine_compressed_attention_masks(
           uncompressed_mask, compressed_mask, output_mask, s_len, pad_kv_total
       )
 
@@ -1188,7 +860,7 @@ class AttentionOp(nnx.Module):
         )
         chunk_mask = (same_chunk & (position_row_ids >= position_col_ids))[:, None, None, :, :]
       else:
-        chunk_mask = attention_masks._generate_chunk_attention_mask(
+        chunk_mask = dense_masks._generate_chunk_attention_mask(
             mask_shape=(q_seq_len, kv_seq_len),
             chunk_size=self.chunk_attn_window_size,
             q_offset=next_pos,
@@ -1204,7 +876,7 @@ class AttentionOp(nnx.Module):
             :, None, None, :, :
         ]
       else:
-        block_mask = attention_masks._generate_block_causal_attention_mask(
+        block_mask = dense_masks._generate_block_causal_attention_mask(
             mask_shape=(q_seq_len, kv_seq_len),
             causal_block_size=self.causal_block_size,
             q_offset=next_pos,
@@ -1212,7 +884,7 @@ class AttentionOp(nnx.Module):
       output_mask = block_mask if output_mask is None else jnp.logical_and(output_mask, block_mask)
 
     if bidirectional_mask is not None:
-      image_mask = attention_masks._make_bidirectional_block_mask(bidirectional_mask)
+      image_mask = dense_masks._make_bidirectional_block_mask(bidirectional_mask)
       output_mask = output_mask | image_mask[:, None, None, ...]
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
@@ -2017,87 +1689,23 @@ class AttentionOp(nnx.Module):
 
       splash_q_seq_shards = cp_size
 
-      mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
-      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
-      if self.attention_type == AttentionType.FULL:
-        mask = mask_module.FullMask(mask_shape)
-      elif self.attention_type == AttentionType.COMPRESSED:
-        if not self.config.use_tokamax_splash:
-          raise ValueError("AttentionType.COMPRESSED flash attention requires use_tokamax_splash=True.")
-        if compress_ratio is None or compress_ratio <= 0:
-          raise ValueError("compress_ratio must be provided for AttentionType.COMPRESSED flash attention.")
-        if compress_ratio > 4:
-          local_kv_len = orig_q_len
-          compressed_kv_len = max(0, orig_kv_len - orig_q_len - pad_kv_total)
-          mask = HCAStaticMask(
-              shape=mask_shape,
-              local_kv_len=local_kv_len,
-              compressed_kv_len=compressed_kv_len,
-              pad_kv_total=pad_kv_total,
-              compress_ratio=compress_ratio,
-              local_window=self.sliding_window_size,
-              shard_count=splash_q_seq_shards,
-          )
-        elif compress_ratio == 4:
-          if indexer_mask is None:
-            raise ValueError("indexer_mask must be provided for CSA (compress_ratio == 4) dynamic splash attention.")
-          mask = None
-        else:
-          raise ValueError(
-              f"Unsupported compress_ratio={compress_ratio} for AttentionType.COMPRESSED. "
-              "Expected 4 for CSA (requires indexer_mask) or >4 for HCA (requires HCAStaticMask)."
-          )
-      elif self.attention_type == AttentionType.BLOCK_DIFFUSION:
-        mask_type = LoadBalancedBlockCausalMask if use_load_balanced_cp else BlockCausalMask
-        mask_kwargs = {"cp_size": cp_size} if use_load_balanced_cp else {}
-        mask = mask_type(
-            shape=mask_shape,
-            causal_block_size=self.causal_block_size,
-            **mask_kwargs,
-        )
-      else:
-        mask = mask_module.CausalMask(shape=mask_shape)
-
-      if use_load_balanced_cp and self.attention_type not in (
-          AttentionType.FULL,
-          AttentionType.BLOCK_DIFFUSION,
-          AttentionType.COMPRESSED,
-      ):
-        mask = LoadBalancedCausalMask(shape=mask_shape, cp_size=cp_size)
-
-      # Apply local masking if local sliding attention is enabled.
-      if self.attention_type == AttentionType.LOCAL_SLIDING:
-        if self.sliding_window_size is None:
-          raise ValueError("Sliding_window_size must be set if Local Sliding attention type")
-        local_window_size = (self.sliding_window_size - 1, self.sliding_window_size)
-        if use_load_balanced_cp:
-          mask &= LoadBalancedLocalMask(
-              shape=mask_shape,
-              window_size=local_window_size,
-              offset=0,
-              cp_size=cp_size,
-          )
-        else:
-          mask &= mask_module.LocalMask(
-              shape=mask_shape,
-              window_size=local_window_size,
-              offset=0,
-          )
-      elif self.attention_type == AttentionType.CHUNK:
-        if self.chunk_attn_window_size is None:
-          raise ValueError("chunk_attn_window_size must be set for chunk attention type")
-
-        if use_load_balanced_cp:
-          mask &= LoadBalancedChunkedCausalMask(
-              shape=mask_shape,
-              chunk_size=self.chunk_attn_window_size,
-              cp_size=cp_size,
-          )
-        else:
-          mask &= ChunkedCausalMask(
-              shape=mask_shape,
-              chunk_size=self.chunk_attn_window_size,
-          )
+      mask = splash_mask_policy.make_static_splash_mask(
+          attention_type=self.attention_type,
+          mask_shape=mask_shape,
+          mask_module=tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask,
+          use_tokamax_splash=self.config.use_tokamax_splash,
+          cp_size=cp_size,
+          splash_q_seq_shards=splash_q_seq_shards,
+          use_load_balanced_cp=cp_size > 1 and load_balanced_context_parallel,
+          sliding_window_size=self.sliding_window_size,
+          chunk_attn_window_size=self.chunk_attn_window_size,
+          causal_block_size=self.causal_block_size,
+          compress_ratio=compress_ratio,
+          indexer_mask=indexer_mask,
+          orig_q_len=orig_q_len,
+          orig_kv_len=orig_kv_len,
+          pad_kv_total=pad_kv_total,
+      )
     max_logit_value = None
     if not use_tokamax_ring and not use_ulysses and not use_usp and self.config.use_tokamax_splash:
       # Create mask
@@ -2859,13 +2467,13 @@ class AttentionOp(nnx.Module):
 
     if indexer_mask is not None:
       indexer_mask = indexer_mask[:, None, None, :, :]
-      attn_weights = attention_masks.apply_mask_to_logits(attn_weights, indexer_mask)
+      attn_weights = dense_masks.apply_mask_to_logits(attn_weights, indexer_mask)
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = with_logical_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
       attn_mask = with_logical_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
-      attn_weights = attention_masks.apply_mask_to_logits(attn_weights, attn_mask)
+      attn_weights = dense_masks.apply_mask_to_logits(attn_weights, attn_mask)
 
     if record_max_logits:
       max_logits_per_group = jnp.max(attn_weights, axis=(-2, -1))
@@ -3056,111 +2664,3 @@ class AttentionOp(nnx.Module):
         return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
     else:
       return prefill_unnormalized_output / prefill_exponentials_sum
-
-
-def _load_balanced_q_sequence(shape: tuple[int, int], cp_size: int):
-  """Reorders query positions the same way as load-balanced input tokens."""
-  arr = np.arange(shape[0])
-  return max_utils.reorder_mask_load_balancing(arr, cp_size, 0)
-
-
-class LoadBalancedCausalMask(splash_attention_mask._ComputableMask):
-  """Lazy causal mask, prevents the model from attending to future tokens."""
-
-  offset: int
-  shape: tuple[int, int]
-  cp_size: int
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      offset: int = 0,
-      shard_count: int = 1,
-      cp_size: int = 4,
-  ):
-    self.offset = offset
-
-    def causal_mask_function(q_ids, kv_ids):
-      if self.offset == 0:
-        return q_ids >= kv_ids
-      else:
-        return q_ids + self.offset >= kv_ids
-
-    mask_function = causal_mask_function
-    super().__init__(
-        shape=shape,
-        mask_function=mask_function,
-        shard_count=shard_count,
-    )
-    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
-
-  def __eq__(self, other: object):
-    if not isinstance(other, type(self)):
-      return NotImplemented
-    return self.shape == other.shape and self.offset == other.offset and np.array_equal(self.q_sequence, other.q_sequence)
-
-  def __hash__(self):
-    return hash(
-        (
-            type(self),
-            self.shape,
-            self.offset,
-            self.q_sequence.tobytes() if self.q_sequence is not None else None,
-        )
-    )
-
-
-class LoadBalancedLocalMask(splash_attention_mask.LocalMask):
-  """Lazy local mask with load-balanced query positions."""
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      window_size: tuple[int | None, int | None],
-      offset: int,
-      shard_count: int = 1,
-      cp_size: int = -1,
-  ):
-    super().__init__(
-        shape=shape,
-        window_size=window_size,
-        offset=offset,
-        shard_count=shard_count,
-    )
-    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
-
-
-class LoadBalancedChunkedCausalMask(ChunkedCausalMask):
-  """Lazy chunked mask with load-balanced query positions."""
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      chunk_size: int,
-      cp_size: int,
-      shard_count: int = 1,
-  ):
-    super().__init__(
-        shape=shape,
-        chunk_size=chunk_size,
-        shard_count=shard_count,
-    )
-    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)
-
-
-class LoadBalancedBlockCausalMask(BlockCausalMask):
-  """Lazy block-causal mask with load-balanced query positions."""
-
-  def __init__(
-      self,
-      shape: tuple[int, int],
-      causal_block_size: int,
-      cp_size: int,
-      shard_count: int = 1,
-  ):
-    super().__init__(
-        shape=shape,
-        causal_block_size=causal_block_size,
-        shard_count=shard_count,
-    )
-    self.q_sequence = _load_balanced_q_sequence(shape, cp_size)

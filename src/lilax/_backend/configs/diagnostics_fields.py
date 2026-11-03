@@ -7,8 +7,6 @@ from pydantic.main import BaseModel
 class ManagedMLDiagnostics(BaseModel):
   """Configuration for managed mldiagnostics."""
 
-  __module__ = "lilax._backend.configs.types"
-
   managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
   managed_mldiagnostics_on_demand_profiling: bool = Field(
       True,

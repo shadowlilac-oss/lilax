@@ -3,7 +3,12 @@
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.common.common_types import Array, DECODING_ACTIVE_SEQUENCE_INDICATOR, DEFAULT_MASK_VALUE
+from lilax._backend.common.common_types import (
+    Array,
+    DECODING_ACTIVE_SEQUENCE_INDICATOR,
+    DEFAULT_MASK_VALUE,
+    MODEL_MODE_AUTOREGRESSIVE,
+)
 
 
 def apply_mask_to_logits(logits: Array, mask: Array):
@@ -99,6 +104,118 @@ def _decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_ca
   valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
   newest = jnp.max(jnp.where(valid, jnp.arange(s_len)[None, :], -1), axis=-1)[:, None, None]
   return abs_q, abs_q - newest + slots
+
+
+def local_sliding_attention_mask(
+    q_seq_len, kv_seq_len, next_pos, sliding_window_size, use_segment_positions, position_row_ids,
+    position_col_ids, segment_positions, model_mode, decoder_segment_ids, kv_cache_part,
+):
+  """Boolean sliding-window mask over the full KV sequence for AttentionType.LOCAL_SLIDING.
+
+  Load-balanced context parallelism measures the window between `position_row_ids` and
+  `position_col_ids`; single-token decode measures it between true cache positions when they are known.
+  """
+  if use_segment_positions:
+    row_ids_sliding = position_row_ids
+    col_ids_sliding = position_col_ids
+  else:
+    row_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (q_seq_len, 1), 0) + next_pos
+    col_ids_sliding = jax.lax.broadcasted_iota(jnp.int32, (1, kv_seq_len), 1)
+  sliding_mask = (col_ids_sliding > (row_ids_sliding - sliding_window_size)) & (col_ids_sliding <= row_ids_sliding)
+  if use_segment_positions:
+    sliding_mask = sliding_mask[:, None, None, :, :]
+  if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+    decode_positions = _decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
+    if decode_positions is not None:
+      distance = decode_positions[0] - decode_positions[1]
+      sliding_mask = ((distance >= 0) & (distance < sliding_window_size))[:, None, None, :, :]
+  return sliding_mask
+
+
+def compressed_sliding_window_mask(
+    q_seq_len, s_len, next_pos, sliding_window_size, use_segment_positions, position_row_ids,
+    position_col_ids, segment_positions, model_mode, decoder_segment_ids, kv_cache_part,
+):
+  """Constructs the causal and sliding window boolean mask for uncompressed tokens.
+
+  Handles three distinct operational modes:
+    Case 1 (Autoregressive single-token decoding):
+      Queries arrive one token at a time (q_seq_len == 1). In the KV cache,
+      active cached tokens are located at indices 0..max_valid. We map cached
+      indices to logical positions relative to abs_q, and enforce the causal
+      sliding window: 0 <= (abs_q - abs_k) < sliding_window_size.
+    Case 2 (Load-balanced Context Parallelism):
+      Tokens are distributed non-contiguously across TPU devices.
+      `segment_positions` contains the original global token indices for each
+      local slice, so row/col coordinates are derived from `position_row_ids`
+      and `position_col_ids`.
+    Case 3 (Training & standard prefill on packed sequences):
+      In packed datasets (e.g. C4), multiple documents are concatenated into
+      a single contiguous sequence buffer [0..L-1].
+      - We compute causal distance using contiguous global buffer coordinates:
+          row_ids = [0..Q-1] + next_pos,  col_ids = [0..S-1]
+          distance = row_ids - col_ids
+          in_window = (0 <= distance < sliding_window_size)
+      - IMPORTANT: We do NOT use per-document `segment_positions` (which reset
+        to 0 at each document boundary) for row_ids or col_ids here. If per-doc
+        positions were used with buffer indices, subtraction across packed
+        document boundaries would produce negative values (e.g. pos_q - col_k < 0),
+        erroneously masking out valid intra-document tokens and causing training
+        loss explosions. Document boundary isolation is handled strictly and
+        independently by `decoder_segment_ids`.
+  """
+  if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+    # --- CASE 1: Single-token Autoregressive Decoding ---
+    decode_positions = _decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
+    if decode_positions is not None:
+      distance = decode_positions[0] - decode_positions[1]
+      in_window = (distance < sliding_window_size) if sliding_window_size is not None else True
+      return in_window & (distance >= 0)
+    # Safely use segment_positions if provided, or fall back to next_pos
+    if segment_positions is not None:
+      abs_q = segment_positions[:, :, None]
+    else:
+      local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+      abs_q = jnp.arange(q_seq_len)[None, :, None] + local_next
+
+    if decoder_segment_ids is not None:
+      # Find the highest valid slot index in the KV cache for each sequence in the batch
+      is_valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
+      valid_indices = jnp.where(is_valid, jnp.arange(s_len)[None, :], -1)
+      max_valid = jnp.max(valid_indices, axis=-1, keepdims=True)  # [batch, 1]
+
+      # Determine whether each sequence in the batch is actively decoding (has valid cache slots)
+      is_ar_cache = max_valid[:, :, None] >= 0  # [batch, 1, 1]
+
+      # Active decode: align cache slot indices `i` so slot `max_valid` corresponds to `abs_q`
+      i = jnp.arange(s_len)[None, None, :]
+      abs_k_ar = abs_q - max_valid[:, :, None] + i
+      abs_k_prefill = jnp.broadcast_to(i, abs_k_ar.shape)
+
+      abs_k = jnp.where(is_ar_cache, abs_k_ar, abs_k_prefill)
+    else:
+      abs_k = jnp.arange(s_len)[None, None, :]
+
+    distance = abs_q - abs_k
+    in_window = (distance < sliding_window_size) if sliding_window_size is not None else True
+    return in_window & (distance >= 0)
+
+  # --- CASE 2 & 3: Prefill and Training Phases (q_seq_len > 1) ---
+  if use_segment_positions:
+    # Case 2: Context Parallelism — use global token positions from CP sharding
+    row_ids = position_row_ids
+    col_ids = position_col_ids[:, :, :s_len]
+  else:
+    # Case 3: Standard Training / Prefill on Packed Sequences.
+    # Use contiguous global buffer coordinates so causal/sliding distance is valid
+    # across all packed documents. Cross-document masking is handled by decoder_segment_ids.
+    local_next = next_pos[:, None] if isinstance(next_pos, jax.Array) else next_pos
+    row_ids = jnp.arange(q_seq_len)[None, :, None] + local_next
+    col_ids = jnp.arange(s_len)[None, None, :]
+
+  distance = row_ids - col_ids
+  in_window = (distance < sliding_window_size) if sliding_window_size is not None else True
+  return in_window & (distance >= 0)
 
 
 def _generate_chunk_attention_mask(mask_shape: tuple[int, int], chunk_size: int, q_offset: int = 0) -> jax.Array:

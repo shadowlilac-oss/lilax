@@ -1,7 +1,23 @@
 """Validation of native attention configuration."""
 
-from lilax._backend.common.common_types import AttentionType
+from lilax._backend.common.common_types import AttentionType, DecoderBlockType
 from lilax._backend.utils import max_logging
+
+
+def validate_attention_backend_support(config):
+  if config.moba and config.attention not in ("dot_product"):
+    raise ValueError("MoBA is only supported with dot_product attention.")
+  if config.decoder_block == DecoderBlockType.DEEPSEEK4:
+    match (config.attention, config.use_tokamax_splash):
+      case ("dot_product", _):
+        pass
+      case ("flash", True):
+        pass
+      case _:
+        raise ValueError(
+            "DeepSeek4 is only supported with `dot_product` attention or `flash` attention "
+            "with `use_tokamax_splash=True`."
+        )
 
 
 def validate_attention_type(self):
