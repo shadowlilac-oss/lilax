@@ -35,7 +35,8 @@ from lilax._backend.integration.vllm.weight_tree import (
     _strip_root,
     _to_pure_dict,
 )
-from lilax._backend.integration.vllm.weight_plan import WeightPlanBuilder
+from lilax._backend.integration.vllm.weight_execution import execute_group
+from lilax._backend.integration.vllm.weight_plan import build_plan, build_target_free_plan
 
 
 class Operation(abc.ABC):
@@ -454,7 +455,7 @@ def _summarize_tree_placement(flat: Mapping[Tuple[Any, ...], Any]) -> str:
   return f"[{min(ids)}..{max(ids)}]({len(ids)})"
 
 
-class MaxTextToMaxTextConverter(WeightPlanBuilder):
+class MaxTextToMaxTextConverter:
   """Structural converter for the direct MaxText-to-MaxText sync path."""
 
   _plan_entry_type = _PlanEntry
@@ -526,178 +527,15 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
   def _resolve_target_dtype(self):
     return normalize_dtype(self.target_dtype)
 
-  def _fuse_moe_bulk(self, wi_0, wi_1, tgt_val, key_path: str):
-    tgt_shape = tgt_val.shape
-    tgt_fused_axis = len(tgt_shape) - 1
-    scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
-    if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      if isinstance(getattr(tgt_val, "sharding", None), jax.sharding.NamedSharding):
-        n_shards = _get_n_shards(tgt_val, tgt_fused_axis)
-      elif self.moe_mlp_tp_size > 1:
-        n_shards = self.moe_mlp_tp_size
-      elif self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1:
-        n_shards = 1
-      else:
-        n_shards = self.tp if self.tp > 1 else _get_n_shards(tgt_val, tgt_fused_axis)
-      return _fuse_and_unstack_moe(
-          wi_0, wi_1, self.scan_axis, n_shards, tgt_shape, scan_fused_axis, tgt_fused_axis
-      )
-    if self.moe_fused_layout == MoEFusedLayout.CONCAT:
-      half = tgt_shape[tgt_fused_axis] // 2
-      half_shape = tgt_shape[:tgt_fused_axis] + (half,) + tgt_shape[tgt_fused_axis + 1 :]
-      scanned_half_shape = half_shape[: self.scan_axis] + (wi_0.shape[self.scan_axis],) + half_shape[self.scan_axis :]
-      scanned_sharding = _scanned_sharding_from_per_layer(getattr(tgt_val, "sharding", None), self.scan_axis)
-      padded = [_align_per_axis(weight, scanned_half_shape, scanned_sharding, key_path) for weight in (wi_0, wi_1)]
-      fused = jnp.concatenate(padded, axis=scan_fused_axis)
-      return _jit_unstack(fused, self.scan_axis)
-    raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
-
-  def _slice_bulk_target_free(self, val: Any, path: str):
-    last_key = path.split(".")[-1]
-    is_kv = "key.kernel" in path or "value.kernel" in path
-    if isinstance(val, jax.ShapeDtypeStruct):
-      unrolled_shape = list(val.shape[: self.scan_axis] + val.shape[self.scan_axis + 1 :])
-      if last_key in MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
-        if last_key == "wo":
-          if self.padded_base_moe_mlp_dim > unrolled_shape[1]:
-            unrolled_shape[1] = self.padded_base_moe_mlp_dim
-        elif last_key in ("wi_0", "wi_1", "wi"):
-          if self.padded_base_moe_mlp_dim > unrolled_shape[-1]:
-            unrolled_shape[-1] = self.padded_base_moe_mlp_dim
-      if (
-          is_kv and self.kv_replication > 1
-          and (self.base_num_kv_heads is None or unrolled_shape[-2] == self.base_num_kv_heads)
-      ):
-        unrolled_shape[-2] = unrolled_shape[-2] * self.kv_replication
-      return tuple(jax.ShapeDtypeStruct(tuple(unrolled_shape), val.dtype) for _ in range(val.shape[self.scan_axis]))
-    if last_key in MOE_MLP_WEIGHTS and self.padded_base_moe_mlp_dim is not None:
-      if last_key == "wo":
-        intermediate_axis = 2 if self.scan_axis <= 1 else 1
-        if self.padded_base_moe_mlp_dim > val.shape[intermediate_axis]:
-          pad_amount = self.padded_base_moe_mlp_dim - val.shape[intermediate_axis]
-          pad_spec = [(0, 0)] * val.ndim
-          pad_spec[intermediate_axis] = (0, pad_amount)
-          val = jnp.pad(val, pad_spec)
-      elif last_key in ("wi_0", "wi_1"):
-        intermediate_axis = len(val.shape) - 1
-        if self.padded_base_moe_mlp_dim > val.shape[intermediate_axis]:
-          pad_amount = self.padded_base_moe_mlp_dim - val.shape[intermediate_axis]
-          pad_spec = [(0, 0)] * val.ndim
-          pad_spec[intermediate_axis] = (0, pad_amount)
-          val = jnp.pad(val, pad_spec)
-    if is_kv and self.kv_replication > 1 and (self.base_num_kv_heads is None or val.shape[-2] == self.base_num_kv_heads):
-      val = _jit_repeat_axes(val, ((-2, self.kv_replication),))
-    return _jit_unstack(val, self.scan_axis)
-
-  def _fuse_moe_bulk_target_free(self, wi_0: Any, wi_1: Any, path: str):
-    unpadded_dim = wi_0.shape[-1]
-    target_intermediate = (
-        self.padded_base_moe_mlp_dim
-        if (self.padded_base_moe_mlp_dim is not None and self.padded_base_moe_mlp_dim > unpadded_dim)
-        else unpadded_dim
+  def _execute(self, group, src_flat, tgt_flat):
+    return execute_group(
+        group, src_flat, tgt_flat, scan_axis=self.scan_axis, cycle=self.cycle, num_blocks=self.num_blocks,
+        moe_fused_layout=self.moe_fused_layout, tp=self.tp, kv_tp_size=self.kv_tp_size,
+        moe_mlp_tp_size=self.moe_mlp_tp_size, padded_base_moe_mlp_dim=self.padded_base_moe_mlp_dim,
+        kv_replication=self.kv_replication, base_num_kv_heads=self.base_num_kv_heads,
+        target_dtype=self._resolve_target_dtype() if tgt_flat is None else self.target_dtype,
+        error_type=ConversionPlanError,
     )
-    unrolled_shape = list(wi_0.shape[: self.scan_axis] + wi_0.shape[self.scan_axis + 1 :])
-    tgt_shape = tuple(unrolled_shape[:-1] + [2 * target_intermediate])
-    if isinstance(wi_0, jax.ShapeDtypeStruct):
-      return tuple(jax.ShapeDtypeStruct(tgt_shape, wi_0.dtype) for _ in range(wi_0.shape[self.scan_axis]))
-    tgt_fused_axis = len(tgt_shape) - 1
-    scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
-    if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      if self.moe_mlp_tp_size > 1:
-        n_shards = self.moe_mlp_tp_size
-      elif self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1:
-        n_shards = 1
-      else:
-        n_shards = self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis)
-      return _fuse_and_unstack_moe(
-          wi_0, wi_1, self.scan_axis, n_shards, tgt_shape, scan_fused_axis, tgt_fused_axis
-      )
-    if self.moe_fused_layout == MoEFusedLayout.CONCAT:
-      if target_intermediate > unpadded_dim:
-        pad_spec = [(0, 0)] * wi_0.ndim
-        pad_spec[-1] = (0, target_intermediate - unpadded_dim)
-        wi_0 = jnp.pad(wi_0, pad_spec)
-        wi_1 = jnp.pad(wi_1, pad_spec)
-      fused = jnp.concatenate([wi_0, wi_1], axis=scan_fused_axis)
-      return _jit_unstack(fused, self.scan_axis)
-    raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
-
-  def _execute_group_target_free(self, group: _PlanGroup, src_flat):
-    path = group.source_path
-    target_dtype = self._resolve_target_dtype()
-    if group.op == "identity":
-      raw_val = src_flat[group.source_keys[0]]
-      val = _cast_target_free_floating_leaf(raw_val, target_dtype, path)
-      is_kv = "key.kernel" in path or "value.kernel" in path
-      if (
-          is_kv and self.kv_replication > 1
-          and (self.base_num_kv_heads is None or val.shape[-2] == self.base_num_kv_heads)
-      ):
-        if isinstance(val, jax.ShapeDtypeStruct):
-          new_shape = list(val.shape)
-          new_shape[-2] = new_shape[-2] * self.kv_replication
-          val = jax.ShapeDtypeStruct(tuple(new_shape), val.dtype)
-        else:
-          val = _jit_repeat_axes(val, ((-2, self.kv_replication),))
-      return [(tgt_key, val) for _, tgt_key in group.targets]
-    if group.op == "fuse_moe":
-      raw_0 = src_flat[group.source_keys[0]]
-      raw_1 = src_flat[group.source_keys[1]]
-      wi_0, wi_1 = (
-          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_0, group), target_dtype, path),
-          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_1, group), target_dtype, path),
-      )
-      self._check_scan_axis(wi_0, path)
-      per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
-      return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-    raw_val = src_flat[group.source_keys[0]]
-    val = _cast_target_free_floating_leaf(self._take_cycle_slot(raw_val, group), target_dtype, path)
-    self._check_scan_axis(val, path)
-    per_block = self._slice_bulk_target_free(val, path)
-    return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
-  def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
-    first_tgt = tgt_flat[group.targets[0][1]]
-    path = group.source_path
-    if group.op == "identity":
-      val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
-      out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
-      return [(tgt_key, out) for _, tgt_key in group.targets]
-    if group.op == "fuse_moe":
-      wi_0, wi_1 = (
-          _apply_dtype_cast(self._take_cycle_slot(src_flat[key], group), first_tgt.dtype, path)
-          for key in group.source_keys
-      )
-      self._check_scan_axis(wi_0, path)
-      per_block = self._fuse_moe_bulk(wi_0, wi_1, first_tgt, path)
-    else:
-      val = _apply_dtype_cast(self._take_cycle_slot(src_flat[group.source_keys[0]], group), first_tgt.dtype, path)
-      self._check_scan_axis(val, path)
-      per_block = _bulk_align_and_unstack(val, self.scan_axis, first_tgt, path)
-    return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-
-  def _take_cycle_slot(self, val, group: _PlanGroup):
-    if group.local_index is None:
-      return val
-    slot_axis = self.scan_axis + 1
-    if val.ndim <= slot_axis or val.shape[slot_axis] != self.cycle - 1:
-      raise ConversionPlanError(
-          f"Expected a nested cycle-slot axis of {self.cycle - 1} slots "
-          f"on axis {slot_axis} of {group.source_path}, found shape "
-          f"{val.shape}. Check param_scan_axis and "
-          "inhomogeneous_layer_cycle_interval."
-      )
-    if isinstance(val, jax.ShapeDtypeStruct):
-      return jax.ShapeDtypeStruct(val.shape[:slot_axis] + val.shape[slot_axis + 1 :], val.dtype)
-    return jax.lax.index_in_dim(val, group.local_index, axis=slot_axis, keepdims=False)
-
-  def _check_scan_axis(self, val, path: str) -> None:
-    if val.shape[self.scan_axis] != self.num_blocks:
-      raise ConversionPlanError(
-          f"Expected {self.num_blocks} scanned blocks on axis "
-          f"{self.scan_axis} of {path}, found shape {val.shape}. Check "
-          "param_scan_axis and inhomogeneous_layer_cycle_interval."
-      )
 
   def convert(self, src_pytree: Any, target_state: Any = None) -> Dict[str, Any]:
     """Returns a nested dict of rollout weights, keyed by target paths."""
@@ -715,7 +553,10 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
       depth = len(tgt_root)
       skip_paths = frozenset(path[depth:] for path in skip_paths if path[:depth] == tgt_root)
     if self._plan is None:
-      self._plan = self._build_plan(src_flat, tgt_flat, skip_paths)
+      self._plan = build_plan(
+          src_flat, tgt_flat, skip_paths, self.cycle, self.num_decoder_layers, self.allow_unused_source_keys,
+          self._plan_entry_type, self._plan_error_type, self._find_unrolled_layer,
+      )
       self._groups = _group_plan(self._plan)
     if self.debug:
       src_span = _summarize_tree_placement(src_flat)
@@ -736,7 +577,7 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
               _sharding_summary(tgt_flat[group.targets[0][1]]),
           )
         try:
-          outs = self._execute_group(group, src_flat, tgt_flat)
+          outs = self._execute(group, src_flat, tgt_flat)
           jax.block_until_ready([out for _, out in outs])
         except BaseException:
           logging.exception(
@@ -752,7 +593,7 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
             group.op, group.source_path, len(outs), _sharding_summary(outs[0][1]),
         )
       else:
-        outs = self._execute_group(group, src_flat, tgt_flat)
+        outs = self._execute(group, src_flat, tgt_flat)
       for key in group.source_keys:
         if last_reader[key] == group_idx:
           src_flat.pop(key, None)
@@ -787,7 +628,10 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
     src_flat, src_root = _strip_root(src_flat, "base")
     if self._plan is None:
-      self._plan = self._build_target_free_plan(src_flat)
+      self._plan = build_target_free_plan(
+          src_flat, self.cycle, self.num_blocks, self.prefuse_moe_weights, self._plan_entry_type,
+          self._plan_error_type,
+      )
       self._groups = _group_plan(self._plan)
     groups_per_piece = max(1, groups_per_piece)
     last_reader = _last_group_reading(self._groups)
@@ -795,7 +639,7 @@ class MaxTextToMaxTextConverter(WeightPlanBuilder):
       piece_groups = self._groups[i : i + groups_per_piece]
       piece_result: Dict[Tuple[Any, ...], Any] = {}
       for group_idx, group in enumerate(piece_groups, start=i):
-        outs = self._execute_group_target_free(group, src_flat)
+        outs = self._execute(group, src_flat, None)
         for key in group.source_keys:
           if last_reader[key] == group_idx:
             src_flat.pop(key, None)
