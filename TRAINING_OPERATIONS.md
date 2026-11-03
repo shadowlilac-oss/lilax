@@ -83,4 +83,8 @@ local JAX XPlane traces, not managed ML Diagnostics captures; it is not a genera
 export for every trainer or profiler. Experimental native GRPO also queues inference captures
 under its source-specific conditions. Artifacts contain the capture log directory and stop-step
 metadata; `gs://` log directories are staged locally under `~/tmp/lilax` while uploading.
+Tunix SFT/DPO also has an authored artifact path for cooperative, exclusive recording: other
+tools must not control the trace during the run. Capture stops at the next data fetch or training
+exit; incomplete or error-exit captures are not uploaded. XProf UI discovery of the nested
+capture directories is unverified.
 Capture, upload, and remote access have not been runtime-verified.

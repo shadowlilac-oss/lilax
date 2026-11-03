@@ -7,14 +7,21 @@ import jax.numpy as jnp
 
 from lilax._backend.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from lilax._backend.inference import inference_utils
+from lilax._backend.inference.maxengine import maxengine_model
 
 
-def generate_step(engine, params, decode_state, rng, algorithm, topk, nucleus_topp, temperature):
+def generate_step(
+    config, mesh, replicated_sharding, kv_cache_shardings, model, graphdef, rest_state,
+    params, decode_state, rng, algorithm, topk, nucleus_topp, temperature,
+):
   """Run the model and sample one token for each decode slot."""
   previous_token = decode_state["tokens"]
   rng, new_rng = jax.random.split(rng)
-  with engine._mesh, logical_axis_rules(engine.config.logical_axis_rules):
-    out_logits, new_cache_dict = engine._nnx_run_model(
+  with mesh, logical_axis_rules(config.logical_axis_rules):
+    out_logits, new_cache_dict = maxengine_model.run_model(
+        abstract_model=model,
+        graphdef=graphdef,
+        rest_state=rest_state,
         params=params,
         cache_dict=decode_state["cache"],
         decoder_input_tokens=previous_token,
@@ -23,19 +30,19 @@ def generate_step(engine, params, decode_state, rng, algorithm, topk, nucleus_to
         model_mode=MODEL_MODE_AUTOREGRESSIVE,
     )
   new_vars = {"cache": new_cache_dict}
-  out_logits = jax.lax.with_sharding_constraint(out_logits, engine.replicated_sharding)
-  new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], engine.kv_cache_shardings)
+  out_logits = jax.lax.with_sharding_constraint(out_logits, replicated_sharding)
+  new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], kv_cache_shardings)
   rng, new_rng = jax.random.split(rng)
   new_token = inference_utils.sampling(
       out_logits,
       new_rng,
-      algorithm if algorithm is not None else engine.config.decode_sampling_strategy,
-      topk=topk if topk is not None else engine.config.decode_sampling_top_k,
-      nucleus_topp=nucleus_topp if nucleus_topp is not None else engine.config.decode_sampling_nucleus_p,
-      temperature=temperature if temperature is not None else engine.config.decode_sampling_temperature,
+      algorithm if algorithm is not None else config.decode_sampling_strategy,
+      topk=topk if topk is not None else config.decode_sampling_top_k,
+      nucleus_topp=nucleus_topp if nucleus_topp is not None else config.decode_sampling_nucleus_p,
+      temperature=temperature if temperature is not None else config.decode_sampling_temperature,
   )
   all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
-  if engine.config.return_log_prob:
+  if config.return_log_prob:
     token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
   else:
     token_logp = jnp.zeros(new_token.shape, dtype=jnp.float32)

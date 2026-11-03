@@ -31,6 +31,7 @@ from lilax._backend.inference.maxengine import maxengine_compilation
 from lilax._backend.inference.maxengine import maxengine_decode_state
 from lilax._backend.inference.maxengine import maxengine_generation
 from lilax._backend.inference.maxengine import maxengine_insertion
+from lilax._backend.inference.maxengine import maxengine_model
 from lilax._backend.inference.maxengine import maxengine_model_transfer
 from lilax._backend.inference.maxengine import maxengine_params
 from lilax._backend.inference.maxengine import maxengine_prefill_cache
@@ -173,13 +174,14 @@ class MaxEngine(engine_api.Engine):
       encoder_audios=None,
   ):
     """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
-    cache_state = self._nnx_cache_state_template(mode=model_mode)
-    nnx.replace_by_pure_dict(cache_state, cache_dict)
-    graphdef = self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef
-    model = nnx.merge(graphdef, params, cache_state, self._nnx_rest_state, copy=True)
-    logits = model(
-        decoder_input_tokens,
-        decoder_positions,
+    return maxengine_model.run_model(
+        abstract_model=self._abstract_model_for_mode(model_mode),
+        graphdef=self.graphdef_ar if model_mode == MODEL_MODE_AUTOREGRESSIVE else self.graphdef,
+        rest_state=self._nnx_rest_state,
+        params=params,
+        cache_dict=cache_dict,
+        decoder_input_tokens=decoder_input_tokens,
+        decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
         encoder_images=encoder_images,
         encoder_image_masks=encoder_image_masks,
@@ -193,8 +195,6 @@ class MaxEngine(engine_api.Engine):
         true_length=true_length,
         slot=slot,
     )
-    new_cache = nnx.to_pure_dict(nnx.state(model, nnx.Cache))
-    return logits, new_cache
 
   def generate_aot(self, params: Params, decode_state: DecodeState, rng: PRNGKeyType | None = None):
     """Wrapper to generate for ahead of time compilation."""
@@ -204,7 +204,9 @@ class MaxEngine(engine_api.Engine):
       self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
-    return maxengine_compilation.compile_generate_and_get_layouts(self, params, decode_state, rng_shape, xla_flags)
+    return maxengine_compilation.compile_generate_and_get_layouts(
+        self.generate_aot, params, decode_state, rng_shape, xla_flags
+    )
 
   def _identity(self, x: Any) -> Any:
     """Avoids lambda that breaks JAX caching."""
@@ -213,13 +215,28 @@ class MaxEngine(engine_api.Engine):
   def _iterated_layout(self, arrays: Any, layouts: Any, xla_flags: dict[str, Any] | None = None) -> Any:
     """Lays out an array tensor by tensor to prevent OOMs."""
 
-    return maxengine_compilation.iterated_layout(self, arrays, layouts, xla_flags)
+    return maxengine_compilation.iterated_layout(self._identity, arrays, layouts, xla_flags)
 
   def aot_compile(
       self, params: Params, pass_rng_shape: bool, xla_flags: dict[str, Any] | None = None
   ) -> tuple[Any, Params, Any]:
     """Ahead of time compilation of generate with auto layout, relayout parameters."""
-    return maxengine_compilation.aot_compile(self, params, pass_rng_shape, xla_flags)
+    if pass_rng_shape:
+      rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
+    else:
+      rng_shape = None
+    self.decode_state_shapes = jax.eval_shape(self.init_decode_state, rng_shape)
+
+    generate_executable, self.param_layouts, _, self.decode_state_layouts = self._compile_generate_and_get_layouts(
+        self.abstract_params, self.decode_state_shapes, rng_shape, xla_flags
+    )
+    return (
+        generate_executable,
+        self._iterated_layout(params, self.param_layouts),
+        jax.jit(self.init_decode_state, in_shardings=(None), out_shardings=self.decode_state_layouts)
+        .lower(rng_shape)
+        .compile(),
+    )
 
   def load_params(self, *args, params=None, model=None, rng: PRNGKeyType | None = None, **kwargs) -> Params:
     """Load Parameters from GCS or reshard given Parameters"""
@@ -853,7 +870,11 @@ class MaxEngine(engine_api.Engine):
       temperature: float | None = None,
   ):
     """Performs a single, JIT-compiled autoregressive decoding step."""
-    return maxengine_generation.generate_step(self, params, decode_state, rng, algorithm, topk, nucleus_topp, temperature)
+    return maxengine_generation.generate_step(
+        self.config, self._mesh, self.replicated_sharding, self.kv_cache_shardings,
+        self.model_ar, self.graphdef_ar, self._nnx_rest_state,
+        params, decode_state, rng, algorithm, topk, nucleus_topp, temperature,
+    )
 
   @functools.partial(
       jax.jit,
@@ -959,7 +980,14 @@ class MaxEngine(engine_api.Engine):
 
   def _init_decode_state_nnx(self) -> DecodeState:
     """NNX equivalent of init_decode_state. Returns a decode_state dict with a pure-dict cache."""
-    return maxengine_decode_state.init_decode_state(self)
+    batch = int(self.config.per_device_batch_size * self.mesh.size)
+    vocab = self.config.vocab_size
+    cache_dict_abs = self._nnx_init_cache_dict(mode=MODEL_MODE_AUTOREGRESSIVE)
+    if self._compiled_init_cache_fn is None:
+      self._compiled_init_cache_fn = maxengine_decode_state.compile_init_cache(cache_dict_abs, self.kv_cache_shardings)
+    (cache,) = self._compiled_init_cache_fn()
+    self.kv_cache_annotations_named = maxengine_decode_state.cache_annotations(self.model_ar)
+    return maxengine_decode_state.init_decode_state(batch, vocab, cache)
 
   @property
   def max_concurrent_decodes(self) -> int:
