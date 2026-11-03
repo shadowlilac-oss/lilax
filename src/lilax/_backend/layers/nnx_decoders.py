@@ -1047,6 +1047,8 @@ class NNXDecoder(nnx.Module):
 
       if use_kv:
         return new_carry, (new_current_state, updated_kv)
+      if any(isinstance(value, nnx.LoRAParam) for _, value in nnx.iter_graph(layer)):
+        new_carry = new_carry.astype(carry.dtype)
       return new_carry, new_current_state
 
     if skip_block_remat:
