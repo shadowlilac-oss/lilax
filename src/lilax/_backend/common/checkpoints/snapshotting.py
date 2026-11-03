@@ -4,7 +4,8 @@ from absl import logging
 from flax import nnx
 from grain import experimental as grain_experimental
 import jax
-from lilax._backend.common import checkpointing, train_state_nnx
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
 from lilax._backend.utils import elastic_utils, max_logging
 from orbax.checkpoint import v1 as ocp

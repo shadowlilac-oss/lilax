@@ -9,7 +9,8 @@ import jax.numpy as jnp
 from jax import random
 from jax.sharding import Mesh
 
-from lilax._backend.common import checkpointing, train_state_nnx
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.utils import gcs_utils, lora_utils, max_logging, max_utils
 from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, train_utils

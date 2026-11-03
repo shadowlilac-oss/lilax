@@ -16,7 +16,9 @@ import jax.numpy as jnp
 from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding
 import numpy as np
-from lilax._backend.common import checkpointing, metric_logger, profiler, snapshotting
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import metric_logger, profiler
+from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.common.goodput import GoodputEvent, RECORD_JOB_END_TIME, maybe_record_goodput, record_goodput
 from lilax._backend.common.metric_logger import record_activation_metrics
 from lilax._backend.diffusion.block_diffusion import target_alignment as block_diffusion_target_alignment
@@ -24,7 +26,9 @@ from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.layers import moe
 from lilax._backend.layers.attention_mla import indexer_losses
 from lilax._backend.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
-from lilax._backend.utils import elastic_utils, exceptions, gcs_utils, max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, mllog_utils, qk_clip_utils, sharding, train_utils
+from lilax._backend.utils import elastic_utils, exceptions, gcs_utils, max_logging, max_utils, maxtext_utils, maxtext_utils_nnx
+from lilax._backend.common.telemetry import mllog_utils
+from lilax._backend.utils import qk_clip_utils, sharding, train_utils
 from lilax._backend.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from lilax._backend.utils.globals import EPS
 from lilax._backend.utils.vocabulary_tiling import vocab_tiling_nnx_loss

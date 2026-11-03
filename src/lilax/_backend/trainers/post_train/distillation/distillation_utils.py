@@ -12,7 +12,7 @@ import optax
 from orbax import checkpoint
 from tunix.sft import peft_trainer
 
-from lilax._backend.common import grain_utility
+from lilax._backend.common.checkpoints import grain_utility
 from lilax._backend.trainers.post_train.checkpoint_selection import TrainingCheckpointManager
 from lilax._backend.utils import max_logging, maxtext_utils
 

@@ -9,7 +9,8 @@ import jax
 import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
-from lilax._backend.common import checkpointing, common_types
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import common_types
 from lilax._backend.layers import quantizations
 from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx, model_creation_utils
 

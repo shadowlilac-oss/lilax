@@ -13,7 +13,9 @@ from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train as native_train
-from lilax._backend.utils import gpu_collective_overlap_pass, max_utils, mllog_utils, train_utils
+from lilax._backend.utils import gpu_collective_overlap_pass, max_utils
+from lilax._backend.common.telemetry import mllog_utils
+from lilax._backend.utils import train_utils
 
 
 def train_pretraining(config, *, devices=None, resume_from_checkpoint=None):

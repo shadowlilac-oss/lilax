@@ -13,8 +13,8 @@ import numpy as np
 import optax
 import orbax.checkpoint.pathways as ocp_pathways
 
-from lilax._backend.common import checkpointing
-from lilax._backend.common import emergency_checkpointing
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import emergency_checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import ReorderStrategy
 from lilax._backend.common.data_loader import create_dataloader

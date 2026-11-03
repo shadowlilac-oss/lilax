@@ -61,7 +61,8 @@ GoodputRecorder = _goodput_module.GoodputRecorder
 
 from lilax._backend.utils.globals import EPS
 from lilax._backend.trainers.pre_train.train import get_first_step
-from lilax._backend.common import checkpointing, profiler
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import profiler
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import (
     GoodputEvent,

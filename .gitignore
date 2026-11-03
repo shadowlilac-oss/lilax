@@ -23,5 +23,6 @@ logs/
 tmp/
 checkpoints/
 !src/lilax/checkpoints/
+!src/lilax/_backend/common/checkpoints/
 wandb/
 .DS_Store

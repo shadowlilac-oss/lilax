@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from flax.training import train_state
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 
 
 MODEL_PARAMS_DICT = {

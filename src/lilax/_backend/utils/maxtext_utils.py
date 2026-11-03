@@ -17,7 +17,7 @@ import optax
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode
 from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.models import gemma4_small

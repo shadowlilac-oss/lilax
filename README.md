@@ -30,7 +30,7 @@ installation across all paths has not been verified. See [implementation status]
 ## Load a model
 
 ```python
-from lilax.models import AutoModelForCausalLM
+from lilax.modeling.models import AutoModelForCausalLM
 
 if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(

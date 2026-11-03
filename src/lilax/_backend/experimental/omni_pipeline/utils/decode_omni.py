@@ -13,7 +13,7 @@ import numpy as np
 from omegaconf import OmegaConf
 from transformers import AutoTokenizer
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR

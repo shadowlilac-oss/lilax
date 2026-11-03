@@ -15,8 +15,9 @@ from lilax._backend.checkpoint_conversion.load_and_quantize_checkpoint import (
     load_and_quantize_checkpoint as _load_and_quantize_checkpoint,
 )
 from lilax._backend.checkpoint_conversion.reshard_checkpoint import reshard_checkpoint
-from lilax._backend.common import emergency_checkpointing, train_state_nnx
-from lilax._backend.common.checkpointing import (
+from lilax._backend.common.checkpoints import emergency_checkpointing
+from lilax._backend.common import train_state_nnx
+from lilax._backend.common.checkpoints.checkpointing import (
     EmergencyCheckpointManager,
     EmergencyReplicatorCheckpointManager,
     all_steps,
@@ -33,7 +34,7 @@ from lilax._backend.common.checkpointing import (
     save_params_to_path,
     wait_until_finished,
 )
-from lilax._backend.common.emergency_checkpointing import (
+from lilax._backend.common.checkpoints.emergency_checkpointing import (
     create_emergency_checkpoint_manager,
     create_replicator_checkpoint_manager,
 )

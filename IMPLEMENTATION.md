@@ -13,9 +13,9 @@ Public modules use these canonical names:
 
 - `configuration`: `MaxTextConfig`, `AutoConfig`, typed backend options; no device/environment initialization.
 - `runtime`: `Runtime`, explicit lifecycle and platform/distributed initialization.
-- `models`: `AutoModelForCausalLM`, native model objects and real weight import/export through `hub`.
-- `hub`: supported-model capability registry and consistent Hub resolution/conversion.
-- `data`: native data backends and direct Hugging Face Dataset/IterableDataset adaptation.
+- `modeling.models`: `AutoModelForCausalLM`, native model objects and real weight import/export through `modeling.hub`.
+- `modeling.hub`: supported-model capability registry and consistent Hub resolution/conversion.
+- `data_pipeline.api`: native data backends and direct Hugging Face Dataset/IterableDataset adaptation.
 - `trainers`: `Trainer`, `TrainingArguments`, SFT/DPO/GRPO/distillation classes and configs.
 - `peft`: native adapter APIs preserving supported combinations.
 - `generation`, `serving`, `evaluation`, `benchmarks`, `diagnostics`, `launch` and `provisioning`: specialized callable Python capabilities.
@@ -23,9 +23,9 @@ Public modules use these canonical names:
 Peer owners (disjoint ownership, not permanent agent quotas):
 
 - Foundation Terra-high coordinator: configuration/runtime/packaging workers, `_backend/configs/**`, package-required root assets/resources, package `__init__.py` integration.
-- Models Terra-high coordinator: `_backend/models`, `_backend/layers`, `_backend/kernels`, `_backend/multimodal`, public `models`, `hub`.
+- Models Terra-high coordinator: `_backend/models`, `_backend/layers`, `_backend/kernels`, `_backend/multimodal`, public `modeling`.
 - Training Terra-high coordinator: `_backend/trainers`, `_backend/training_engine`, `_backend/optimizers`, `_backend/integration/tunix`, public `trainers`, `peft`.
-- Infrastructure Terra-high coordinator: `_backend/common`, `_backend/utils`, `_backend/input_pipeline`, `_backend/checkpoint_conversion`, public `data`, checkpoint operations.
+- Infrastructure Terra-high coordinator: `_backend/common`, `_backend/utils`, `_backend/input_pipeline`, `_backend/checkpoint_conversion`, public `data_pipeline`, checkpoint operations.
 - Inference Terra-high coordinator: `_backend/inference`, `_backend/integration/vllm`, `_backend/eval`, `_backend/experimental`, `_backend/m3`, `_backend/diffusion`, public `generation`, `serving`, `evaluation`, benchmarking and launch capabilities except checkpoint operations.
 
 Each owner may split its independent files among workers and must publish exact subownership before editing.

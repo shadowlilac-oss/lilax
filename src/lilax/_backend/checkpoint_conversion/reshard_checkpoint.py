@@ -15,7 +15,8 @@ from orbax.checkpoint import v1 as ocp
 
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import print_peak_memory
-from lilax._backend.common import checkpointing, train_state_nnx
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.layers import quantizations
 from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding

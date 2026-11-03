@@ -5,16 +5,17 @@ import os
 import jax
 import pathwaysutils
 
-from lilax._backend.common import profiler, snapshotting
+from lilax._backend.common import profiler
+from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.common.goodput import (
     RECORD_JOB_START_TIME, create_goodput_recorder, maybe_monitor_goodput, record_goodput,
 )
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import (
-    elastic_utils, gpu_collective_overlap_pass, max_logging, max_utils, mllog_utils, train_utils,
-)
+from lilax._backend.utils import elastic_utils, gpu_collective_overlap_pass, max_logging, max_utils
+from lilax._backend.common.telemetry import mllog_utils
+from lilax._backend.utils import train_utils
 from lilax.configuration import MaxTextConfig
 from lilax.runtime import Runtime
 import tensorflow as tf

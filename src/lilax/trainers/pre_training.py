@@ -7,7 +7,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 import numpy as np
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.goodput import (
     RECORD_JOB_START_TIME, create_goodput_recorder, maybe_monitor_goodput, record_goodput,
 )

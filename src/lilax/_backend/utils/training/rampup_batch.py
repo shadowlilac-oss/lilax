@@ -2,7 +2,7 @@
 
 import math
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 
 
 class RampupBatchManager:

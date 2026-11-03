@@ -9,7 +9,8 @@ import jax.numpy as jnp
 import optax
 from orbax.checkpoint import v1 as ocp
 
-from lilax._backend.common import checkpoint_context, train_state_nnx
+from lilax._backend.common.checkpoints import checkpoint_context
+from lilax._backend.common import train_state_nnx
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.trainers.diloco.utils.nnx_state_utils import replace_nnx_model_params
 

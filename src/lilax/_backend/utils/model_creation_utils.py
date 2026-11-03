@@ -20,7 +20,7 @@ from orbax import checkpoint as ocp
 from orbax.checkpoint.metadata import ArrayMetadata
 
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
-from lilax._backend.common import checkpoint_context, checkpointing
+from lilax._backend.common.checkpoints import checkpoint_context, checkpointing
 from lilax._backend.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from lilax._backend.configs import pyconfig
 from lilax._backend.experimental.lineage import lineage_adapter

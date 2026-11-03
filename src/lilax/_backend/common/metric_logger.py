@@ -33,7 +33,7 @@ from lilax._backend.common.cloud import is_decoupled
 from lilax._backend.common.gcp_workload_monitor import GCPWorkloadMonitor
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
 from lilax._backend.utils import exceptions
-from lilax._backend.utils import mllog_utils
+from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import max_utils

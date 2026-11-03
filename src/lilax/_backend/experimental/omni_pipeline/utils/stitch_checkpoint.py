@@ -7,7 +7,7 @@ from flax import nnx
 import jax
 from orbax import checkpoint as ocp
 
-from lilax._backend.common import checkpointing
+from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, model_creation_utils
 
 

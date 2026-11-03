@@ -16,7 +16,8 @@ import jax
 from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from lilax._backend.checkpoint_conversion.utils import load_dynamic
-from lilax._backend.common import checkpoint_context, emergency_checkpointing, grain_utility, snapshotting, train_state_nnx
+from lilax._backend.common.checkpoints import checkpoint_context, emergency_checkpointing, grain_utility, snapshotting
+from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
 from lilax._backend.layers import quantizations
 from lilax._backend.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils

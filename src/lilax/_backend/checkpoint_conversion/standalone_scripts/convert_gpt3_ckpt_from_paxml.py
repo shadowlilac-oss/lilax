@@ -10,7 +10,8 @@ import numpy as np
 from psutil import Process
 import tensorstore as ts
 
-from lilax._backend.common import checkpointing, train_state_nnx
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig, types
 from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx
 from lilax._backend.utils import model_creation_utils, train_utils

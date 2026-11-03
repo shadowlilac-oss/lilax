@@ -15,7 +15,8 @@ import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
 
-from lilax._backend.common import checkpointing, train_state_nnx
+from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
 from lilax._backend.utils import gcs_utils, max_logging, max_utils, maxtext_utils, model_creation_utils
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
