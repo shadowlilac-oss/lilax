@@ -27,6 +27,10 @@ from lilax._backend.layers import quantizations
 from lilax._backend.inference import inference_utils
 from lilax._backend.inference.maxengine import maxengine_adapters
 from lilax._backend.inference.maxengine import maxengine_cache_sharding
+from lilax._backend.inference.maxengine import maxengine_compilation
+from lilax._backend.inference.maxengine import maxengine_decode_state
+from lilax._backend.inference.maxengine import maxengine_generation
+from lilax._backend.inference.maxengine import maxengine_insertion
 from lilax._backend.inference.maxengine import maxengine_model_transfer
 from lilax._backend.inference.maxengine import maxengine_params
 from lilax._backend.inference.maxengine import maxengine_prefill_cache
@@ -37,16 +41,7 @@ from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import model_creation_utils
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 
-_DEEPSEEK_V4_CACHE_KEYS = frozenset(
-    (
-        "entry_count",
-        "accumulator_index",
-        "leftover_buffer_kv",
-        "leftover_buffer_gate",
-        "overlap_kv",
-        "overlap_gate",
-    )
-)
+_DEEPSEEK_V4_CACHE_KEYS = maxengine_insertion.DEEPSEEK_V4_CACHE_KEYS
 
 warnings.simplefilter("ignore", category=FutureWarning)
 DecodeState = Any
@@ -209,20 +204,7 @@ class MaxEngine(engine_api.Engine):
       self, params: Any, decode_state: Any, rng_shape: Any, xla_flags: dict[str, Any] | None = None
   ) -> tuple[Any, Any, Any, Any]:
     """Optimal memory layout for params and decode_state."""
-    param_layout = Format(DLL.AUTO)
-    decode_state_layout = Format(DLL.AUTO)
-    compiled_generate = (
-        jax.jit(
-            self.generate_aot,
-            in_shardings=(param_layout, decode_state_layout, None),
-            out_shardings=(Format(DLL.AUTO), Format(DLL.AUTO)),
-            donate_argnames=("decode_state",),
-        ).lower(params, decode_state, rng_shape)
-    ).compile(compiler_options=xla_flags)
-
-    arg_layouts, _ = compiled_generate.input_formats
-    generate_out_layouts, _ = compiled_generate.output_formats
-    return compiled_generate, arg_layouts[0], arg_layouts[1], generate_out_layouts
+    return maxengine_compilation.compile_generate_and_get_layouts(self, params, decode_state, rng_shape, xla_flags)
 
   def _identity(self, x: Any) -> Any:
     """Avoids lambda that breaks JAX caching."""
@@ -231,44 +213,13 @@ class MaxEngine(engine_api.Engine):
   def _iterated_layout(self, arrays: Any, layouts: Any, xla_flags: dict[str, Any] | None = None) -> Any:
     """Lays out an array tensor by tensor to prevent OOMs."""
 
-    def _layout(x, s, l):
-      if x.format == l:
-        return x
-      dll = (
-          (l.layout if jax.__version_info__ >= (0, 6, 3) else l.device_local_layout)
-          if isinstance(l, Format)
-          else l
-      )
-      f = jax.jit(self._identity, out_shardings=Format(dll, s)).lower(x).compile(compiler_options=xla_flags)
-      y = f(x)
-      jax.tree.map(lambda z: z.delete(), x)
-      jax.block_until_ready(y)
-      return y
-
-    shardings = jax.tree.map(lambda x: x.sharding, arrays)
-    arrays = jax.tree.map(_layout, arrays, shardings, layouts)
-    return arrays
+    return maxengine_compilation.iterated_layout(self, arrays, layouts, xla_flags)
 
   def aot_compile(
       self, params: Params, pass_rng_shape: bool, xla_flags: dict[str, Any] | None = None
   ) -> tuple[Any, Params, Any]:
     """Ahead of time compilation of generate with auto layout, relayout parameters."""
-    if pass_rng_shape:
-      rng_shape = jax.ShapeDtypeStruct([4], jax.numpy.dtype("uint32"))
-    else:
-      rng_shape = None
-    self.decode_state_shapes = jax.eval_shape(self.init_decode_state, rng_shape)
-
-    generate_executable, self.param_layouts, _, self.decode_state_layouts = self._compile_generate_and_get_layouts(
-        self.abstract_params, self.decode_state_shapes, rng_shape, xla_flags
-    )
-    return (
-        generate_executable,
-        self._iterated_layout(params, self.param_layouts),
-        jax.jit(self.init_decode_state, in_shardings=(None), out_shardings=self.decode_state_layouts)
-        .lower(rng_shape)
-        .compile(),
-    )
+    return maxengine_compilation.aot_compile(self, params, pass_rng_shape, xla_flags)
 
   def load_params(self, *args, params=None, model=None, rng: PRNGKeyType | None = None, **kwargs) -> Params:
     """Load Parameters from GCS or reshard given Parameters"""
@@ -902,53 +853,7 @@ class MaxEngine(engine_api.Engine):
       temperature: float | None = None,
   ):
     """Performs a single, JIT-compiled autoregressive decoding step."""
-    previous_token = decode_state["tokens"]
-    rng, new_rng = jax.random.split(rng)
-    with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
-      out_logits, new_cache_dict = self._nnx_run_model(
-          params=params,
-          cache_dict=decode_state["cache"],
-          decoder_input_tokens=previous_token,
-          decoder_positions=decode_state["next_pos"],
-          enable_dropout=False,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
-    new_vars = {"cache": new_cache_dict}
-    out_logits = jax.lax.with_sharding_constraint(out_logits, self.replicated_sharding)
-    new_cache = jax.lax.with_sharding_constraint(new_vars["cache"], self.kv_cache_shardings)
-    rng, new_rng = jax.random.split(rng)
-    new_token = inference_utils.sampling(
-        out_logits,
-        new_rng,
-        algorithm if algorithm is not None else self.config.decode_sampling_strategy,
-        topk=topk if topk is not None else self.config.decode_sampling_top_k,
-        nucleus_topp=nucleus_topp if nucleus_topp is not None else self.config.decode_sampling_nucleus_p,
-        temperature=temperature if temperature is not None else self.config.decode_sampling_temperature,
-    )
-    all_valid = jnp.ones(new_token.shape, dtype=jnp.int8)
-    if self.config.return_log_prob:
-      token_logp = inference_utils.log_prob_of_chosen_token(out_logits, new_token)
-    else:
-      token_logp = jnp.zeros(new_token.shape, dtype=jnp.float32)
-
-    next_pos = decode_state["next_pos"] + 1
-    generated_tokens = decode_state["generated_tokens"] + 1
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((new_token, all_valid, generated_tokens), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        log_prob=token_logp,
-        samples_per_slot=1,
-    )
-    return {
-        "logits": out_logits,
-        "cache": new_cache,
-        "next_pos": next_pos,
-        "generated_tokens": generated_tokens,
-        "tokens": new_token,
-        "token_logp": token_logp,
-    }, result
+    return maxengine_generation.generate_step(self, params, decode_state, rng, algorithm, topk, nucleus_topp, temperature)
 
   @functools.partial(
       jax.jit,
@@ -969,56 +874,7 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache
-
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
-
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
-        for slot in slots:
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-
-      for slot in slots:
-        if path_key == "cache_ar_segment_id":
-          s = list(full_cache.shape)
-          s[batch_idx] = 1
-          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        elif path_key == "cache_prefill_segment_id":
-          s = list(full_cache.shape)
-          s[batch_idx] = 1
-          zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        elif path_key == "cached_ar_lengths":
-          full_cache = full_cache.at[slot].set(0)
-        elif path_key in [
-            "cached_prefill_key",
-            "cached_prefill_value",
-            "cached_prefill_key_scale",
-            "cached_prefill_value_scale",
-        ]:
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        elif path_key in ["recurrent_state", "conv_state"]:
-          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        else:
-          raise ValueError(f"We don't have a strategy for inserting {path_key}")
-      return full_cache
+      return maxengine_insertion.copy_cache_leaf(path, partial_cache, full_cache, annotations, slots)
 
     inserted_cache = jax.tree_util.tree_map_with_path(
         copy,
@@ -1103,43 +959,7 @@ class MaxEngine(engine_api.Engine):
 
   def _init_decode_state_nnx(self) -> DecodeState:
     """NNX equivalent of init_decode_state. Returns a decode_state dict with a pure-dict cache."""
-    batch = int(self.config.per_device_batch_size * self.mesh.size)
-    vocab = self.config.vocab_size
-    cache_dict_abs = self._nnx_init_cache_dict(mode=MODEL_MODE_AUTOREGRESSIVE)
-
-    if self._compiled_init_cache_fn is None:
-
-      @functools.partial(jax.jit, out_shardings=(self.kv_cache_shardings,))
-      def _init_cache():
-        return (jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), cache_dict_abs),)
-
-      self._compiled_init_cache_fn = _init_cache
-
-    (cache,) = self._compiled_init_cache_fn()
-    _, cache_state, _ = nnx.split(self.model_ar, nnx.Cache, ...)
-
-    def _logical_axes_for(var):
-      meta = var.get_metadata() if hasattr(var, "get_metadata") else {}
-      out = meta.get("out_sharding") or meta.get("sharding") or meta.get("sharding_names")
-      if out is None:
-        return ()
-      return (out,) if isinstance(out, str) else tuple(out)
-
-    annotations_state = jax.tree.map(
-        _logical_axes_for,
-        cache_state,
-        is_leaf=lambda v: isinstance(v, nnx.Variable),
-    )
-    self.kv_cache_annotations_named = nnx.to_pure_dict(annotations_state)
-
-    return {
-        "logits": jnp.zeros((batch, 1, vocab), dtype=jnp.float32),
-        "cache": cache,
-        "next_pos": jnp.zeros((batch, 1), dtype=jnp.int32),
-        "generated_tokens": jnp.zeros((batch, 1), dtype=jnp.int32),
-        "tokens": jnp.zeros((batch, 1), dtype=jnp.int32),
-        "token_logp": jnp.zeros((batch, 1), dtype=jnp.float32),
-    }
+    return maxengine_decode_state.init_decode_state(self)
 
   @property
   def max_concurrent_decodes(self) -> int:
@@ -1189,53 +1009,7 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
     def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache
-
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
-
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-
-      if path_key == "cache_ar_segment_id":
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
-        s = list(full_cache.shape)
-        s[batch_idx] = 1
-        zeros = jnp.zeros(tuple(s), dtype=jnp.int32)
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-      elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
-      elif path_key in [
-          "cached_prefill_key",
-          "cached_prefill_value",
-          "cached_prefill_key_scale",
-          "cached_prefill_value_scale",
-      ]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      elif path_key in ["recurrent_state", "conv_state"]:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+      return maxengine_insertion.copy_cache_leaf(path, partial_cache, full_cache, annotations, (slot,))
 
     inserted_cache = jax.tree_util.tree_map_with_path(
         copy,
@@ -1322,71 +1096,9 @@ class MaxEngine(engine_api.Engine):
     slot = slots[0]
 
     def copy(path, partial_cache, full_cache, annotations):
-      path_key = path[-1].key
-      if path_key in [
-          "cache_ar_index",
-          "cached_ar_key",
-          "cached_ar_value",
-          "cached_ar_key_scale",
-          "cached_ar_value_scale",
-      ]:
-        return full_cache
-
-      batch_idx = -1
-      if "cache_batch" in annotations:
-        batch_idx = annotations.index("cache_batch")
-      elif "cache_scale_batch" in annotations:
-        batch_idx = annotations.index("cache_scale_batch")
-
-      if batch_idx < 0:
-        raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
-
-      if path_key in _DEEPSEEK_V4_CACHE_KEYS:
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-
-      if path_key == "cache_ar_segment_id":
-        zeros = jnp.zeros((1, self.config.max_target_length - self.config.max_prefill_predict_length), dtype=jnp.int32)
-        return jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-      elif path_key == "cache_prefill_segment_id":
-        zeros = jnp.zeros((1, self.config.max_prefill_predict_length), dtype=jnp.int32)
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, zeros, slot, batch_idx)
-        if i == num_prompts - 1:
-          pad = jnp.zeros((1, seq_len), dtype=int)
-          partial_cache = jnp.concatenate([partial_cache, pad], axis=1)
-        partial_cache = jax.lax.dynamic_slice(partial_cache, (0, start_idx), (1, seq_len))
-        partial_cache = (partial_cache == partial_cache[0, 0]).astype(int)
-        full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-        return full_cache
-      elif path_key == "cached_ar_lengths":
-        return full_cache.at[slot].set(0)
-      elif path_key in [
-          "cached_prefill_key",
-          "cached_prefill_value",
-          "cached_prefill_key_scale",
-          "cached_prefill_value_scale",
-      ]:
-        seqlen_index = self.config.prefill_cache_axis_order.split(",").index("1")
-        start_indices = [0, 0, 0, 0]
-        start_indices[seqlen_index] = start_idx
-        slice_size = list(partial_cache.shape)
-        slice_size[seqlen_index] = seq_len
-
-        slice_size = tuple(slice_size)
-        if i == num_prompts - 1:
-          pad = jnp.zeros(slice_size, dtype=partial_cache.dtype)
-          partial_cache = jnp.concatenate([partial_cache, pad], axis=seqlen_index)
-        partial_cache = jax.lax.dynamic_slice(partial_cache, start_indices, slice_size)
-
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      elif path_key in ["recurrent_state", "conv_state"]:
-        if num_prompts > 1:
-          raise NotImplementedError(
-              "Packed prefill is currently incompatible with linear attention states (GDN). "
-              "Prompt memory will bleed into adjacent prompts. Please disable packed prefill."
-          )
-        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
-      else:
-        raise ValueError(f"We don't have a strategy for inserting {path_key}")
+      return maxengine_insertion.copy_packed_cache_leaf(
+          path, partial_cache, full_cache, annotations, self.config, slot, start_idx, i, num_prompts, seq_len
+      )
 
     inserted_cache = decode_state["cache"]
     inserted_logits = decode_state["logits"]
