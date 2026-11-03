@@ -8,7 +8,7 @@ from flax.core.spmd import logical_axis_rules
 from flax.nnx import tracers
 from orbax import checkpoint as ocp
 from tunix.sft import diffusion as tunix_diffusion_sft
-from tunix.sft import metrics_logger, peft_trainer, profiler
+from tunix.sft import metrics_logger, peft_trainer
 
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import GoodputEvent, RECORD_JOB_END_TIME, maybe_record_goodput, record_goodput
@@ -16,6 +16,7 @@ from lilax._backend.integration.tunix import diffusion_sft as maxtext_diffusion_
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.sft import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
+from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.trainers.pre_train.train import loss_fn
 from lilax._backend.utils import lora_utils, max_logging, maxtext_utils, model_creation_utils
 
@@ -93,23 +94,11 @@ def get_tunix_config(mt_config, report_to=None):
   )
   metrics_logging_options = (metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
                              if report_to is None else None)
-  profiler_options = None
-  if mt_config.profiler:
-    set_profile_options = True
-    platform_version = jax.extend.backend.get_backend().platform_version.strip()
-    if platform_version.startswith("Pathways"):
-      max_logging.log("Pathways backend detected. Disabling setting profile options.")
-      set_profile_options = False
-    profiler_options = profiler.ProfilerOptions(
-        log_dir=mt_config.tensorboard_dir, skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
-        profiler_steps=mt_config.profiler_steps, set_profile_options=set_profile_options,
-        enable_continuous_profiling=mt_config.enable_continuous_profiling,
-    )
   return peft_trainer.TrainingConfig(
       eval_every_n_steps=mt_config.eval_interval, max_steps=mt_config.steps,
       gradient_accumulation_steps=mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None,
       checkpoint_root_directory=mt_config.checkpoint_dir, checkpointing_options=checkpointing_options,
-      metrics_logging_options=metrics_logging_options, profiler_options=profiler_options,
+      metrics_logging_options=metrics_logging_options, profiler_options=None,
       data_sharding_axis=tuple(mt_config.data_sharding),
   )
 
@@ -224,7 +213,11 @@ def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=
     is_block_diffusion = getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion"
     records_internal_metrics = bool(getattr(mt_config, "record_internal_nn_metrics", False))
     enable_nnx_cache = mt_config.num_experts <= 1 and not (is_block_diffusion and records_internal_metrics)
-    trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator, cache_nnx_graph=enable_nnx_cache)
+    data_hooks.capture = TrainingCapture(mt_config, trainer)
+    try:
+      trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator, cache_nnx_graph=enable_nnx_cache)
+    finally:
+      data_hooks.finish_capture(trainer)
   return trainer
 
 

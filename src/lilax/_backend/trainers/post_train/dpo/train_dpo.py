@@ -3,7 +3,7 @@ import optax
 from flax import nnx
 from flax.core.spmd import logical_axis_rules
 from orbax import checkpoint as ocp
-from tunix.sft import metrics_logger, profiler
+from tunix.sft import metrics_logger
 from tunix.sft.dpo.dpo_trainer import DPOTrainer, DPOTrainingConfig
 
 from lilax._backend.common.goodput import GoodputEvent, RECORD_JOB_END_TIME, maybe_record_goodput, record_goodput
@@ -13,7 +13,7 @@ from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.dpo import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
-from lilax._backend.utils import max_logging
+from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import model_creation_utils
 
@@ -26,21 +26,6 @@ def get_tunix_config(mt_config, report_to=None) -> DPOTrainingConfig:
   metrics_logging_options = (metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
                              if report_to is None else None)
 
-  profiler_options = None
-  if mt_config.profiler:
-    set_profile_options = True
-    platform_version = jax.extend.backend.get_backend().platform_version.strip()
-    if platform_version.startswith("Pathways"):
-      max_logging.log("Pathways backend detected. Disabling setting profile options.")
-      set_profile_options = False
-    profiler_options = profiler.ProfilerOptions(
-        log_dir=mt_config.tensorboard_dir,
-        skip_first_n_steps=mt_config.skip_first_n_steps_for_profiler,
-        profiler_steps=mt_config.profiler_steps,
-        set_profile_options=set_profile_options,
-        enable_continuous_profiling=mt_config.enable_continuous_profiling,
-    )
-
   return DPOTrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
@@ -48,7 +33,7 @@ def get_tunix_config(mt_config, report_to=None) -> DPOTrainingConfig:
       checkpoint_root_directory=mt_config.checkpoint_dir,
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
-      profiler_options=profiler_options,
+      profiler_options=None,
       algorithm=mt_config.dpo.algo,
       lambda_orpo=mt_config.dpo.orpo_lambda,
       beta=mt_config.dpo.dpo_beta,
@@ -126,7 +111,11 @@ def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=
       )
     if eval_iterator is not None:
       data_hooks.eval_data_iterator = eval_iterator
-    trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
+    data_hooks.capture = TrainingCapture(mt_config, trainer)
+    try:
+      trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator)
+    finally:
+      data_hooks.finish_capture(trainer)
   return trainer
 
 

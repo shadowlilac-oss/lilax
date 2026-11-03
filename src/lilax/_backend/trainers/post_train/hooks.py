@@ -81,8 +81,11 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
     assert "first_train_step" in self.metadata, (
         "BaseTrainingHooks.on_train_start() must be called before BaseTrainingHooks.on_train_end()"
     )
-    if self.metric_logger:
-      self.metric_logger.flush_metrics_and_cleanup()
+    try:
+      train_ctx.data_hooks.finish_capture(train_ctx)
+    finally:
+      if self.metric_logger:
+        self.metric_logger.flush_metrics_and_cleanup()
 
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
@@ -171,9 +174,12 @@ class BaseDataHooks(DataHooks):
     self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
     self.train_batch = None
     self.eval_batch = None
+    self.capture = None
 
   @override
   def load_next_train_batch(self, train_ctx: peft_trainer.PeftTrainer):
+    if self.capture is not None:
+      self.capture.on_fetch(train_ctx.iter_steps, train_ctx.training_hooks.metric_logger.reporter)
     try:
       self.train_batch = self.train_data_loader.load_next_batch()
     except exceptions.StopTraining as e:
@@ -183,6 +189,10 @@ class BaseDataHooks(DataHooks):
       else:
         raise
     return self.train_batch
+
+  def finish_capture(self, train_ctx):
+    if self.capture is not None:
+      self.capture.finish(train_ctx.iter_steps, train_ctx.training_hooks.metric_logger.reporter)
 
   @override
   def load_next_eval_batch(self, train_ctx: peft_trainer.PeftTrainer):
