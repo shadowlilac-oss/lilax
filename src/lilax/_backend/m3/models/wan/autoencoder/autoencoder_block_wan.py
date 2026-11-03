@@ -90,5 +90,3 @@ class WanAttentionBlock(nnx.Module):
     return x + identity, feat_cache, feat_idx
 
 
-WanResidualBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-WanAttentionBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

@@ -28,4 +28,3 @@ class WanRMS_norm(nnx.Module):
     return normalized.astype(self.dtype)
 
 
-WanRMS_norm.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

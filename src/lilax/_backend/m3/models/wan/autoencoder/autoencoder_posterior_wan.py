@@ -42,10 +42,6 @@ class WanDiagonalGaussianDistribution(DiagonalGaussianDistribution):
   """Diagonal Gaussian registered as a JAX pytree."""
 
 
-DiagonalGaussianDistribution.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-WanDiagonalGaussianDistribution.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-
-
 def _wan_diag_gauss_dist_flatten(dist):
   return (dist.mean, dist.logvar, dist.std, dist.var), (dist.deterministic,)
 

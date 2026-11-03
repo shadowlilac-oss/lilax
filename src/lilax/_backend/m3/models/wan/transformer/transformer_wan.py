@@ -36,11 +36,6 @@ HEAD = common_types.HEAD
 D_KV = common_types.D_KV
 EMBED = common_types.EMBED
 
-for _function in (_dot_product_attention, _pad_axis, _splash_block_sizes, unflatten_heads, apply_rope):
-  _function.__module__ = __name__
-del _function
-
-
 class ApproximateGELU(nnx.Module):
   def __init__(self, rngs: nnx.Rngs, dim_in: int, dim_out: int, bias: bool, dtype: jnp.dtype = jnp.float32,
                weights_dtype: jnp.dtype = jnp.float32, precision: jax.lax.Precision = None,

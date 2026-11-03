@@ -19,7 +19,6 @@ class RepSentinel:
     return isinstance(other, RepSentinel)
 
 
-RepSentinel.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
 tree_util.register_pytree_node(RepSentinel, lambda x: ((), None), lambda _, __: RepSentinel())
 
 
@@ -44,7 +43,6 @@ class AutoencoderKLWanCache:
     self._enc_feat_map = (None,) * self._enc_conv_num
 
 
-AutoencoderKLWanCache.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
 
 
 def _wan_cache_flatten(cache):

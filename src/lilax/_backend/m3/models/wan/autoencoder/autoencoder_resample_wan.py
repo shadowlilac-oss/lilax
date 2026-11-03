@@ -134,7 +134,3 @@ class WanResample(nnx.Module):
     return x, feat_cache, feat_idx
 
 
-WanUpsample.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-Identity.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-ZeroPaddedConv2D.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-WanResample.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

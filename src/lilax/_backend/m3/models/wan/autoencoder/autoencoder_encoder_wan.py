@@ -83,4 +83,3 @@ class WanEncoder3d(nnx.Module):
     return x, feat_cache, jnp.array(feat_idx, dtype=jnp.int32)
 
 
-WanEncoder3d.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

@@ -65,4 +65,3 @@ class WanCausalConv3d(nnx.Module):
     return self.conv(x_padded)
 
 
-WanCausalConv3d.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"

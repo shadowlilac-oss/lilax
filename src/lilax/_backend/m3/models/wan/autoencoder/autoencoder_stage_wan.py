@@ -63,5 +63,3 @@ class WanUpBlock(nnx.Module):
     return x, feat_cache, feat_idx
 
 
-WanMidBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
-WanUpBlock.__module__ = "lilax._backend.m3.models.wan.autoencoder.autoencoder_kl_wan"
