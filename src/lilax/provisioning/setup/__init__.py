@@ -97,9 +97,18 @@ def _posttrain_toolchain():
 
 
 def _install(python, source, device, mode, workflow, with_tf, jax_version, libtpu_version, libtpu_gcs_path,
-             vllm_adapter, allow_system_changes):
+             vllm_adapter, allow_system_changes, grain_wheels):
   if device == "gpu":
-    raise ValueError("GPU setup requires an image-preserving dependency installation that is not yet available")
+    if mode != "stable" or workflow != "pre-training":
+      raise ValueError("GPU NGC setup supports only stable mode and the pre-training workflow")
+    if jax_version or libtpu_version or libtpu_gcs_path or vllm_adapter or with_tf is False or allow_system_changes:
+      raise ValueError("GPU NGC setup does not support custom JAX/TPU, vLLM, TensorFlow exclusion, or system changes")
+    if grain_wheels is None:
+      raise ValueError("GPU NGC setup requires grain_wheels pointing to the built Grain wheel directory")
+    installer = resources.files("lilax.provisioning.setup").joinpath("install_ngc.py")
+    with resources.as_file(installer) as path:
+      _run([python, str(path), str(source), str(grain_wheels)])
+    return
   _run([python, "-m", "pip", "install", "--no-cache-dir", "-U", "pip", "setuptools", "wheel", "uv"])
   if workflow == "post-training" and device != "tpu":
     raise ValueError("post-training requires device='tpu'")
@@ -195,7 +204,7 @@ def install_overlay(python, source_project, *, workflow="pre-training", vllm_ada
 
 def setup(python, source_project, *, device=None, mode=None, workflow=None, with_tf=None,
           jax_version=None, libtpu_version=None, libtpu_gcs_path=None, vllm_adapter=None,
-          max_attempts=1, retry_delay=5, allow_system_changes=False):
+          max_attempts=1, retry_delay=5, allow_system_changes=False, grain_wheels=None):
   """Install the selected workflow into a venv; system changes require explicit opt-in."""
   python = host.select_python(python)
   source = Path(source_project)
@@ -217,7 +226,7 @@ def setup(python, source_project, *, device=None, mode=None, workflow=None, with
   for attempt in range(max_attempts):
     try:
       _install(python, source, device, mode, workflow, with_tf, jax_version, libtpu_version, libtpu_gcs_path,
-               vllm_adapter, allow_system_changes)
+               vllm_adapter, allow_system_changes, grain_wheels)
       return
     except subprocess.CalledProcessError:
       if attempt + 1 == max_attempts:

@@ -26,4 +26,4 @@ FROM --platform=linux/amd64 nvcr.io/nvidia/jax:26.10-py3@sha256:20cf0aa0e1438560
 WORKDIR /opt/lilax
 COPY . .
 COPY --from=grain-build /wheels /opt/lilax-grain-wheels
-RUN /usr/bin/python /opt/lilax/install_ngc.py /opt/lilax /opt/lilax-grain-wheels
+RUN /usr/bin/python /opt/lilax/src/lilax/provisioning/setup/install_ngc.py /opt/lilax /opt/lilax-grain-wheels

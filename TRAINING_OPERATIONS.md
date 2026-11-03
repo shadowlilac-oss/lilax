@@ -5,11 +5,20 @@ installation, and interactions between these options have not been verified at r
 
 ## Container installation
 
-`Dockerfile.cuda` uses a pinned plain NVIDIA JAX image for amd64 and runs `install_ngc.py` to
+`Dockerfile.cuda` uses a pinned plain NVIDIA JAX image for amd64 and runs the packaged `install_ngc.py` to
 guard observed JAX, Transformer Engine, and native paths during installation. The guard does
 not cover every system library or dynamic-loader binding, and nested directory symlinks can
 cause it to fail. The base retains a CUTLASS cu12 helper package; its presence does not establish
 that a CUDA 12 runtime is active.
+
+`lilax.provisioning.setup.setup` supports this NGC profile with `device="gpu"` and
+`grain_wheels` set to a directory containing exactly one compatible built Grain 0.2.19 wheel.
+Pass an absolute Lilax source project directory and an absolute Python 3.12 virtual-environment
+interpreter that can see the image-provided artifacts. The installer requires the exact image
+artifacts and paths it guards; it is not a general CUDA installer. It installs the NGC extra,
+including TensorFlow requirements, and the pinned Tunix source. Only stable pre-training setup
+is supported; custom JAX or TPU settings, excluding TensorFlow, vLLM adapter setup, and host
+changes are not supported by this path. This API path has not been installation-verified.
 
 `Dockerfile.tpu` targets amd64. TPU support on ARM is not established: the [JAX platform
 table](https://docs.jax.dev/en/latest/installation.html#supported-platforms) lists Google Cloud
