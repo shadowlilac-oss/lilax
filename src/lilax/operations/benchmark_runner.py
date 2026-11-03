@@ -18,8 +18,8 @@ from lilax._backend.benchmarks.cluster_runner import (
 )
 from lilax._backend.benchmarks.metrics_upload import BenchmarkRun, upload_benchmark_metrics
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
-from lilax.operations.benchmark_command import build_metrics_upload_command, build_training_command
-from lilax.operations.benchmark_healthscan import healthscan_workload, select_model
+from lilax.operations._benchmark_runner.command import build_metrics_upload_command, build_training_command
+from lilax.operations._benchmark_runner.healthscan import healthscan_workload, select_model
 
 
 def run_healthscan(device_type: str, base_output_directory: str, num_steps: int = 20) -> None:
