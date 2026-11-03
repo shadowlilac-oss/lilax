@@ -289,7 +289,7 @@ class HyperParameters:
     flat_config = object.__getattribute__(self, "_flat_config")
     if attr in flat_config:
       value = flat_config[attr]
-      if isinstance(value, dict) and attr in ("debug", "rl", "lora"):
+      if isinstance(value, dict) and attr in ("debug", "rl", "lora", "dpo"):
         return getattr(object.__getattribute__(self, "_pydantic_config"), attr)
       return value
     raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")

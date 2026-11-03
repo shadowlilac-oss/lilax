@@ -90,6 +90,7 @@ def save_pretrained(
   public_config = model.runtime.public_config
   updates = public_config.get_source_values()
   updates["scan_layers"] = model.construction_config.scan_layers
+  updates["hardware"] = model.runtime.config.hardware
   updates["qwix_qat_config"] = model.existing_graph_qat_config
   saved_config = public_config.model_copy(update=updates)
   config_json = saved_config.model_dump_json(exclude={"hf_access_token"}, indent=2)
