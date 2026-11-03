@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field
 
 class DerivedValues(BaseModel):
   """Holds all fields that are derived from other config values for perfect legacy compatibility."""
-  __module__ = "lilax.configuration.schema"
 
   emb_dim: int | None = Field(None, description="Effective embedding dimension, scaled by `global_parameter_scale`.")
   mlp_dim: int | None = Field(None, description="Effective MLP dimension, scaled by `global_parameter_scale`.")

@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field, PositiveInt
 
 class Metrics(BaseModel):
   """General configuration for metrics and monitoring."""
-  __module__ = "lilax.configuration.schema"
 
   metrics_file: str | None = Field(None, description="Local file to store scalar metrics for testing.")
   gcs_metrics: bool = Field(False, description="If True, save metrics to GCS.")
@@ -18,7 +17,6 @@ class Metrics(BaseModel):
 
 class ManagedMLDiagnostics(BaseModel):
   """Configuration for managed mldiagnostics."""
-  __module__ = "lilax.configuration.schema"
 
   managed_mldiagnostics: bool = Field(False, description="Enable managed mldiagnostics.")
   managed_mldiagnostics_on_demand_profiling: bool = Field(True, description="Enable on-demand profiling server when managed mldiagnostics is enabled.")
@@ -30,7 +28,6 @@ class ManagedMLDiagnostics(BaseModel):
 
 class Goodput(BaseModel):
   """Configuration for goodput monitoring."""
-  __module__ = "lilax.configuration.schema"
 
   enable_goodput_recording: bool = Field(False, description="Enable goodput recording.")
   goodput_job_name: str = Field("", description="Optional job name override for goodput recording and monitoring. Defaults to run_name when empty.")
@@ -47,7 +44,6 @@ class Goodput(BaseModel):
 
 class GcpMonitoring(BaseModel):
   """Configuration for GCP-specific workload monitoring."""
-  __module__ = "lilax.configuration.schema"
 
   report_heartbeat_metric_for_gcp_monitoring: bool = Field(False, description="Report heartbeat metric for GCP monitoring.")
   heartbeat_reporting_interval_in_seconds: int = Field(5, description="Interval for heartbeat metric.")
@@ -56,7 +52,6 @@ class GcpMonitoring(BaseModel):
 
 class Tensorboard(BaseModel):
   """Configuration for Tensorboard logging."""
-  __module__ = "lilax.configuration.schema"
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
   use_vertex_tensorboard: bool = Field(False, description=(
