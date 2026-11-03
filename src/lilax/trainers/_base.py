@@ -11,10 +11,9 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.configs import pyconfig
 from lilax._backend.input_pipeline.input_pipeline_interface import create_data_iterator
-from lilax._backend.trainers.post_train.checkpoint_selection import select_training_checkpoint
-from lilax.configuration import QwixQATConfig
-from lilax.peft import PeftModel
-from .training_args import PRECISION_FIELDS, TFDS_C4_FIELDS
+from ._post_base_checkpoint import prepare_training_checkpoint
+from ._post_base_precision import check_precision_options, check_precision_overrides
+from .training_args import TFDS_C4_FIELDS
 from .reporting import MetricReporter
 
 
@@ -85,44 +84,11 @@ class _PostTrainer:
 
   @staticmethod
   def _check_precision_overrides(graph_config, overrides):
-    changed = [
-        name for name in PRECISION_FIELDS
-        if name in overrides and overrides[name] != getattr(graph_config, name)
-    ]
-    if changed:
-      raise ValueError(f"Cannot change precision settings on a materialized model: {', '.join(changed)}.")
+    return check_precision_overrides(graph_config, overrides)
 
   @staticmethod
   def _check_precision_options(config, overrides):
-    quant = config.quantization
-    qwix = config.use_qwix_quantization and not config.use_batch_split_schedule
-    qwix_modes = ("int4", "int8", "fp4", "fp8", "fp8_e5m2", "fp8_e4m3", "fp8_full", "fp8_gpu", "fp8_nanoo")
-    if qwix and quant and quant not in qwix_modes:
-      raise ValueError(f"Qwix has no provider for quantization={quant!r}.")
-    if overrides.get("use_qwix_quantization") and not quant:
-      raise ValueError("use_qwix_quantization requires a quantization recipe.")
-    full = quant == "fp8_full" and (qwix or (config.use_batch_split_schedule and not config.use_manual_quantization))
-    applicable = {
-        "jax_mx_gradient_mode": quant in ("jax_mxfp4", "jax_mxfp8"),
-        "quant_cfg_path": quant == "intmp" and not qwix,
-        "quantization_local_shard_count": quant == "int8" and not qwix and not config.use_batch_split_schedule,
-        "replicate_quant_scale": quant in ("int8", "intmp") and not qwix and not config.use_batch_split_schedule,
-        "qwix_bwd_weight_grad_tile_count": qwix and quant in qwix_modes and quant != "fp8_full",
-        "weight_quantization_calibration_method": full,
-        "act_quantization_calibration_method": full or quant == "serve_fp8_weight",
-        "bwd_quantization_calibration_method": full,
-        "drhs_grad_quantization_calibration_method": qwix and quant == "fp8_full",
-        "quantize_mtp": qwix and quant == "fp8_full",
-        "quantize_router_proj": qwix and quant in qwix_modes,
-        "quantize_logits_proj": qwix and quant == "fp8_full",
-        "logits_proj_quant_calibration_method": qwix and quant == "fp8_full" and config.quantize_logits_proj,
-        "logits_proj_bwd_quant_calibration_method": qwix and quant == "fp8_full" and config.quantize_logits_proj,
-        "sa_qproj_bwd_bf16": qwix and quant == "fp8_full",
-        "use_manual_quantization": config.use_batch_split_schedule,
-    }
-    unused = [name for name, supported in applicable.items() if name in overrides and not supported]
-    if unused:
-      raise ValueError(f"Precision settings do not apply to the selected recipe: {', '.join(unused)}.")
+    return check_precision_options(config, overrides)
 
   @staticmethod
   def _with_model_config(config, model):
@@ -138,34 +104,7 @@ class _PostTrainer:
     return pyconfig.HyperParameters(updated)
 
   def _prepare_training_checkpoint(self, checkpoint_step, manager):
-    manager.save_only_lora_params = getattr(self.args, "save_only_lora_params", None)
-    manager.restore_only_lora_params = getattr(self.args, "restore_only_lora_params", None)
-    manager, checkpoint_step, marker = select_training_checkpoint(
-        self.config.checkpoint_dir, None, step=checkpoint_step, manager=manager,
-    )
-    if marker is not None:
-      if (not isinstance(marker, dict) or set(marker) != {"version", "kind", "qat_config"}
-          or type(marker["version"]) is not int or marker["version"] != 1
-          or marker["kind"] not in ("qat", "fp")
-          or (marker["kind"] == "fp" and marker["qat_config"] is not None)
-          or (marker["kind"] == "qat" and not isinstance(marker["qat_config"], dict))):
-        raise ValueError("Invalid full-state training graph metadata.")
-      if marker["kind"] == "qat":
-        if self.config.lora.lora_restore_path:
-          raise ValueError("Cannot combine a QAT full-state restore with lora_restore_path.")
-        self.model.prepare_for_full_state_restore(
-            QwixQATConfig.model_validate(marker["qat_config"]), runtime=self.model.runtime,
-        )
-      elif self.model.pending_qat_config is not None:
-        raise ValueError("The selected full-state checkpoint has an FP graph, not the requested QAT graph.")
-    elif checkpoint_step is not None and self.model.pending_qat_config is not None:
-      raise ValueError("Cannot restore QAT full state without training graph metadata.")
-    if (self.model.pending_qat_config is not None
-        and (isinstance(self.model, PeftModel) or self.config.lora.enable_lora or self.config.lora.lora_restore_path)):
-      if manager.save_only_lora_params is not False or manager.restore_only_lora_params is not False:
-        raise NotImplementedError("QAT with LoRA requires full-model save and restore to preserve QAT statistics.")
-      if self.config.lora.lora_restore_path or getattr(self.config, "learn_to_init_mode", False):
-        raise NotImplementedError("QAT with LoRA requires full-model checkpointing with optimizer state.")
+    manager, checkpoint_step = prepare_training_checkpoint(checkpoint_step, manager, self.args, self.config, self.model)
     self.model.materialize(runtime=self.model.runtime)
     self.config = self._with_model_config(self.config, self.model)
     qat_config = self.model.existing_graph_qat_config
