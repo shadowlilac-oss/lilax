@@ -21,7 +21,6 @@ from jax.sharding import PartitionSpec as P
 from lilax._backend.common import common_types as ctypes
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.kernels import megablox as mblx
-from lilax._backend.kernels import sort_activations
 from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_sort
 from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -29,7 +28,7 @@ from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from lilax._backend.layers import attentions, linears, nnx_wrappers, quantizations
+from lilax._backend.layers import attentions, linears, moe_dispatch, moe_routing, nnx_wrappers, quantizations
 from lilax._backend.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import max_utils
@@ -139,166 +138,11 @@ class RouteOutput:
   tc_routing: Optional[Any] = None
 
 
-def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
-  """Truncates the traffic matrix to fit in buffer_size on receiver side.
-
-  When ragged_buffer_factor > 0, the receiver buffer has a fixed capacity
-  (buffer_size). Due to routing imbalance, some shards might receive more tokens
-  than this capacity. We use a prefix sum to deterministically truncate the
-  received tokens on all shards, ensuring we don't write out of bounds.
-  """
-  cumsum = jnp.cumsum(all_shards_group_sizes, axis=0)
-  clamped_cumsum = jnp.minimum(cumsum, buffer_size)
-  clamped_cumsum_extended = jnp.concatenate(
-      [
-          jnp.zeros((1, all_shards_group_sizes.shape[1]), dtype=clamped_cumsum.dtype),
-          clamped_cumsum,
-      ],
-      axis=0,
-  )
-  return jnp.diff(clamped_cumsum_extended, axis=0)
-
-
-def _sort_activations(
-    inputs: jax.Array,
-    sort_indices: jax.Array,
-    use_custom_vjp: bool,
-) -> jax.Array:
-  """Sort activations by `sort_indices`.
-
-  If `use_custom_vjp=True`, then we use a custom backward pass that
-  reverses the sort order. Specifically, this unsort operation is simply a sort
-  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
-  the case where the compiler generates a less efficient backward pass op.
-
-  Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
-  of `jnp.arange(inputs.shape[0])`.
-
-  Args:
-    inputs: `(tokens, ...)`-shaped array of input activations to sort.
-    sort_indices: `(tokens,)`-shaped array containing the sort order.
-    use_custom_vjp: Whether to use the explicit backward pass.
-
-  Returns:
-    `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
-  """
-  assert inputs.shape[0] == sort_indices.shape[0]
-
-  with jax.named_scope("sort_activations"):
-    if use_custom_vjp:
-      return _sort_activations_custom(inputs, sort_indices)
-    return inputs[sort_indices, ...]
-
-
-def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
-  """Groups token activations by expert without materializing Top-K copies."""
-  selected_experts = selected_experts.reshape((inputs.shape[0], -1))
-  # When use_gather_mosaic_kernel=False, use the general JAX backward, which
-  # gathers and sums gradients from all expert copies of each token. The
-  # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
-  # experts per token and is enabled only by the specialized batch-split path.
-  return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
-
-
-@jax.custom_vjp
-def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
-  """Sort functions with custom vjp."""
-  return inputs[sort_indices, ...]
-
-
-def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-  """Forward pass of the custom vjp for `_sort_activations()`."""
-  return _sort_activations_custom(inputs, sort_indices), sort_indices
-
-
-def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
-  """Backward pass of the custom vjp for `_sort_activations()`."""
-  sort_indices = residuals
-  return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
-
-
-_sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
-
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
-def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
-  """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
-
-  The transpose of `take_along_axis` is a scatter-add of the `[..., k]` cotangent into `[..., num_classes]`. On the
-  TPU, XLA sorts the flattened indices and then runs an element-serial scatter; for DeepSeek routing
-  ([tokens, 8] into [tokens, 256]) that is the largest VPU-lane op in the step. Here the backward is
-  `d x[..., e] = sum_k g[..., k] * (indices[..., k] == e)`, one fused compare-select-reduce.
-
-  Requires `0 <= indices < num_classes` (true for `lax.top_k` output). When the indices along the last axis are
-  distinct (top-k), each output element receives at most one nonzero term, so the gradient equals the scatter-add
-  result exactly; with repeated indices it is the same sum in a different order.
-  """
-  del num_classes
-  return jnp.take_along_axis(x, indices, axis=-1)
-
-
-def _take_along_last_axis_dense_vjp_fwd(x, indices, num_classes):
-  del num_classes
-  return jnp.take_along_axis(x, indices, axis=-1), indices
-
-
-def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
-  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (num_classes,), indices.ndim)
-  hit = indices[..., None] == iota  # [..., k, num_classes]
-  return jnp.sum(jnp.where(hit, g[..., None], jnp.zeros((), g.dtype)), axis=-2), None
-
-
-take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
-
-
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
       ("expert_only", None, "embed_moe"),
   )
-
-
-def random_routing(rng_key, gate_logits, num_experts_per_tok):
-  """Performs random routing of tokens to experts.
-
-  Args:
-    rng_key: A JAX PRNGKey for randomness.
-    gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
-      representing the logits for each expert.
-    num_experts_per_tok: The number of experts to select for each token.
-
-  Returns:
-    A tuple containing:
-      - top_k_indices: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the indices of the selected experts for each
-                       token.
-      - top_k_weights: JAX array of shape (batch_size, sequence_length,
-      num_experts_per_tok)
-                       representing the weights for the selected experts.
-  """
-  bs, seq_len, num_experts = gate_logits.shape
-  selected_num = bs * seq_len * num_experts_per_tok
-  # Directly generate random integers in the range [0, num_experts)
-  top_k_indices = jax.random.randint(
-      rng_key,
-      shape=(selected_num,),
-      minval=0,
-      maxval=num_experts,
-      dtype=jnp.int32,
-  )
-  top_k_indices = top_k_indices.reshape(bs, seq_len, num_experts_per_tok)
-  top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
-  return top_k_weights, top_k_indices
-
-
-def valid_expert_mask(indices, num_experts):
-  """True where an expert id is real.
-
-  Forced routing marks unused slots with -1, and any out-of-range id is treated
-  the same way.
-  """
-  return (indices >= 0) & (indices < num_experts)
 
 
 def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
@@ -1358,7 +1202,7 @@ class RoutedMoE(nnx.Module):
     if forced_routed_experts is not None:
       top_k_indices = forced_routed_experts
       # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
-      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
+      valid_token_mask = moe_routing.valid_expert_mask(top_k_indices, self.num_experts)
       # Gather at 0, not -1: take_along_axis would wrap -1 onto the last expert and
       # that value reaches the softmax denominator before the mask zeroes it.
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
@@ -1373,7 +1217,7 @@ class RoutedMoE(nnx.Module):
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
         rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+        top_k_weights, top_k_indices = moe_routing.random_routing(rng, gate_logits, self.num_experts_per_tok)
         return top_k_weights, top_k_indices
 
       if self.is_hash_routing:
@@ -1507,7 +1351,7 @@ class RoutedMoE(nnx.Module):
     if tag_routing_fn is not None:
       top_k_indices = tag_routing_fn(top_k_indices)
     if getattr(self.config, "router_topk_matmul_vjp", False):
-      top_k_weights = take_along_last_axis_dense_vjp(pre_bias_logits, top_k_indices, pre_bias_logits.shape[-1])
+      top_k_weights = moe_routing.take_along_last_axis_dense_vjp(pre_bias_logits, top_k_indices, pre_bias_logits.shape[-1])
     else:
       top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
@@ -1609,7 +1453,7 @@ class RoutedMoE(nnx.Module):
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       if forced_routed_experts is not None:
         topk_indices_2d = jnp.where(
-            valid_expert_mask(topk_indices_2d, self.config.num_experts), topk_indices_2d, self.config.num_experts
+            moe_routing.valid_expert_mask(topk_indices_2d, self.config.num_experts), topk_indices_2d, self.config.num_experts
         )
       ragged_buffer_factor = self.get_ragged_buffer_factor()
       if not force_dropless and ragged_buffer_factor > 0.0:
@@ -1665,7 +1509,7 @@ class RoutedMoE(nnx.Module):
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
       if forced_routed_experts is not None:
-        valid_mask = valid_expert_mask(flatten_selected_experts, self.num_experts)
+        valid_mask = moe_routing.valid_expert_mask(flatten_selected_experts, self.num_experts)
       if roll_to_expert_id is not None:
         flatten_selected_experts = (flatten_selected_experts - roll_to_expert_id) % self.num_experts
       if forced_routed_experts is not None:
@@ -1676,10 +1520,10 @@ class RoutedMoE(nnx.Module):
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = moe_dispatch._route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        sorted_inputs = moe_dispatch._sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
       group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
@@ -1699,7 +1543,7 @@ class RoutedMoE(nnx.Module):
       experts_start = shard_idx * local_num_experts
       local_group_size = jax.lax.dynamic_slice_in_dim(group_size, experts_start, local_num_experts, axis=0)
       has_overflow = jnp.sum(local_group_size) > buffer_size
-      local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
+      local_group_size = moe_dispatch._truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
       if use_tc_sort and self.config.moe_tc_window_routing and (tag_fn := routing_tag_fn(self.config)):
         local_group_size = tag_fn(local_group_size)
       expert_indices = jnp.arange(local_num_experts)
@@ -1766,7 +1610,7 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
-      unsort_intermediate = _sort_activations(
+      unsort_intermediate = moe_dispatch._sort_activations(
           intermediate, jnp.argsort(sorted_selected_experts), use_custom_sort_vjp
       )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
@@ -1834,7 +1678,7 @@ class RoutedMoE(nnx.Module):
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
       sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end, use_single_sparsecore=use_single_sparsecore)
     else:
-      sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
+      sorted_inputs = moe_dispatch._sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
     return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
 
@@ -1885,7 +1729,7 @@ class RoutedMoE(nnx.Module):
 
     if ragged_buffer_factor > 0.0:
       assert buffer_size is not None
-      truncated_all_shards_group_sizes = _truncate_matrix(all_shards_group_sizes, buffer_size)
+      truncated_all_shards_group_sizes = moe_dispatch._truncate_matrix(all_shards_group_sizes, buffer_size)
       if is_dispatch:
         input_offsets = transform_array(all_shards_group_sizes, shard_id, TransformStrategy.INPUT_OFFSET, is_batch_sharded)
         send_sizes = transform_array(truncated_all_shards_group_sizes, shard_id, TransformStrategy.SEND_SIZE, is_batch_sharded)
@@ -3040,7 +2884,7 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
-          local_output = _sort_activations(
+          local_output = moe_dispatch._sort_activations(
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),
               self.config.use_custom_sort_vjp,

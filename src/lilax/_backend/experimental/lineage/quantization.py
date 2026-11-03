@@ -8,7 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import ops, ragged_quantization
 
 
 def _finfo_max(qtype: Any) -> float:
@@ -122,7 +122,7 @@ def quantize_with_scale(
   if num_valid_rows is not None and _can_use_ragged_pallas(x):
     return jax.lax.platform_dependent(
         x, scale, jnp.asarray(num_valid_rows, jnp.int32),
-        tpu=lambda a, s, n: ops.ragged_quantize(a, s, qtype, n),
+        tpu=lambda a, s, n: ragged_quantization.ragged_quantize(a, s, qtype, n),
         default=lambda a, s, _: _xla_quantize_with_scale(a, s, qtype),
     )
   return _xla_quantize_with_scale(x, scale, qtype)
@@ -152,7 +152,7 @@ def absmax_quantize(
   if num_valid_rows is not None and _can_use_ragged_pallas(x):
     return jax.lax.platform_dependent(
         x, jnp.asarray(num_valid_rows, jnp.int32),
-        tpu=lambda a, n: ops.ragged_absmax_quantize(a, qtype, n),
+        tpu=lambda a, n: ragged_quantization.ragged_absmax_quantize(a, qtype, n),
         default=lambda a, n: _xla_absmax_quantize(a, qtype, n),
     )
   return _xla_absmax_quantize(x, qtype, num_valid_rows)
