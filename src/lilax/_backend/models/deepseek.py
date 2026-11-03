@@ -37,6 +37,8 @@ from lilax._backend.layers.engram import Engram
 from lilax._backend.layers.engram import NgramHashMapping
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.models import deepseek_batchsplit
+from lilax._backend.models import deepseek_batchsplit_microbatch
+from lilax._backend.models import deepseek_batchsplit_weights
 from lilax._backend.models import deepseek_batchsplit_fp8
 from lilax._backend.utils import max_utils
 from lilax._backend.utils.sharding import create_sharding
@@ -519,14 +521,14 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       splash_kernel = deepseek_batchsplit.init_splash_kernel(self.config)
       inputs = jax.shard_map(
           functools.partial(
-              deepseek_batchsplit.split,
+              deepseek_batchsplit_microbatch.split,
               split_factor=self.config.batch_split_factor,
           ),
           mesh=self.mesh,
           in_specs=activation_pspec,
           out_specs=[activation_pspec] * self.config.batch_split_factor,
       )(inputs)
-      yarn_freqs = deepseek_batchsplit.split(yarn_freqs, self.config.batch_split_factor)
+      yarn_freqs = deepseek_batchsplit_microbatch.split(yarn_freqs, self.config.batch_split_factor)
 
       def extract_fn(x):
         if isinstance(x, nnx.variablelib.Variable):
@@ -539,7 +541,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           )
         return x
 
-      weights = deepseek_batchsplit.fetch_weights(
+      weights = deepseek_batchsplit_weights.fetch_weights(
           nnx.to_pure_dict(nnx.state(self, (nnx.Param, moe.MoEBiasVar)), extract_fn), self.config.dtype
       )
       weights = deepseek_batchsplit.gather_weights(weights, self.mesh)
@@ -567,7 +569,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       )
       outputs = jax.shard_map(
           functools.partial(
-              deepseek_batchsplit.merge,
+              deepseek_batchsplit_microbatch.merge,
               split_factor=self.config.batch_split_factor,
           ),
           mesh=self.mesh,

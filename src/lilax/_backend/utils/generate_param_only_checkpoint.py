@@ -10,7 +10,7 @@ from jax import random
 from jax.sharding import Mesh
 
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.common import train_state_nnx
+from lilax._backend.common import state_initialization, train_state_nnx
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.utils import gcs_utils, lora_utils, max_logging, max_utils
 from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, train_utils
@@ -165,7 +165,7 @@ def _possibly_unroll_lora_params_nnx(config, state, annotations, mesh):
 
 
 def _save_lora_decode_checkpoint_nnx(config, state, checkpoint_manager):
-  decode_state = maxtext_utils.init_decode_state(None, jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), state.params))
+  decode_state = state_initialization.init_decode_state(None, jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), state.params))
   if checkpoint_manager is not None:
     if checkpointing.save_checkpoint(checkpoint_manager, 0, decode_state):
       max_logging.log(f"saved a LoRA decode checkpoint at {config.checkpoint_dir}")

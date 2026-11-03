@@ -6,7 +6,6 @@ import os
 from flax import nnx, traverse_util
 from flax.core.meta import get_partition_spec
 from flax.core.spmd import logical_axis_rules as axis_rules
-from flax.training.train_state import TrainState
 import jax
 from jax.experimental import mesh_utils
 from jax.experimental.serialize_executable import deserialize_and_load
@@ -18,6 +17,7 @@ import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_c
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
 
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common import state_initialization
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode
 from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.models import gemma4_small
@@ -906,33 +906,6 @@ def update_state_param(state, target_path, value):
   return state.replace(params=new_params)
 
 
-def init_decode_state(apply_fn, params) -> TrainState:
-  return TrainState(step=0, apply_fn=apply_fn, params=params, tx=None, opt_state={})
-
-
-def init_training_state(apply_fn, params, tx):
-  return TrainState.create(apply_fn=apply_fn, params=params, tx=tx)
-
-
-def init_initial_state(model, tx, config, is_training, key):
-  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-  image_shape = mm_processor.get_dummy_image_shape_for_init(
-      config.model_name, batch_size=config.micro_batch_size_to_train_on
-  )
-  audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-  params_key, dropout_key, aqt_key = jax.random.split(key, 3)
-  model_vars = model.init(
-      {"params": params_key, "dropout": dropout_key, "aqt": aqt_key},
-      np.ones(input_shape, dtype=jnp.int32),
-      np.ones(input_shape, dtype=jnp.int32),
-      encoder_images=np.ones(image_shape, dtype=jnp.int32) if config.use_multimodal else None,
-      encoder_audios=np.ones(audio_shape, dtype=jnp.float32) if config.use_audio else None,
-  )
-  if is_training:
-    return init_training_state(model.apply, model_vars, tx)
-  return init_decode_state(model.apply, model_vars)
-
-
 def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):
   """Print state shardings comparing logical definition and physical result."""
   if not isinstance(params, nnx.State):
@@ -1199,14 +1172,14 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
           config.load_parameters_path, abstract_state.params, config.checkpoint_storage_concurrent_gb,
           config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3,
       )
-    state = init_decode_state(None, params)
+    state = state_initialization.init_decode_state(None, params)
 
   state = max_utils.unbox_logicallypartioned(state)
   return state, state_mesh_annotations
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
-  if isinstance(init_state_fn, functools.partial) and init_state_fn.func is init_initial_state:
+  if isinstance(init_state_fn, functools.partial) and init_state_fn.func is state_initialization.init_initial_state:
     with axis_rules(config.logical_axis_rules):
       abstract_state = jax.eval_shape(init_state_fn)
       logical_annotations = get_partition_spec(abstract_state)
@@ -1358,30 +1331,3 @@ def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):
     )
 
 
-def prepare_kv_caches_for_scan(kv_caches, scan_length, block_len, stack=False):
-  if kv_caches is None:
-    return None
-  if not isinstance(kv_caches, list):
-    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
-  grouped = [tuple(kv_caches[i * block_len : (i + 1) * block_len]) for i in range(scan_length)]
-  if stack:
-    return jax.tree_util.tree_map(lambda *args: jnp.stack(args, axis=0), *grouped)
-  return grouped
-
-
-def update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length, block_len, stacked=False):
-  if kv_caches is None or returned_kv_cache is None:
-    return
-  if not isinstance(kv_caches, list):
-    raise TypeError(f"kv_caches must be a list, got {type(kv_caches)}")
-  if stacked:
-    unstacked = [jax.tree_util.tree_map(lambda x, i=i: x[i], returned_kv_cache) for i in range(scan_length)]
-    for i in range(scan_length):
-      start_idx = i * block_len
-      for offset, updated_item in enumerate(unstacked[i]):
-        kv_caches[start_idx + offset] = updated_item
-  else:
-    for i in range(scan_length):
-      start_idx = i * block_len
-      for offset, updated_item in enumerate(returned_kv_cache[i]):
-        kv_caches[start_idx + offset] = updated_item

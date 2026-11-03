@@ -21,6 +21,7 @@ from orbax.checkpoint.metadata import ArrayMetadata
 
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
 from lilax._backend.common.checkpoints import checkpoint_context, checkpointing
+from lilax._backend.common import state_initialization
 from lilax._backend.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from lilax._backend.configs import pyconfig
 from lilax._backend.experimental.lineage import lineage_adapter
@@ -943,7 +944,7 @@ def from_pretrained(
 
 def setup_decode_state_from_nnx(model, config, rng, mesh):
   """Load an NNX checkpoint into a linen decode TrainState."""
-  init_state_fn = partial(maxtext_utils.init_initial_state, model, None, config, False, rng)
+  init_state_fn = partial(state_initialization.init_initial_state, model, None, config, False, rng)
   _, state_mesh_annotations, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, False)
   nnx_model = from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE)
 
@@ -961,5 +962,5 @@ def setup_decode_state_from_nnx(model, config, rng, mesh):
   del nnx_model, nnx_param_state
 
   params = {"params": raw_params}
-  state = maxtext_utils.init_decode_state(model.apply, params)
+  state = state_initialization.init_decode_state(model.apply, params)
   return state, state_mesh_annotations

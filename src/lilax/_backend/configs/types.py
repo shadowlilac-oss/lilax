@@ -18,13 +18,20 @@ import jax
 from lilax._backend.configs.batch_sizes import derive_batch_sizes
 from lilax._backend.configs.checkpoint_validation import validate_checkpoint_source_config, validate_checkpoint_storage_config
 from lilax._backend.configs.context_parallel_validation import validate_context_parallelism
+from lilax._backend.configs.elastic_validation import validate_elastic_backup
 from lilax._backend.configs.diagnostics_fields import ManagedMLDiagnostics
+from lilax._backend.configs.inference_fields import (
+    Decoding, InferenceBenchmark, InferenceGeneral, InferenceLayout, InferenceServer, PrefixCaching, SamplingStrategy,
+)
+from lilax._backend.configs.positional_embedding import PositionalEmbedding, Rope, RopeType, YarnRope
 from lilax._backend.configs.mesh_parallelism import (
     DcnParallelism, IciParallelism, _resolve_parallelism, _resolved_fsdp_size, validate_optimizer_sharding,
 )
 from lilax._backend.configs import moe_routing
+from lilax._backend.configs import moe_quantization_validation
 from lilax._backend.configs import attention_validation
 from lilax._backend.configs.training_validation import validate_training_objective
+from lilax._backend.configs.splash_defaults import resolve_local_splash_defaults
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
@@ -213,14 +220,6 @@ class WsdDecayStyle(str, Enum):
   COSINE = "cosine"
 
 
-class RopeType(str, Enum):
-  """Supported Rotary Positional Embedding (RoPE) implementations."""
-
-  DEFAULT = "default"
-  LLAMA3_1 = "llama3.1"
-  YARN = "yarn"
-
-
 class TokenizerType(str, Enum):
   """Supported tokenizer libraries."""
 
@@ -238,16 +237,6 @@ class DatasetType(str, Enum):
   TFDS = "tfds"
   C4MLPERF = "c4_mlperf"
   OLMO_GRAIN = "olmo_grain"
-
-
-class SamplingStrategy(str, Enum):
-  """Supported decoding and sampling strategies."""
-
-  GREEDY = "greedy"
-  WEIGHTED = "weighted"
-  NUCLEUS = "nucleus"
-  TOPK = "topk"
-  COMPOSITE = "composite"
 
 
 from lilax._backend.configs.profiling_types import ProfilerType
@@ -3112,142 +3101,6 @@ class Muon(BaseModel):
   )
 
 
-class PositionalEmbedding(BaseModel):
-  """General configuration for positional embeddings."""
-
-  use_iota_embed: bool = Field(
-      False,
-      description="Use iota operator in Embed, an efficient way to represent positions.",
-  )
-  use_untrainable_positional_embedding: bool = Field(
-      False, description="Use untrainable sinusoidal positional embeddings."
-  )
-  trainable_position_size: int = Field(
-      -1,
-      description="Enables GPT-3 style trainable positional embeddings if positive.",
-  )
-  nope_layer_interval: int = Field(-1, description="If positive, every N-th layer will NOT use RoPE (Llama4).")
-
-
-class Rope(BaseModel):
-  """Configuration for Rotary Positional Embedding (RoPE)."""
-
-  rope_type: RopeType = Field(RopeType.DEFAULT, description="The type of RoPE to use.")
-  rope_use_scale: bool = Field(True, description="Apply RoPE scaling for Llama3.1 style.")
-  rope_min_timescale: int = Field(1, description="The minimum timescale for RoPE.")
-  rope_max_timescale: int = Field(10_000, description="The maximum timescale for RoPE.")
-  rope_linear_scaling_factor: float = Field(1.0, description="Linear scaling factor for 'default' RoPE implementation.")
-  local_rope_max_timescale: int = Field(-1, description="If positive, used for local window attention RoPE.")
-  global_rope_max_timescale: int = Field(-1, description="If positive, used for global attention RoPE.")
-  global_rope_proportion: float = Field(0.25, description="Proportion of dimension to apply RoPE on in global layers.")
-  local_rope_proportion: float = Field(1.0, description="Proportion of dimension to apply RoPE on in local layers.")
-
-
-class YarnRope(BaseModel):
-  """Configuration specific to YaRN (Yet another RoPE) scaling."""
-
-  max_position_embeddings: int = Field(163840, description="The maximum position embeddings for YaRN scaling.")
-  original_max_position_embeddings: int = Field(4096, description="The original max position embeddings before scaling.")
-  rope_factor: int = Field(40, description="The scaling factor for YaRN.")
-  beta_fast: int = Field(32, description="The 'beta_fast' parameter for YaRN.")
-  beta_slow: int = Field(1, description="The 'beta_slow' parameter for YaRN.")
-  mscale: float = Field(1.0, description="The 'mscale' parameter for YaRN.")
-  rope_interleave: bool = Field(True, description="Whether RoPE sin/cos are interleaved vs concatenated.")
-  rope_truncate: bool = Field(True, description="Whether to floor/ceil the correction range for YaRN.")
-  rope_attention_scaling: bool = Field(
-      False,
-      description="Scale the rotary embedding output. Used by some models like gpt-oss.",
-  )
-  rope_pairwise: bool = Field(
-      False,
-      description=(
-          "Keep rank-5 pair tensor intact "
-          "[batch_size, sequence_length, num_heads, half_dim, 2] "
-          "where half_dim represents the independent 2D rotation planes "
-          "and 2 represents the real/imag coordinates, returning interleaved RoPE."
-      ),
-  )
-  rope_direct_position_freqs: bool = Field(
-      False,
-      description=(
-          "Compute YaRN RoPE angles directly from position * inv_freqs "
-          "instead of indexing a [max_position_embeddings, half_dim] lookup table. "
-          "Outputs differ for positions >= max_position_embeddings: the table lookup clamps them "
-          "to the last row, while the direct computation uses the true angle."
-      ),
-  )
-  rope_dot_pairwise: bool = Field(
-      False,
-      description=(
-          "Keep rank-4 [batch, seq, heads, dim] tensor intact during pairwise RoPE "
-          "via a block-skew matmul on the minor dimension instead of reshaping to rank-5."
-      ),
-  )
-
-  @model_validator(mode="after")
-  def validate_rope_pairwise(self) -> "YarnRope":
-    if self.rope_pairwise and not self.rope_interleave:
-      raise ValueError("rope_pairwise=True requires rope_interleave=True.")
-    if self.rope_dot_pairwise and not self.rope_pairwise:
-      raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
-    return self
-
-
-class InferenceGeneral(BaseModel):
-  """General configuration for inference."""
-
-  max_target_length: int = Field(2048, description="Maximum sequence length for the model.")
-  max_prefill_predict_length: int = Field(64, description="Maximum length for the prefill stage in decoding.")
-  prompt: str = Field("I love to", description="The default prompt for sampling.")
-  system_prompt: str = Field(
-      "",
-      description=(
-          "Optional system prompt prepended to the chat message list when "
-          "use_chat_template=True. Required for the gemma4-e2b / gemma4-e4b -it "
-          "checkpoints which need a system role to produce coherent output."
-      ),
-  )
-  load_from_prefill_dir: bool = Field(False, description="Reads prefill cache from directory instead of computing it.")
-  prefill_cache_dir: PathStr = Field("", description="Directory for the prefill cache.")
-  autoregressive_decode_assert: str = Field(
-      "",
-      description="Value to assert against during autoregressive decoding, for testing.",
-  )
-  model_call_mode: str = Field("", description="Mode for model call, e.g., 'inference'.")
-  use_chunked_prefill: bool = Field(False, description="Use chunked prefilling for long sequences.")
-  prefill_chunk_size: int = Field(256, description="The chunk size for chunked prefilling.")
-  enable_model_warmup: bool = Field(False, description="Run a warmup cycle before starting the server.")
-  enable_llm_inference_pool: bool = Field(False, description="Launch inference server for llm_inference_gateway.")
-  multi_sampling: bool = Field(False, description="Enable multiple sampling configurations.")
-  return_log_prob: bool = Field(False, description="Return log probabilities during inference.")
-
-
-class Decoding(BaseModel):
-  """Configuration for decoding and sampling strategies."""
-
-  decode_sampling_strategy: SamplingStrategy = Field(SamplingStrategy.GREEDY, description="The strategy for decoding.")
-  decode_sampling_nucleus_p: int | float = Field(-1.0, description="Nucleus (top-p) sampling probability. -1 to disable.")
-  decode_sampling_top_k: int = Field(0, description="Top-k sampling value. 0 to disable.")
-  decode_sampling_temperature: float = Field(1.0, description="Sampling temperature.")
-
-
-from lilax._backend.configs.inference_fields import InferenceLayout, InferenceServer, PrefixCaching
-
-
-class InferenceBenchmark(BaseModel):
-  """Configuration for running inference microbenchmarks."""
-
-  inference_microbenchmark_prefill_lengths: str = Field(
-      "64,128,256,512,1024", description="Prefill lengths to benchmark."
-  )
-  inference_microbenchmark_stages: str = Field("prefill,generate", description="Stages to benchmark.")
-  inference_microbenchmark_loop_iters: int = Field(10, description="Number of iterations for the benchmark loop.")
-  inference_microbenchmark_log_file_path: PathStr = Field("", description="Path to log benchmark results.")
-  inference_microbenchmark_num_samples: list[int] = Field([1, 2, 3, 4, 5], description="Number of samples to benchmark.")
-  inference_metadata_file: PathStr = Field("", description="Path to a JSON file with inference metadata.")
-  inference_benchmark_test: bool = Field(False, description="Flag to indicate a benchmark test run.")
-
-
 class AOT(BaseModel):
   """Ahead of Time (AOT) Compilation settings."""
 
@@ -4527,45 +4380,8 @@ class MaxTextConfig(
             "use moe_x_sorted=remat."
         )
 
-  def validate_moe_quantize_token_all_gather(self):
-    """Validates that moe_quantize_token_all_gather is used with supported settings."""
-    if self.moe_quantize_token_all_gather:
-      if not self.sparse_matmul:
-        raise ValueError("moe_quantize_token_all_gather=True requires sparse_matmul=True.")
-      # Token quantized AG is implemented in Ring of Experts (roe_ag_and_route);
-      # standard EP uses ragged all-to-all where no token all-gather occurs.
-      if not self.use_ring_of_experts:
-        raise ValueError("moe_quantize_token_all_gather=True requires use_ring_of_experts=True.")
-      # Only Tokamax GMM v2 accepts QArray lhs (unwraps .qvalue and rescales
-      # output with .scale); other backends crash or drop activation scales.
-      if not self.use_gmm_v2:
-        raise ValueError("moe_quantize_token_all_gather=True requires use_gmm_v2=True.")
-      # Embedding chunking slices along the contracting dimension and re-executes
-      # routing collectives per chunk; not supported with token quantization.
-      if self.num_moe_emb_chunks > 0:
-        raise ValueError("moe_quantize_token_all_gather=True does not support num_moe_emb_chunks > 0.")
-      # Static/fixed scaling ensures uniform dequantization bounds across all
-      # gathered token slices without cross-shard dynamic scale synchronization.
-      if self.quantization == "" or not self.act_quantization_calibration_method.lower().startswith("fixed"):
-        raise ValueError(
-            "moe_quantize_token_all_gather=True requires quantization to be"
-            " specified and act_quantization_calibration_method to be fixed"
-            " (static scaling mode)."
-        )
-
-  def validate_moe_quantize_combine_bwd_method(self):
-    """Validates that moe_quantize_combine_bwd_method is only used with ring of experts."""
-    if self.moe_quantize_combine_bwd_method:
-      if not self.use_ring_of_experts:
-        raise ValueError(
-            f"moe_quantize_combine_bwd_method='{self.moe_quantize_combine_bwd_method}' requires use_ring_of_experts=True."
-        )
-      method = self.moe_quantize_combine_bwd_method
-      if not (method == "rowwise" or method.startswith("fixed")):
-        raise ValueError(
-            f"Unsupported moe_quantize_combine_bwd_method: '{method}'. "
-            "Supported options: '', 'rowwise', 'fixed,<bound>'."
-        )
+  validate_moe_quantize_token_all_gather = moe_quantization_validation.validate_moe_quantize_token_all_gather
+  validate_moe_quantize_combine_bwd_method = moe_quantization_validation.validate_moe_quantize_combine_bwd_method
 
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
@@ -4997,72 +4813,11 @@ class MaxTextConfig(
         self.logical_axis_rules.append(["aqt_amax_history", ("stage",)])
 
     # H. RESOLVE local_sa_* and eval_local_sa_* FLAGS: inherit from global sa_* / eval_sa_* if not explicitly set.
-    if self.local_sa_block_q is None:
-      self.local_sa_block_q = self.sa_block_q
-    if self.local_sa_block_kv is None:
-      self.local_sa_block_kv = self.sa_block_kv
-    if self.local_sa_block_kv_compute is None:
-      self.local_sa_block_kv_compute = self.sa_block_kv_compute
-    if self.eval_local_sa_block_q is None:
-      self.eval_local_sa_block_q = self.eval_sa_block_q
-    if self.eval_local_sa_block_kv is None:
-      self.eval_local_sa_block_kv = self.eval_sa_block_kv
-    if self.eval_local_sa_block_kv_compute is None:
-      self.eval_local_sa_block_kv_compute = self.eval_sa_block_kv_compute
-    if self.local_sa_block_q_dkv is None:
-      self.local_sa_block_q_dkv = self.sa_block_q_dkv
-    if self.local_sa_block_kv_dkv is None:
-      self.local_sa_block_kv_dkv = self.sa_block_kv_dkv
-    if self.local_sa_block_kv_dkv_compute is None:
-      self.local_sa_block_kv_dkv_compute = self.sa_block_kv_dkv_compute
-    if self.local_sa_block_q_dq is None:
-      self.local_sa_block_q_dq = self.sa_block_q_dq
-    if self.local_sa_block_kv_dq is None:
-      self.local_sa_block_kv_dq = self.sa_block_kv_dq
-    if self.local_sa_use_fused_bwd_kernel is None:
-      self.local_sa_use_fused_bwd_kernel = self.sa_use_fused_bwd_kernel
-    if self.local_sa_q_layout is None:
-      self.local_sa_q_layout = self.sa_q_layout
-    if self.local_sa_k_layout is None:
-      self.local_sa_k_layout = self.sa_k_layout
-    if self.local_sa_v_layout is None:
-      self.local_sa_v_layout = self.sa_v_layout
-    if self.eval_local_sa_q_layout is None:
-      self.eval_local_sa_q_layout = self.eval_sa_q_layout
-    if self.eval_local_sa_k_layout is None:
-      self.eval_local_sa_k_layout = self.eval_sa_k_layout
-    if self.eval_local_sa_v_layout is None:
-      self.eval_local_sa_v_layout = self.eval_sa_v_layout
-    if self.local_use_splash_scheduler is None:
-      self.local_use_splash_scheduler = self.use_splash_scheduler
-    if self.local_sa_fuse_reciprocal is None:
-      self.local_sa_fuse_reciprocal = self.sa_fuse_reciprocal
-    if self.local_sa_use_base2_exp is None:
-      self.local_sa_use_base2_exp = self.sa_use_base2_exp
+    resolve_local_splash_defaults(self)
 
     # I. RUN ALL CROSS-FIELD VALIDATIONS
     validate_checkpoint_source_config(self)
-    if self.elastic_enabled and not self.enable_single_controller:
-      raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
-    if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
-      raise ValueError(
-          "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
-      )
-    if self.elastic_enabled and self.elastic_backup_kind == "snapshot":
-      if self.enable_diloco:
-        raise ValueError("elastic_backup_kind='snapshot' is not supported with DiLoCo (`enable_diloco=True`).")
-      if self.enable_rampup_batch_size:
-        # The rampup manager derives its progress from the latest checkpoint step before the state is restored,
-        # so a restore from a newer snapshot would leave it behind.
-        raise ValueError("elastic_backup_kind='snapshot' is not supported with `enable_rampup_batch_size=True`.")
-      if self.dataset_type != DatasetType.SYNTHETIC:
-        # The snapshot carries the data iterator position as the global example index of grain's ElasticIterator,
-        # which is the only iterator whose position is valid for any number of hosts.
-        if self.dataset_type != DatasetType.GRAIN or not self.grain_use_elastic_iterator:
-          raise ValueError(
-              "elastic_backup_kind='snapshot' requires `dataset_type=grain` with `grain_use_elastic_iterator=True`"
-              " (or synthetic data), so that the data iterator position can be snapshotted with the train state."
-          )
+    validate_elastic_backup(self, DatasetType)
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"

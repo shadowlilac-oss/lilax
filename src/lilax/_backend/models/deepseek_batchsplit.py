@@ -14,7 +14,6 @@ forward pass function, with relevant residuals passed between them.
 import contextlib
 import functools
 import math
-from typing import Sequence
 
 import jax
 import jax.numpy as jnp
@@ -22,89 +21,12 @@ from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_ma
 
 from lilax._backend.kernels import attention, sort_activations, megablox
 from lilax._backend.layers import quantizations
+from lilax._backend.models.deepseek_batchsplit_microbatch import merge, split
+from lilax._backend.models.deepseek_batchsplit_weights import extract_layer_weights, fetch_weights, insert_layer_ws_grad
 
 
 def scheduling_group(group_id) -> contextlib.AbstractContextManager[None]:
   return jax.experimental.xla_metadata.set_xla_metadata(_scheduling_group_id=group_id)
-
-
-def fetch_weights(params, dtype):
-  """Fetches weights from params in the proper format for batch-split schedule."""
-  return jax.tree.map(
-      # If x is a LogicallyPartitioned array, then x.value is the underlying
-      # array. If not, use the array directly.
-      lambda x: jnp.asarray(getattr(x, "value", x)[...], dtype),
-      (
-          (
-              params["pre_self_attention_layer_norm"]["scale"],
-              (
-                  params["self_attention"]["wq_a"]["kernel"],
-                  params["self_attention"]["wq_b"]["kernel"],
-                  params["self_attention"]["q_norm"]["scale"],
-                  params["self_attention"]["wkv_a"]["kernel"],
-                  params["self_attention"]["wkv_b"]["kernel"],
-                  params["self_attention"]["kv_norm"]["scale"],
-                  params["self_attention"]["out"]["kernel"],
-              ),
-          ),
-          (
-              params["post_self_attention_layer_norm"]["scale"],
-              (
-                  params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["kernel"],
-                  params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["bias"],
-              ),
-              (
-                  params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"],
-                  params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_1"],
-                  params["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wo"],
-              ),
-              (
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_0"]["kernel"],
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wi_1"]["kernel"],
-                  params["DeepSeekMoeBlock_0"]["shared_experts"]["wo"]["kernel"],
-              ),
-          ),
-      ),
-      is_leaf=lambda x: not isinstance(x, Sequence),
-  )
-
-
-@jax.named_scope("deepseek_batchsplit_split")
-def split(x, split_factor=2):
-  """Splits the input into `split_factor` parts along the batch dimension."""
-  if split_factor == 1:
-    return [x]
-  if x is None:
-    return [None] * split_factor
-  else:
-    x = jnp.reshape(x, (-1, split_factor) + x.shape[1:])
-    return [x[:, i, ...] for i in range(split_factor)]
-
-
-@jax.named_scope("deepseek_batchsplit_merge")
-def merge(x, split_factor=2):
-  """Merges the input microbatches back into a single tensor."""
-  if split_factor == 1:
-    return x[0]
-  x = jnp.stack(x, axis=1)
-  return jnp.reshape(x, (-1,) + x.shape[2:])
-
-
-def extract_layer_weights(all_weights, layer_idx, layer_axis):
-  """Extracts the weights for given layer."""
-  return jax.tree.map(
-      lambda x: jax.lax.dynamic_index_in_dim(x, layer_idx, axis=layer_axis, keepdims=False),
-      all_weights,
-  )
-
-
-def insert_layer_ws_grad(all_ws_grad, ws_grad, layer_idx, layer_axis):
-  """Inserts the weight gradients for given layer."""
-  return jax.tree.map(
-      lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, layer_idx, axis=layer_axis),
-      all_ws_grad,
-      ws_grad,
-  )
 
 
 def gather_weights(weights, mesh):

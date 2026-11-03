@@ -60,6 +60,7 @@ from lilax._backend.models import (
     weaver,
 )
 
+from lilax._backend.layers import scan_cache
 from lilax._backend.multimodal import utils as mm_utils
 from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from lilax._backend.utils.sharding import create_sharding
@@ -2542,13 +2543,13 @@ class NNXDecoder(nnx.Module):
 
     # Apply the main scan over the full blocks
     if scan_length > 0:
-      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
+      grouped_kv_caches = scan_cache.prepare_kv_caches_for_scan(
           kv_caches, scan_length, attention_pattern_length, stack=False
       )
       y, self.layers, _ = self._apply_layers_sequentially(
           self.layers, y, *layer_args, length=scan_length, kv_caches_stacked=grouped_kv_caches, **layer_kwargs
       )
-      maxtext_utils.update_kv_caches_after_scan(
+      scan_cache.update_kv_caches_after_scan(
           kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
       )
 
@@ -2644,14 +2645,14 @@ class NNXDecoder(nnx.Module):
       # Grouped with the same helper as the caches below, so each block's tuple lines up with its caches.
       per_block_kwargs = [
           {"attention_metadata": block_metadata}
-          for block_metadata in maxtext_utils.prepare_kv_caches_for_scan(
+          for block_metadata in scan_cache.prepare_kv_caches_for_scan(
               per_layer_metadata, scan_length, block_length, stack=False
           )
       ]
       remainder_attention_metadata = tuple(per_layer_metadata[num_scanned_layers:])
 
     if scan_length > 0:
-      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
+      grouped_kv_caches = scan_cache.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
       y, self.layers, _ = self._apply_layers_sequentially(
           self.layers,
           y,
@@ -2663,7 +2664,7 @@ class NNXDecoder(nnx.Module):
           per_iteration_kwargs=per_block_kwargs,
           **layer_kwargs,
       )
-      maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
+      scan_cache.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
 
     num_remaining_layers = cfg.num_decoder_layers % block_length
     if num_remaining_layers > 0:
@@ -2704,7 +2705,7 @@ class NNXDecoder(nnx.Module):
     # activations across iterations (memory + overlap knob).
     block_unroll = max(1, scan_length)
     if scan_length > 0:
-      grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(
+      grouped_kv_caches = scan_cache.prepare_kv_caches_for_scan(
           kv_caches, scan_length, attention_pattern_length, stack=False
       )
       y, self.scanned_blocks, _ = self._apply_layers_sequentially(
@@ -2717,7 +2718,7 @@ class NNXDecoder(nnx.Module):
           unroll=block_unroll,
           **layer_kwargs,
       )
-      maxtext_utils.update_kv_caches_after_scan(
+      scan_cache.update_kv_caches_after_scan(
           kv_caches, grouped_kv_caches, scan_length, attention_pattern_length, stacked=False
       )
 
