@@ -91,9 +91,9 @@ from lilax._backend.configs.decoder_block_validation import validate_decoder_blo
 from lilax._backend.configs.splash_attention_validation import validate_splash_attention_flags
 from lilax._backend.configs.lineage_validation import validate_lineage
 from lilax._backend.common.common_types import DecoderBlockType, ShardMode, CustomRule, is_fp8_dtype
-from lilax._backend.storage import gcs
+from lilax._backend.utils import gcs_utils as gcs
 from lilax._backend.utils import max_logging
-from lilax._backend.distributed import elastic
+from lilax._backend.utils import elastic_utils as elastic
 from lilax._backend.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from lilax._backend.utils import accelerator_to_spec_map
 from lilax._backend.distributed.mesh_topology import slice_count
