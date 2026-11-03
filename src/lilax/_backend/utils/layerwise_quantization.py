@@ -12,7 +12,7 @@ import orbax.checkpoint as ocp
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import common_types
 from lilax._backend.layers import quantizations
-from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, model_creation_utils
 
 IGNORE = ocp.PLACEHOLDER
 PRNGKeyType = Any
@@ -82,7 +82,7 @@ class LayerwiseQuantization:
   def __init__(self, config: Any, rng: PRNGKeyType):
     self.config = config
     self.rng = rng
-    devices = maxtext_utils.create_device_mesh(config=config)
+    devices = device_mesh.create_device_mesh(config=config)
     self._mesh = jax.sharding.Mesh(devices, config.mesh_axes)
     self.quant = quantizations.configure_quantization(config)
     self.unboxed_abstract_state = None

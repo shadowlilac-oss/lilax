@@ -13,7 +13,8 @@ import tensorstore as ts
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig, types
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx
+from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx
+from lilax._backend.utils.training import state_setup
 from lilax._backend.utils import model_creation_utils, train_utils
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
 
@@ -49,7 +50,7 @@ def convert(paxml_ckpt_path, config):
     raise ValueError("paxml_ckpt_path should be a gcs path starting with gs://")
   cfg = config
   init_rng, _ = random.split(random.PRNGKey(cfg.init_weights_seed), 2)
-  mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+  mesh = Mesh(device_mesh.create_device_mesh(cfg), cfg.mesh_axes)
   rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=init_rng)
   model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(cfg, model)
@@ -63,7 +64,7 @@ def convert(paxml_ckpt_path, config):
   manager = checkpointing.create_orbax_checkpoint_manager(
       cfg.checkpoint_dir, cfg.enable_checkpointing, cfg.async_checkpointing, cfg.checkpoint_period,
   )
-  state, _, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, manager, init_state_fn)
+  state, _, _, _, _ = state_setup.setup_training_state(None, cfg, mesh, manager, init_state_fn)
   state = train_state_nnx.to_checkpoint_dict(state)
   state.pop("nnx_aux", None)
 

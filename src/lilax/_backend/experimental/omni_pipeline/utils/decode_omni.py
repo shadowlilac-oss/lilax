@@ -15,7 +15,7 @@ from transformers import AutoTokenizer
 
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.multimodal import processor as mm_processor
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, max_utils, model_creation_utils
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
 from lilax.configuration import MaxTextConfig
 from lilax.runtime import Runtime
@@ -183,7 +183,7 @@ def run_evaluation(checkpoint_path, runtime, num_samples=5, description="Omni Mo
   if devices[0].platform == "cpu":
     mesh = Mesh(np.array([devices[0]]), axis_names=("data",))
   else:
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    mesh = device_mesh.get_mesh_from_config(config, devices)
   model, params = initialize_model_and_weights(config, checkpoint_path, mesh)
   tokenizer = AutoTokenizer.from_pretrained(config.tokenizer_path)
   random.seed(42)

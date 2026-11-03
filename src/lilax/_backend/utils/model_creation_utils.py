@@ -30,7 +30,7 @@ from lilax._backend.integration.vllm.convert_utils import _partition_size
 from lilax._backend.layers import nnx_wrappers, quantizations
 from lilax._backend.m3.core import checkpoint as m3_checkpoint
 from lilax._backend.models import models
-from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx, sharding
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, sharding, state_abstraction
 
 
 def _is_orbax_array_metadata(node):
@@ -410,7 +410,7 @@ def from_config(
 ) -> nnx_wrappers.ToLinen | models.Transformer:
   """Construct a model using the supplied configuration, mesh, and RNGs."""
   if mesh is None:
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    mesh = device_mesh.get_mesh_from_config(config, devices)
   return create_model(config, mesh, model_mode=model_mode, rngs=rngs, quant_mode_str=quant_mode_str)
 
 
@@ -654,7 +654,7 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
   reference_model, reference_mesh = from_pretrained(
       trainer_config, devices=trainer_devices, wrap_with_tunix_adapter=True, tokenizer_pad_id=tokenizer_pad_id
   )
-  devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+  devices_array = device_mesh.create_device_mesh(sampler_config, sampler_devices)
   rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
 
   if trainer_config.load_checkpoint_only_once:
@@ -945,7 +945,7 @@ def from_pretrained(
 def setup_decode_state_from_nnx(model, config, rng, mesh):
   """Load an NNX checkpoint into a linen decode TrainState."""
   init_state_fn = partial(state_initialization.init_initial_state, model, None, config, False, rng)
-  _, state_mesh_annotations, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, False)
+  _, state_mesh_annotations, _ = state_abstraction.get_abstract_state(config, mesh, init_state_fn, False)
   nnx_model = from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_AUTOREGRESSIVE)
 
   def _state_to_dict(tree):

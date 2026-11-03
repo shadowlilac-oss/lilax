@@ -29,6 +29,7 @@ from lilax._backend.layers.multi_token_prediction import calculate_mtp_acceptanc
 from lilax._backend.utils import elastic_utils, exceptions, gcs_utils, max_logging, max_utils, maxtext_utils, maxtext_utils_nnx
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import qk_clip_utils, sharding, train_utils
+from lilax._backend.utils.diagnostics import jaxpr_dump
 from lilax._backend.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from lilax._backend.utils.globals import EPS
 from lilax._backend.utils.vocabulary_tiling import vocab_tiling_nnx_loss
@@ -907,7 +908,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
       lower_args = (state, shaped_batch, init_rng)
     else:
       lower_args = (state, shaped_batch)
-    maxtext_utils.maybe_dump_jaxpr(config, p_train_step, lower_args)
+    jaxpr_dump.maybe_dump_jaxpr(config, p_train_step, lower_args)
     if config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
       compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)

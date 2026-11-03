@@ -1554,9 +1554,11 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
     if image_grid_thw is not None and image_grid_thw.ndim == 3:
       image_grid_thw = image_grid_thw[0]
 
-    from lilax._backend.multimodal import processor_qwen3_omni  # pylint: disable=import-outside-toplevel
+    # Loads the decord/GCS video dependencies here, as the former processor import did.
+    from lilax._backend.multimodal.qwen3_omni.video import loading  # pylint: disable=import-outside-toplevel,unused-import
+    from lilax._backend.multimodal.qwen3_omni import positions  # pylint: disable=import-outside-toplevel
 
-    position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+    position_ids, mrope_position_deltas = positions.get_rope_index(
         input_ids=input_ids,
         image_grid_thw=image_grid_thw,
         video_grid_thw=video_grid_thw,

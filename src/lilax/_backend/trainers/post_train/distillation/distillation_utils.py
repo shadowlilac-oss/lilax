@@ -12,9 +12,10 @@ import optax
 from orbax import checkpoint
 from tunix.sft import peft_trainer
 
+from lilax._backend.common import training_flops
 from lilax._backend.common.checkpoints import grain_utility
 from lilax._backend.trainers.post_train.checkpoint_selection import TrainingCheckpointManager
-from lilax._backend.utils import max_logging, maxtext_utils
+from lilax._backend.utils import max_logging
 
 
 @flax.struct.dataclass(frozen=True)
@@ -116,11 +117,11 @@ def weighted_mean(sum_count_pairs: Sequence[tuple[Any, Any]] | np.ndarray) -> fl
 
 def calculate_distillation_tflops_per_device(student_config, teacher_config, is_offline: bool = False):
   """Return combined, student and teacher per-device TFLOPs per step."""
-  student_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(student_config, log=False)
+  student_tflops, _, _ = training_flops.calculate_tflops_training_per_device(student_config, log=False)
   if is_offline or teacher_config is None:
     teacher_tflops = 0.0
   else:
-    teacher_full, _, _ = maxtext_utils.calculate_tflops_training_per_device(teacher_config, log=False)
+    teacher_full, _, _ = training_flops.calculate_tflops_training_per_device(teacher_config, log=False)
     teacher_tflops = teacher_full / 3.0
   return student_tflops + teacher_tflops, student_tflops, teacher_tflops
 

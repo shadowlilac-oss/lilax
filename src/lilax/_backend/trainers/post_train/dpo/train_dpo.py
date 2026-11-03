@@ -14,6 +14,7 @@ from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.dpo import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import model_creation_utils
 
@@ -69,7 +70,7 @@ def setup_trainer_state(
         )
     else:
       if mesh is None:
-        mesh = maxtext_utils.get_mesh_from_config(mt_config, None)
+        mesh = device_mesh.get_mesh_from_config(mt_config, None)
       with mesh:
         model = TunixMaxTextAdapter(
             base_model=model, use_no_op_mappings="maxtext_config" in mt_config.vllm_additional_config,

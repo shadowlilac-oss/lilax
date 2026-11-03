@@ -77,6 +77,7 @@ from lilax._backend.experimental.rl import grpo_input_pipeline
 from lilax._backend.experimental.rl import grpo_utils
 from lilax._backend.common.metric_logger import MetricLogger
 from lilax._backend.inference import offline_engine
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils import exceptions
 from lilax._backend.utils import gcs_utils
 from lilax._backend.utils import max_logging
@@ -85,6 +86,8 @@ from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import sharding
+from lilax._backend.utils import state_abstraction
+from lilax._backend.utils.training import state_setup
 from lilax._backend.utils import train_utils
 
 # pylint: disable=too-many-positional-arguments
@@ -474,14 +477,14 @@ def setup_train_loop(
     training_devices = jax.devices()[num_inference_devices:]
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
 
-    training_mesh = maxtext_utils.get_mesh_from_config(config, devices=training_devices)
+    training_mesh = device_mesh.get_mesh_from_config(config, devices=training_devices)
     training_rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
     model = model_creation_utils.from_config(config, devices=training_devices, mesh=training_mesh, rngs=training_rngs)
     mesh = model.mesh
 
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
-    inference_mesh_obj = maxtext_utils.get_mesh_from_config(config_inference, devices=inference_devices)
+    inference_mesh_obj = device_mesh.get_mesh_from_config(config_inference, devices=inference_devices)
     inference_rngs = maxtext_utils_nnx.create_nnx_rngs(config_inference, rng_key=init_rng)
     inference_model = model_creation_utils.from_config(
         config_inference, devices=inference_devices, mesh=inference_mesh_obj, rngs=inference_rngs
@@ -507,7 +510,7 @@ def setup_train_loop(
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
-    state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
+    state, _, state_mesh_shardings, data_iterator, _ = state_setup.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
     with logical_axis_rules(config.logical_axis_rules):
@@ -522,7 +525,7 @@ def setup_train_loop(
     inference_nnx_model = _create_inference_partial()
     return train_state_nnx.TrainStateNNX(inference_nnx_model, None)
 
-  inference_state_mesh_shardings = maxtext_utils.get_abstract_state(
+  inference_state_mesh_shardings = state_abstraction.get_abstract_state(
       config_inference, inference_mesh, init_inference_state_fn, is_training=False
   )[2]
   if not config.using_pipeline_parallelism:

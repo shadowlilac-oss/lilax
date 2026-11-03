@@ -18,7 +18,7 @@ from lilax._backend.trainers.post_train.sft import hooks
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.trainers.pre_train.train import loss_fn
-from lilax._backend.utils import lora_utils, max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, lora_utils, max_logging, maxtext_utils, model_creation_utils
 
 
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
@@ -175,7 +175,7 @@ def setup_trainer_state(
       else:
         model = model_creation_utils.from_pretrained(mt_config, mesh=mesh)
     elif mesh is None:
-      mesh = maxtext_utils.get_mesh_from_config(mt_config, None)
+      mesh = device_mesh.get_mesh_from_config(mt_config, None)
   with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora and not (supplied_model and lora_utils.is_lora_enabled(model)):
       model = lora_utils.apply_lora_to_model(model, mesh, mt_config)

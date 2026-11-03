@@ -45,7 +45,8 @@ from lilax._backend.training_engine.checkpointing import (
     CheckpointRestoreError as EngineCheckpointRestoreError,
     CheckpointState as EngineCheckpointState,
 )
-from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.generate_param_only_checkpoint import generate_decode_checkpoint as _generate_decode_checkpoint
 from lilax._backend.utils.layerwise_quantization import quantize_checkpoint as _quantize_checkpoint
 from lilax._backend.utils.model_creation_utils import from_config
@@ -85,7 +86,7 @@ def checkpoint_loop(config):
     config = resolve_runtime_config(config)
   train_utils.validate_train_config(config)
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  mesh = maxtext_utils.get_mesh_from_config(config)
+  mesh = device_mesh.get_mesh_from_config(config)
   rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
   model = from_config(config, mesh=mesh, rngs=rngs)
   _, tx = train_utils.create_training_optimizer(config, model)
@@ -103,7 +104,7 @@ def checkpoint_loop(config):
 
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
-  state, _, _, _, _ = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
+  state, _, _, _, _ = state_setup.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
 
   jax.block_until_ready(state)
   state = add_entropy_to_checkpoint(state)

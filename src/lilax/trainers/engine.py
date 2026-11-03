@@ -3,9 +3,8 @@
 from lilax._backend.training_engine.abstract_engine import (
     AbstractTrainingEngine, LossOutput, MetricsBuffer, RLTrainerPayload, TrainerPayload, TrainingConfig, WeightedMetric,
 )
-from lilax._backend.training_engine.maxtext_engine import (
-    MaxTextTrainingEngine, make_router_replay_loss_fn, router_replay_gen_model_input_fn,
-)
+from lilax._backend.training_engine.maxtext_engine import MaxTextTrainingEngine
+from lilax._backend.training_engine.router_replay import make_router_replay_loss_fn, router_replay_gen_model_input_fn
 
 __all__ = [
     "AbstractTrainingEngine", "LossOutput", "MaxTextTrainingEngine", "MetricsBuffer", "RLTrainerPayload",

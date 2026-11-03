@@ -17,8 +17,9 @@ from lilax._backend.common.common_types import ShardMode
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import accelerator_to_spec_map, gcs_utils, max_utils, maxtext_utils
-from lilax._backend.utils import maxtext_utils_nnx, model_creation_utils, sharding
+from lilax._backend.utils import accelerator_to_spec_map, device_mesh, gcs_utils, max_utils, maxtext_utils
+from lilax._backend.utils import maxtext_utils_nnx, model_creation_utils, sharding, state_abstraction
+from lilax._backend.utils.diagnostics import jaxpr_dump, sharding_report
 
 
 def validate_config(config):
@@ -49,7 +50,7 @@ def get_topology_mesh(config):
           wrap=target_hardware.wrap,
       ).devices
   jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
-  topology_device_mesh = maxtext_utils.create_device_mesh(config, topology_devices)
+  topology_device_mesh = device_mesh.create_device_mesh(config, topology_devices)
   mesh_axis_type = AxisType.Explicit if config.shard_mode == ShardMode.EXPLICIT else AxisType.Auto
   return Mesh(topology_device_mesh, config.mesh_axes, axis_types=(mesh_axis_type,) * len(config.mesh_axes))
 
@@ -81,7 +82,7 @@ def get_shaped_inputs(topology_mesh, config):
     wrt = getattr(nnx, "LoRAParam", nnx.Param) if getattr(getattr(config, "lora", None), "enable_lora", False) else nnx.Param
     return train_state_nnx.TrainStateNNX(nnx_model, nnx.Optimizer(nnx_model, tx, wrt=wrt))
 
-  abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(config, topology_mesh, create_train_state, True)
+  abstract_state, _, state_mesh_shardings = state_abstraction.get_abstract_state(config, topology_mesh, create_train_state, True)
   logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
   with axis_rules(config.logical_axis_rules):
     graphdef, _ = nnx.split(nnx.eval_shape(create_train_state))
@@ -102,7 +103,7 @@ def jit_and_compile(
         func, in_shardings=in_shardings, out_shardings=out_shardings,
         static_argnums=static_argnums, donate_argnums=donate_argnums,
     )
-    maxtext_utils.maybe_dump_jaxpr(config, jitted, func_input_args)
+    jaxpr_dump.maybe_dump_jaxpr(config, jitted, func_input_args)
     lowered = jitted.lower(*func_input_args, **func_input_kwargs)
   compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
   return lowered.compile(compiler_options=compiler_options)
@@ -166,7 +167,7 @@ def compile_train_step(config):
     )
   if config.debug_sharding:
     max_utils.print_non_trivial_mesh_axis(topology_mesh)
-    maxtext_utils.print_shardings_params(shaped_args[0], state_shardings, topology_mesh, logical_annotations)
+    sharding_report.print_shardings_params(shaped_args[0], state_shardings, topology_mesh, logical_annotations)
   print("Jitting and compiling train step...", flush=True)
   compiled = jit_and_compile(
       func, shaped_args, shaped_kwargs, topology_mesh, in_shard, out_shard, static_argnums,

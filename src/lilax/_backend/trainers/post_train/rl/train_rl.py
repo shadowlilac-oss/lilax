@@ -38,7 +38,7 @@ from lilax._backend.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRoll
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
 from lilax._backend.trainers.post_train.rl import utils_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import evaluate
-from lilax._backend.utils import max_logging, maxtext_utils
+from lilax._backend.utils import device_mesh, max_logging
 from lilax._backend.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from lilax.configuration.loading import load_config_values
@@ -424,7 +424,7 @@ def _train(
   if reference_mesh is None:
     reference_mesh = mesh
   if rollout_mesh is None:
-    devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+    devices_array = device_mesh.create_device_mesh(sampler_config, sampler_devices)
     rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
   if not trainer_config.debug:
     noise_filter = max_logging.NoisyLogFilter()

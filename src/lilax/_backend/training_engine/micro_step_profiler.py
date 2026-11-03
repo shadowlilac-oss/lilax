@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+import functools
 from typing import Any
 
 from absl import logging
 import jax
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs import types
+
+
+def profiled_step(name: str, control_profile: bool = False) -> Callable[..., Any]:
+  """Wraps an engine step in a trace annotation, opening and closing the engine's profile around it when asked."""
+
+  def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
+    @functools.wraps(method)
+    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
+      step_to_profile = self.total_micro_steps
+      current_micro_step_count = self.micro_step_count
+      if control_profile:
+        self._profiler.maybe_activate(step_to_profile, current_micro_step_count, self.train_step, blocking_object=self._state)
+      with jax.profiler.StepTraceAnnotation(name, step_num=self.train_step):
+        result = method(self, *args, **kwargs)
+      if control_profile:
+        self._profiler.maybe_deactivate(step_to_profile, current_micro_step_count, self.train_step, blocking_object=self._state)
+      return result
+
+    return wrapper
+
+  return decorator
 
 
 class MicroStepProfiler:

@@ -6,7 +6,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, LlamaForCausalLM, Mis
 
 from lilax._backend.checkpoint_conversion.standalone_scripts.llama_ckpt_conversion_inference_only import MODEL_PARAMS_DICT
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import maxtext_utils
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils.generate_param_only_checkpoint import _read_train_checkpoint
 from lilax._backend.utils.max_utils import unpermute_from_match_maxtext_rope
 
@@ -28,7 +28,7 @@ def load_hf_model(model_size):
 
 
 def load_model_state(config):
-  mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+  mesh = Mesh(device_mesh.create_device_mesh(config), config.mesh_axes)
   manager = checkpointing.create_orbax_checkpoint_manager(
       config.checkpoint_dir, config.enable_checkpointing, config.async_checkpointing, config.checkpoint_period
   )

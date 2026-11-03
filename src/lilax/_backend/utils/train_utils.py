@@ -23,6 +23,7 @@ from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.input_pipeline.input_pipeline_interface import create_data_iterator
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils import diloco_sharding
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import lora_utils
@@ -31,6 +32,9 @@ from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils import model_creation_utils
 from lilax._backend.utils import sharding
+from lilax._backend.utils import state_abstraction
+from lilax._backend.utils.diagnostics import sharding_report
+from lilax._backend.utils.training import state_setup
 from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
 from lilax._backend.utils.training.rampup_batch import create_rampup_manager
 
@@ -127,7 +131,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.local_checkpoint_directory, config.local_checkpoint_period, mesh, config.colocated_python_checkpointing
     )
   elif config.enable_emergency_checkpoint:
-    abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
+    abstract_state, _, _ = state_abstraction.get_abstract_state(config, mesh, init_state_fn, is_training=True)
     checkpoint_manager = emergency_checkpointing.create_emergency_checkpoint_manager(
         config.local_checkpoint_directory, config.checkpoint_dir, mesh, abstract_state,
         config.local_checkpoint_period, config.checkpoint_period, logger,
@@ -230,7 +234,7 @@ def setup_train_loop(
       mesh = runtime.mesh
     elif mesh is None:
       mesh = elastic_utils.get_or_build(
-          elastic_retry_cache, "mesh", functools.partial(maxtext_utils.get_mesh_from_config, config, devices)
+          elastic_retry_cache, "mesh", functools.partial(device_mesh.get_mesh_from_config, config, devices)
       )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if model is None:
@@ -311,7 +315,7 @@ def setup_train_loop(
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
     snapshotter = None if elastic_retry_cache is None else elastic_retry_cache.snapshotter
-    state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
+    state, _, state_mesh_shardings, data_iterator, _ = state_setup.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=snapshotter, step=checkpoint_step,
         selected_source=selected_source,
     )
@@ -320,7 +324,7 @@ def setup_train_loop(
           state["model"] if isinstance(state, (nnx.State, dict)) and "model" in state else getattr(state, "model", state)
       )
       lora_utils.restore_lora_from_path(target_model_state, config)
-      _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
+      _, _, state_mesh_shardings = state_abstraction.get_abstract_state_nnx(config, mesh, init_state_fn, True)
     with logical_axis_rules(config.logical_axis_rules):
       state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
 
@@ -358,7 +362,7 @@ def setup_train_loop(
     if config.debug_sharding:
       logical_annotations_params = None
       max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
+      sharding_report.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
   if config.enable_diloco:
     train_state = state

@@ -13,7 +13,8 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import state_initialization, train_state_nnx
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.utils import gcs_utils, lora_utils, max_logging, max_utils
-from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils import device_mesh, maxtext_utils_nnx, model_creation_utils, train_utils
+from lilax._backend.utils.training import state_setup
 
 _SCAN_AXIS_NAMES = ("layers_per_stage", "layers", "circular_repeats")
 
@@ -101,7 +102,7 @@ def _read_train_checkpoint(config, checkpoint_manager, mesh):
     wrt = getattr(nnx, "LoRAParam", nnx.Param) if getattr(getattr(config, "lora", None), "enable_lora", False) else nnx.Param
     return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=wrt))
 
-  state, _, shardings, _, _ = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
+  state, _, shardings, _, _ = state_setup.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
   params, _ = nnx.split_state(state.model, nnx.Param, ...)
   num_params = max_utils.calculate_num_params_from_pytree(params)
   max_logging.log(f"In input checkpoint Number of model params={num_params/1e9:.3f} billion")
@@ -194,7 +195,7 @@ def _generate_lora_decode_checkpoints(config, mesh):
 
 
 def generate_decode_checkpoint(config):
-  mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+  mesh = Mesh(device_mesh.create_device_mesh(config), config.mesh_axes)
   assert config.checkpoint_dir, "checkpoint_dir not configured"
   path = epath.Path(config.checkpoint_dir)
   if path.exists() and jax.process_index() == 0:

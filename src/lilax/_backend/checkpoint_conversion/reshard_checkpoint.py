@@ -19,7 +19,7 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.layers import quantizations
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding
+from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx, model_creation_utils, sharding
 
 
 def create_abstract_params(config, mesh: Mesh) -> nnx.State:
@@ -200,7 +200,7 @@ def _reshard_checkpoint(config):
       f"Reshard checkpoint with weight dtype: {config.weight_dtype},"
       f" moe_flat_fsdp_weights: {config.moe_flat_fsdp_weights}"
   )
-  mesh = Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+  mesh = Mesh(device_mesh.create_device_mesh(config), config.mesh_axes)
   max_logging.log(f"Target mesh: {dict(mesh.shape)}")
   start = time.time()
   params = load_resharded_params(config, mesh)

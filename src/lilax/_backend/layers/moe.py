@@ -4,7 +4,6 @@ import dataclasses
 import functools
 import inspect
 import math
-import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
@@ -13,12 +12,12 @@ from flax import struct
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
-from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from lilax._backend.common import common_types as ctypes
 from lilax._backend.common.common_types import ShardMode
+from lilax._backend.common import ffn_flops
 from lilax._backend.kernels import megablox as mblx
 from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -26,11 +25,14 @@ from lilax._backend.kernels.ragged.ragged_sort import ring_ragged_unsort
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from lilax._backend.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from lilax._backend.layers import attentions, linears, moe_dispatch, moe_experts, moe_routing, nnx_wrappers, quantizations
+from lilax._backend.layers import attentions, linears, nnx_wrappers, quantizations
+from lilax._backend.layers.moe_ops import routing as moe_routing
+from lilax._backend.layers.moe_ops.dispatch import capacity, combine, expert_parallel, sorting
+from lilax._backend.layers.moe_ops.experts import activation as expert_activation
+from lilax._backend.layers.moe_ops.experts import grouped_matmul, up_projection
 from lilax._backend.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from lilax._backend.utils import max_logging
 from lilax._backend.utils import max_utils
-from lilax._backend.utils import maxtext_utils
 from lilax._backend.utils.sharding import (
     CompoundLogicalAxis,
     create_sharding,
@@ -47,9 +49,6 @@ import numpy as np
 import qwix
 from qwix.contrib.sparsity import sparsity_module
 import qwix.pallas as qpl
-import tokamax
-
-set_xla_metadata = xla_metadata.set_xla_metadata
 
 
 DISPATCH = "dispatch"
@@ -543,128 +542,6 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
-def _all_gather_quantized_payload(
-    x: jax.Array,
-    axis_name: str | tuple[str, ...],
-    *,
-    axis: int,
-    tiled: bool,
-    method: str,
-    qtype: jnp.dtype = jnp.float8_e5m2,
-    num_feature_axes: int = 1,
-) -> jax.Array:
-  """jax.lax.all_gather with a quantized wire payload; returns dequantized x.dtype.
-
-  Args:
-    x: Local shard to gather.
-    axis_name: Mesh axis name(s) to gather over.
-    axis: Axis of `x` to gather along.
-    tiled: Same as `jax.lax.all_gather`.
-    method: One of
-      'fixed,<b>': static per-tensor scale b/qmax. The scale is identical on all
-        shards, so only qvalues are gathered. For E5M2, |x| > ~b saturates and
-        |x| < ~1.3e-10*b flushes to zero.
-      'rowwise': dynamic per-token absmax scale over the token axes (all but
-        the trailing `num_feature_axes`, e.g. (batch, seq) for 3D, (tokens,)
-        for 2D), matching the per-row gradient quantization in megablox
-        `_bwd_quantize_gradient`. Scales differ per shard, so they are
-        gathered alongside qvalues.
-    qtype: Wire dtype of the quantized payload.
-    num_feature_axes: Number of trailing axes that form one token's features.
-      'rowwise' computes one scale per token over these axes, e.g. 2 for the
-      (batch, seq, emb // 128, 128) layout of moe_tc_ragged_3d_dispatch.
-
-  Returns:
-    The gathered, dequantized array in `x.dtype`.
-  """
-  static = method.startswith("fixed")
-  token_axes = tuple(range(x.ndim - num_feature_axes))
-  if not static and method != "rowwise":
-    raise ValueError(f"Unsupported method: {method!r}. Supported: 'rowwise', 'fixed,<bound>'.")
-  if not static and axis % x.ndim not in token_axes:
-    raise ValueError(f"'rowwise' requires gathering along a token axis, got axis={axis}.")
-
-  x_f32 = x.astype(jnp.float32)
-  if static:
-    x_q = qpl.quantize(
-        x_f32,
-        qtype=qtype,
-        channelwise_axes=(),
-        calibration_method=method,
-    )
-    scale = x_q.scale
-  else:  # dynamic rowwise with per-token scale
-    x_q = qpl.quantize(
-        x_f32,
-        qtype=qtype,
-        channelwise_axes=token_axes,
-        calibration_method="absmax",
-    )
-    scale = jax.lax.all_gather(x_q.scale, axis_name=axis_name, axis=axis, tiled=tiled)
-  gathered_qvals = jax.lax.all_gather(x_q.qvalue, axis_name=axis_name, axis=axis, tiled=tiled)
-  return (gathered_qvals.astype(jnp.float32) * scale).astype(x.dtype)
-
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
-def _moe_combine_psum_scatter(
-    x: jax.Array,
-    axis_name: str | tuple[str, ...],
-    scatter_dimension: int = 0,
-    tiled: bool = True,
-    bwd_method: str = "",
-) -> jax.Array:
-  """Evaluates psum_scatter in forward, and quantized All-Gather in backward.
-
-  Shapes:
-    Forward:
-      x: [global_batch, sequence_length, hidden_dim], where global_batch is
-        the full batch across all expert parallelism (EP) shards.
-      Output: [local_batch, sequence_length, hidden_dim], scattered along
-        scatter_dimension=0 (local_batch = global_batch // num_ep).
-    Backward:
-      grads: [local_batch, sequence_length, hidden_dim], incoming cotangent.
-      Output: [global_batch, sequence_length, hidden_dim], gathered along
-        scatter_dimension=0.
-    With moe_tc_ragged_3d_dispatch, hidden_dim is split as (hidden_dim // 128, 128).
-  """
-  return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
-
-
-def _moe_combine_psum_scatter_fwd(
-    x: jax.Array,
-    axis_name: str | tuple[str, ...],
-    scatter_dimension: int = 0,
-    tiled: bool = True,
-    bwd_method: str = "",
-) -> tuple[jax.Array, None]:
-  """Custom VJP forward pass for _moe_combine_psum_scatter."""
-  return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method), None
-
-
-def _moe_combine_psum_scatter_bwd(
-    axis_name: str | tuple[str, ...],
-    scatter_dimension: int,
-    tiled: bool,
-    bwd_method: str,
-    res: Any,
-    grads: jax.Array,
-) -> tuple[jax.Array]:
-  """Custom VJP backward pass for _moe_combine_psum_scatter."""
-  if not bwd_method:
-    gathered_grads = jax.lax.all_gather(grads, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
-    return (gathered_grads,)
-
-  # The combine tensor is (batch, seq, *features): features are (emb,) or, with moe_tc_ragged_3d_dispatch,
-  # (emb // 128, 128). 'rowwise' keeps one scale per token in both layouts.
-  gathered_grads = _all_gather_quantized_payload(
-      grads, axis_name, axis=scatter_dimension, tiled=tiled, method=bwd_method, num_feature_axes=grads.ndim - 2
-  )
-  return (gathered_grads,)
-
-
-_moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
-
-
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
@@ -679,7 +556,7 @@ class RoutedMoE(nnx.Module):
     )
 
   def apply_ffn_activation(self, layer_w0, layer_w1):
-    return moe_experts.ExpertActivation.apply_ffn_activation(
+    return expert_activation.ExpertActivation.apply_ffn_activation(
         layer_w0, layer_w1, self.config.decoder_block, self.config.mlp_activations_limit, self.activation_fn, self.dtype
     )
 
@@ -687,7 +564,7 @@ class RoutedMoE(nnx.Module):
   def _maybe_truncate_local_group_size(
       all_shard_local_sizes: jax.Array, buffer_size: int, ragged_buffer_factor: float
   ) -> jax.Array:
-    return moe_dispatch.ExpertDispatch._maybe_truncate_local_group_size(
+    return expert_parallel.ExpertDispatch._maybe_truncate_local_group_size(
         all_shard_local_sizes, buffer_size, ragged_buffer_factor
     )
 
@@ -704,7 +581,7 @@ class RoutedMoE(nnx.Module):
       ragged_buffer_factor=-1.0,
       use_single_sparsecore=False,
   ):
-    return moe_dispatch.ExpertDispatch.local_permute(
+    return expert_parallel.ExpertDispatch.local_permute(
         inputs, global_group_sizes, local_expert_size, shard_index, is_offset, global_sorted_experts,
         use_custom_sort_vjp, use_ragged_sort, ragged_buffer_factor, use_single_sparsecore,
         truncate_local_group_size=lambda sizes, size, factor: RoutedMoE._maybe_truncate_local_group_size(
@@ -722,7 +599,7 @@ class RoutedMoE(nnx.Module):
       buffer_size=None,
       is_dispatch=True,
   ):
-    return moe_dispatch.ExpertDispatch.get_all_to_all_params(
+    return expert_parallel.ExpertDispatch.get_all_to_all_params(
         all_shards_group_sizes, shard_id, num_expert_parallelism, is_batch_sharded,
         ragged_buffer_factor, buffer_size, is_dispatch,
     )
@@ -1455,10 +1332,10 @@ class RoutedMoE(nnx.Module):
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = moe_dispatch._route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = sorting._route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = moe_dispatch._sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        sorted_inputs = sorting._sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
       group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
@@ -1478,7 +1355,7 @@ class RoutedMoE(nnx.Module):
       experts_start = shard_idx * local_num_experts
       local_group_size = jax.lax.dynamic_slice_in_dim(group_size, experts_start, local_num_experts, axis=0)
       has_overflow = jnp.sum(local_group_size) > buffer_size
-      local_group_size = moe_dispatch._truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
+      local_group_size = expert_parallel._truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
       if use_tc_sort and self.config.moe_tc_window_routing and (tag_fn := routing_tag_fn(self.config)):
         local_group_size = tag_fn(local_group_size)
       expert_indices = jnp.arange(local_num_experts)
@@ -1545,21 +1422,10 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
-      unsort_intermediate = moe_dispatch._sort_activations(
-          intermediate, jnp.argsort(sorted_selected_experts), use_custom_sort_vjp
+      output = sorting._unsort_and_weight_sum(
+          intermediate, sorted_selected_experts, weights, self.num_experts_per_tok, use_custom_sort_vjp,
+          self.config.matmul_precision, self.config.decoder_block, self.config.float32_weight_sum,
       )
-      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
-      reshaped_intermediate = jnp.reshape(
-          unsort_intermediate, (reshaped_weights.shape[0], self.num_experts_per_tok, -1)
-      )
-      with jax.named_scope("weight_sum"):
-        matmul_precision = jax.lax.Precision(self.config.matmul_precision)
-        if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
-          reshaped_weights = jnp.ones_like(reshaped_weights)
-        if self.config.float32_weight_sum:
-          reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
-          reshaped_weights = reshaped_weights.astype(jnp.float32)
-        output = jnp.einsum("BKE,BK -> BE", reshaped_intermediate, reshaped_weights, precision=matmul_precision)
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
   def transform_bias(self, experts_index, *biases):
@@ -1625,312 +1491,10 @@ class RoutedMoE(nnx.Module):
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
-    def fwd_tile(name):
-      """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
-      return getattr(self.config, f"eval_{name}" if max_utils.is_eval(self.config) else name)
-
-    def jax_ragged_dot_gmm(inputs, kernel, tiling, group_sizes, expert_assignments, padding_amount):
-      """Execute jax.lax.ragged_dot, with potential quantization"""
-      m, k, n = inputs.shape[0], inputs.shape[1], kernel.shape[2]
-      # Clamps the tile size using the minimum
-      tiling = (
-          min(tiling[0], m),
-          min(tiling[1], k),
-          min(tiling[2], n),
-      )
-      rhs_inputs = kernel
-      if isinstance(kernel, aqt.QTensor):
-        if kernel.bias or kernel.sparsity_mask or len(kernel.scale) > 1:
-          raise ValueError("Unsupported usecase for ragged_dot with quantized kernel.")
-        rhs_inputs = kernel.qvalue
-      if self.config.quantization and self.config.use_qwix_quantization:
-        # Use full contraction for QWIX quantization to allow quantization
-        # fusion (max reduce over contracting dimension).
-        tiling = (tiling[0], k, tiling[2])
-
-      is_tpu = self.mesh.devices.flat[0] == "tpu"
-      # TPU needs random mosaic_fusion_group; GPU/CPU needs deterministic ID for autotuner sync
-      mosaic_group_id = f"{random.randint(0, 1000000000)}" if is_tpu else "0"
-      with set_xla_metadata(
-          ragged_dot_tiling=",".join([str(t) for t in tiling]),
-          mosaic_fusion_group=mosaic_group_id,
-      ):
-        output = jax.lax.ragged_dot(
-            lhs=inputs,
-            rhs=rhs_inputs,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-        )
-      if isinstance(kernel, aqt.QTensor):
-        # Multiply outputs by the kernely scale
-        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
-        if padding_amount > 0:
-          scales = jax.lax.pad(
-              scales,
-              jnp.array(0.0, dtype=scales.dtype),
-              [(0, padding_amount, 0), (0, 0, 0)],
-          )
-        output *= scales
-      return output
-
-    def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
-      if self.config.quantization and self.config.use_qwix_quantization:
-        return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
-        return group_sizes
-      else:
-        return tokamax.RaggedDotGroupSizes(
-            group_sizes,
-            inputs.shape[0],
-        )
-
-    def get_quantization_dtypes():
-      # AQT describes its numerics through a `quant_dg`, while the fp8 schemes just name the
-      # dtype they quantize to. Under qwix there is no quantization object here at all, and
-      # the gmm takes its rule from the qwix rule instead.
-      if self.quant is not None and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization):
-        quant_dg = getattr(self.quant, "quant_dg", None)
-        if quant_dg is not None:
-          return quant_dg.fwd.dg_quantizer.lhs.numerics.get_dtype(), quant_dg.fwd.dg_quantizer.rhs.numerics.get_dtype()
-        quantize_dtype = getattr(self.quant, "quantize_dtype", None)
-        return quantize_dtype, quantize_dtype
-      return None, None
-
-    def te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias=None):
-      """Grouped GEMM via TransformerEngine `grouped_dense` (custom VJP).
-
-      Group sizes are passed as routed, so TE walks only the rows that actually
-      hold tokens and skips the ragged-buffer padding. Output rows past that
-      point are zeroed by the TE kernel (not GEMMed) so GLU / dgrad / dbias
-      cannot observe uninitialized leftover.
-
-      Note: v1 copies group_sizes D2H inside the FFI. That is safe with one
-      local device (including multi-process EP, one GPU per rank) but can
-      deadlock in single-process multi-device shard_map on ROCm.
-      """
-      # pylint: disable=import-outside-toplevel
-      from transformer_engine.jax.dense import grouped_dense
-
-      num_local_experts = kernel.shape[0]
-      start = 0 if group_offset is None else group_offset
-      te_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_experts)
-      # With a group_offset the local groups' rows follow those of groups [0, group_offset), as in
-      # megablox. TE has no group offset and reads from row 0, so rotate those rows to the front.
-      row_start = None
-      if not (isinstance(start, int) and start == 0):
-        row_start = jnp.sum(jnp.where(jnp.arange(group_sizes.shape[0]) < start, group_sizes, 0))
-        inputs = jnp.roll(inputs, -row_start, axis=0)
-      # TE asserts lhs.dtype == rhs.dtype and reuses that dtype in its custom VJP,
-      # so a wider `preferred_element_type` also fails in the backward pass. The
-      # GPT-OSS GLU can hand `wo` f32 activations while the experts stay bf16;
-      # jax.lax.ragged_dot tolerates that mix, TE does not, so narrow everything
-      # to one dtype and restore self.dtype on the output.
-      out_dtype = jnp.dtype(self.dtype)
-      compute_dtype = min(
-          (jnp.dtype(kernel.dtype), jnp.dtype(inputs.dtype), out_dtype),
-          key=lambda dt: dt.itemsize,
-      )
-      inputs = jax.lax.convert_element_type(inputs, compute_dtype)
-      kernel = jax.lax.convert_element_type(kernel, compute_dtype)
-      if bias is not None:
-        bias = jax.lax.convert_element_type(bias, compute_dtype)
-      output = grouped_dense(
-          inputs,
-          kernel,
-          te_group_sizes.astype(jnp.int32),
-          contracting_dims=((1,), (1,)),
-          bias=bias,
-          preferred_element_type=compute_dtype,
-      )
-      if row_start is not None:
-        output = jnp.roll(output, row_start, axis=0)
-      return jax.lax.convert_element_type(output, out_dtype)
-
-    def gmm(
-        inputs,
-        kernel,
-        tiling,
-        group_sizes,
-        expert_assignments,
-        weight_gather_axes,
-        group_offset,
-        partial_sum=None,
-        return_lhs=False,
-        return_rhs=False,
-        out_is_3d=False,
-        tc_routing=None,
-        tc_unsort_cfg=None,
-        bias=None,
-    ):
-      def extract_vma(tensor):
-        # Extract underlying array from QArray to inspect sharding annotation string.
-        if isinstance(tensor, qpl.QArray):
-          tensor = tensor.qvalue
-        # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
-        # jax.typeof(t) renders as e.g. 'f32[128,256]{V:(expert, fsdp)}'; this extracts
-        # ('expert', 'fsdp'). Returns () if the tensor has no varying axes.
-        type_str = str(jax.typeof(tensor))
-        if "{V:" in type_str:
-          start = type_str.index("{V:") + 3
-          end = type_str.index("}", start)
-          vma_content = type_str[start:end].strip("()")
-          return tuple(sorted(a.strip() for a in vma_content.split(",")))
-        return tuple()
-
-      is_native_kernel = isinstance(kernel, qpl.QArray)
-      if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
-        lhs_vma_axes = extract_vma(inputs)
-        rhs_vma_axes = extract_vma(kernel.qvalue if is_native_kernel else kernel)
-      else:
-        lhs_vma_axes = tuple()
-        rhs_vma_axes = tuple()
-      if inputs.shape[0] != expert_assignments.shape[0]:
-        raise ValueError("The number of input tokens must match the number of expert assignments!")
-
-      if self.config.use_te_grouped_gemm:
-        if return_lhs or return_rhs or out_is_3d or tc_unsort_cfg is not None:
-          raise NotImplementedError(
-              "use_te_grouped_gemm does not support return_lhs, return_rhs, out_is_3d or a fused TC unsort "
-              f"(got {return_lhs=}, {return_rhs=}, {out_is_3d=}, tc_unsort={tc_unsort_cfg is not None})."
-          )
-        # Highest priority when the flag is on. Skip megablox/tokamax tile padding:
-        # TE v1 walks only sum(group_sizes) rows and zeros the leftover.
-        # Dtype unification (f32 acts vs bf16 weights) happens inside te_grouped_dense_gmm.
-        output = te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias)
-        if partial_sum is not None:
-          output = output + partial_sum
-        return output
-
-      tokamax_group_sizes = get_tokamax_group_sizes(group_sizes, inputs, kernel)
-      orig_inputs_shape = inputs.shape  # save shape of inputs before potentially padding.
-      # Pad only the underlying qvalue buffer to tile size boundaries, leaving scale intact.
-      if isinstance(inputs, qpl.QArray):
-        padded_qval, padding_amount = max_utils.maybe_pad(inputs.qvalue, fwd_tile("wi_tile_fwd_batch_seq"))
-        inputs = dataclasses.replace(inputs, qvalue=padded_qval)
-      else:
-        inputs, padding_amount = max_utils.maybe_pad(inputs, fwd_tile("wi_tile_fwd_batch_seq"))
-      if padding_amount > 0 and partial_sum is not None:
-        partial_sum = jnp.pad(partial_sum, ((0, padding_amount),) + ((0, 0),) * (partial_sum.ndim - 1))
-      if not isinstance(inputs, qpl.QArray):
-        inputs = inputs.astype(self.dtype)
-      if not is_native_kernel:
-        kernel = kernel.astype(self.dtype)
-      lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
-
-      # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
-      # e.g. equiv_chunk_test executing locally). During train_compile the local backend is
-      # CPU (JAX_PLATFORMS=cpu) but self.mesh targets tpu7x -> compile natively; interpret
-      # mode on a TPU target breaks check_vma and bloats HBM temporaries.
-      megablox_interpret = self.mesh.devices.flat[0].platform != "tpu"
-
-      # We support various implementations for gmm - TE grouped_dense, tokamax gmm (v1, v2),
-      # older forked megablox, or jax.lax.ragged_dot.
-      # Determine whether we can use: tokamax gmm v1 (quantized)
-      # Pre-quantized QArray inputs must route through gmm_v2 custom VJP.
-      is_tokamax_v1_unquantized = (
-          self.config.use_tokamax_gmm
-          and not self.config.quantization
-          and not self.config.use_gmm_v2
-          and not isinstance(inputs, qpl.QArray)
-          and self.config.hardware != "cpu"
-      )
-      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox.
-      # On CPU (hardware="cpu"), bypass TPU Pallas custom-VJP kernels and fall back to jax.lax.ragged_dot.
-      use_custom_vjp_gmm = (self.config.use_tokamax_gmm or self.config.megablox) and self.config.hardware != "cpu"
-
-      if is_tokamax_v1_unquantized:
-        # tokamax v1 (unquantized)
-        output = tokamax.ragged_dot(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=tokamax_group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
-            preferred_element_type=self.dtype,
-            implementation="mosaic",
-            # `group_offset` is not yet supported
-            group_offset=None,
-        )
-      elif use_custom_vjp_gmm:
-        # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-        flat_fsdp_shard = None
-        if self.config.moe_flat_fsdp_weights and not is_native_kernel and kernel.ndim == 2:
-          # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
-          # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
-          # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group.
-          num_local_experts = self.num_experts // self.get_expert_parallelism_size()
-          gather_factor = 1
-          for axis_name, axis_idx in weight_gather_axes:
-            if axis_idx == 0:
-              gather_factor *= self.mesh.shape[axis_name]
-          gathered_rows = kernel.shape[0] * gather_factor
-          if gathered_rows % num_local_experts != 0:
-            raise ValueError(
-                f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
-            )
-          gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
-          if weight_gather_axes:
-            flat_fsdp_shard = gathered_shape
-          else:
-            kernel = kernel.reshape(gathered_shape)
-        output = mblx.gmm(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-            tiling=tiling,
-            group_offset=group_offset,
-            lhs_quantize_dtype=lhs_quantize_dtype,
-            rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
-            use_tokamax_backend=self.config.use_tokamax_gmm,
-            weight_gather_axes=weight_gather_axes,
-            lhs_vma_axes=lhs_vma_axes,
-            rhs_vma_axes=rhs_vma_axes,
-            use_gmm_v2=self.config.use_gmm_v2,
-            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
-            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
-            partial_sum=partial_sum,
-            interpret=megablox_interpret,
-            return_lhs=return_lhs,
-            fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
-            return_rhs=return_rhs,
-            flat_fsdp_shard=flat_fsdp_shard,
-            fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
-            **({"out_is_3d": True} if out_is_3d else {}),
-            **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
-        )
-      else:
-        # jax.lax.ragged_dot
-        output = jax_ragged_dot_gmm(
-            inputs,
-            kernel,
-            tiling,
-            group_sizes,
-            expert_assignments,
-            padding_amount,
-        )
-
-      def unpad(t):
-        if padding_amount == 0:
-          return t
-        # Mirror the padding above: only the qvalue of a QArray was padded.
-        if isinstance(t, qpl.QArray):
-          return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
-        return t[: orig_inputs_shape[0]]
-
-      # With tc_unsort_cfg the output is already reduced to token order, so it has no padding rows.
-      unpad_out = (lambda t: t) if tc_unsort_cfg is not None else unpad
-      # The returned lhs is padded like the output; the returned rhs (weights) is not.
-      if return_lhs and return_rhs:
-        output, lhs_out, rhs_out = output
-        return unpad_out(output), unpad(lhs_out), rhs_out
-      if return_lhs:
-        output, lhs_out = output
-        return unpad_out(output), unpad(lhs_out)
-      if return_rhs:
-        output, rhs_out = output
-        return unpad_out(output), rhs_out
-      return unpad_out(output)
+    fwd_tile = functools.partial(grouped_matmul.forward_tile, self.config)
+    gmm = grouped_matmul.GroupedMatmul(
+        self.config, self.mesh, self.quant, self.dtype, self.num_experts // self.get_expert_parallelism_size()
+    )
 
     def is_batch_sharded_by_ep(input_activation):
       # The batch is sharded by expert, except during inference decoding (where batch size == 1).
@@ -2572,71 +2136,10 @@ class RoutedMoE(nnx.Module):
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if not gather_weights:
         wi_gather_axes = []
-      use_te_bias = self.config.use_te_grouped_gemm and self.config.mlp_bias
-
-      def _gmm_maybe_bias(x_, w_, bias_, partial_sum=None, *, return_lhs=False, return_rhs=False):
-        # With return_lhs / return_rhs, gmm returns (out, [lhs], [rhs]); bias and mask apply to `out` only.
-        te_bias = use_te_bias and bias_ is not None
-        res = gmm_fn(
-            x_,
-            w_,
-            tiling=wi_tile_size,
-            weight_gather_axes=wi_gather_axes,
-            partial_sum=partial_sum,
-            return_lhs=return_lhs,
-            return_rhs=return_rhs,
-            bias=bias_ if te_bias else None,
-        )
-        layer, extras = (res[0], tuple(res[1:])) if return_lhs or return_rhs else (res, ())
-        if te_bias:
-          if mask is not None:
-            layer = jnp.where(mask[:, None], layer, 0)
-        elif self.config.mlp_bias and bias_ is not None:
-          layer = layer + bias_
-          if mask is not None:
-            layer = jnp.where(mask[:, None], layer, 0)
-        return (layer, *extras) if extras else layer
-
-      if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
-        fused_bias = None
-        if use_te_bias and w0_bias is not None and w1_bias is not None:
-          fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
-        out = _gmm_maybe_bias(x, w_fused, fused_bias)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
-        if self.config.mlp_bias and not use_te_bias and w0_bias is not None and w1_bias is not None:
-          layer_w0 = layer_w0 + w0_bias
-          layer_w1 = layer_w1 + w1_bias
-          if mask is not None:
-            layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
-            layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
-        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
-        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
-        return layer_w0, layer_w1
-      else:
-        # With moe_accumulate_wi_dlhs, the wi_0 GMM returns its input and the wi_1 GMM consumes that, so in the
-        # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
-        # accumulates onto it in place (gmm_v2 partial_sum) instead of a separate add of the two DLHS.
-        accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs
-        layer_w0 = _gmm_maybe_bias(x, w0, w0_bias, partial_accum0, return_lhs=accum_wi_dlhs, return_rhs=return_weights)
-        x_for_w1 = x
-        if accum_wi_dlhs and return_weights:
-          layer_w0, x_for_w1, w0 = layer_w0
-        elif accum_wi_dlhs:
-          layer_w0, x_for_w1 = layer_w0
-        elif return_weights:
-          layer_w0, w0 = layer_w0
-        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
-
-        layer_w1 = _gmm_maybe_bias(x_for_w1, w1, w1_bias, partial_accum1, return_rhs=return_weights)
-        if return_weights:
-          layer_w1, w1 = layer_w1
-        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
-        if return_weights:
-          return layer_w0, layer_w1, w0, w1
-        return layer_w0, layer_w1
+      return up_projection.up_projection(
+          x, w0, w1, w0_bias, w1_bias, gmm_fn, wi_gather_axes, wi_tile_size, self.config,
+          partial_accum0=partial_accum0, partial_accum1=partial_accum1, mask=mask, return_weights=return_weights,
+      )
 
     def valid_token_count(x, routing, route_metadata):
       """Rows of `x` the gmm actually computes; the rest is ragged-buffer padding."""
@@ -2694,7 +2197,7 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
-          local_output = moe_dispatch._sort_activations(
+          local_output = sorting._sort_activations(
               intermediate_output,
               jnp.argsort(route_metadata.local_sorted_indices),
               self.config.use_custom_sort_vjp,
@@ -3034,7 +2537,7 @@ class RoutedMoE(nnx.Module):
             )
           combine_bwd_method = self.config.moe_quantize_combine_bwd_method
           if combine_bwd_method:
-            output = _moe_combine_psum_scatter(
+            output = combine._moe_combine_psum_scatter(
                 output,
                 self._expert_parallelism_name,
                 scatter_dimension=0,
@@ -3493,107 +2996,18 @@ class RoutedMoE(nnx.Module):
 
   def generate_masks_subgroup(self, top_k_indices, softmax_probs):
     """Subgroup mask generation for inference only."""
-    batch_size, seq_len, _ = top_k_indices.shape
-    cp, sub_seq = self.get_context_partition_and_sub_seq(seq_len)
-    top_k_indices = jnp.reshape(top_k_indices, (batch_size, cp, sub_seq, top_k_indices.shape[2]))
-    tokens_per_batch = sub_seq * self.num_experts_per_tok
-    expert_capacity_per_batch = int(
-        max(
-            math.ceil(tokens_per_batch / self.num_experts) * self.config.capacity_factor,
-            self.config.capacity_factor,
-        )
+    cp, sub_seq = self.get_context_partition_and_sub_seq(top_k_indices.shape[1])
+    return capacity.subgroup_capacity_masks(
+        top_k_indices, softmax_probs, self.num_experts, self.num_experts_per_tok, self.config.capacity_factor,
+        cp, sub_seq, self._maybe_shard_with_logical,
     )
-    max_logging.log("Applying potential token dropping with a batch expert_capacity of" f" {expert_capacity_per_batch}")
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    expert_mask_fused = jnp.reshape(
-        expert_mask,
-        (batch_size, cp, sub_seq * self.num_experts_per_tok, self.num_experts),
-    )
-    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch", None, None, None))
-    expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=2)
-    expert_token_count = jnp.reshape(
-        expert_token_count_fused,
-        ((batch_size, cp, sub_seq, self.num_experts_per_tok, self.num_experts)),
-    )
-    expert_token_count = self._maybe_shard_with_logical(
-        expert_token_count,
-        ("activation_batch", "activation_norm_length", None, None, None),
-    )
-    trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
-    combined_expert_mask = jnp.sum(trunc_expert_mask, axis=3)
-    softmax_probs = jnp.reshape(
-        softmax_probs,
-        ((batch_size, cp, sub_seq, self.num_experts)),
-    )
-    softmax_probs *= combined_expert_mask
-    expert_token_position_fused = expert_mask_fused * expert_token_count_fused
-    expert_token_position = jnp.reshape(
-        expert_token_position_fused,
-        (batch_size, cp, sub_seq, self.num_experts_per_tok, self.num_experts),
-    )
-    combined_expert_token_position = jnp.sum(expert_token_position, axis=3) * combined_expert_mask
-    expert_token_position_in_capacity = jax.nn.one_hot(
-        combined_expert_token_position,
-        num_classes=expert_capacity_per_batch + 1,
-        dtype=jnp.int32,
-    )
-    combine_mask = softmax_probs[..., None] * expert_token_position_in_capacity
-    combine_mask = combine_mask[..., 1:]
-    dispatch_mask = combine_mask.astype(bool)
-    dispatch_mask = jnp.reshape(
-        dispatch_mask,
-        (batch_size, cp, sub_seq, self.num_experts, expert_capacity_per_batch),
-    )
-    combine_mask = jnp.reshape(
-        combine_mask,
-        (batch_size, cp, sub_seq, self.num_experts, expert_capacity_per_batch),
-    )
-    return dispatch_mask, combine_mask
 
   def generate_masks(self, top_k_indices, softmax_probs):
     """Generate masks."""
-    batch_size, seq_len, _ = top_k_indices.shape
-    tokens_per_batch = seq_len * self.num_experts_per_tok
-    expert_capacity_per_batch = int(
-        max(
-            math.ceil(tokens_per_batch / self.num_experts) * self.config.capacity_factor,
-            self.config.capacity_factor,
-        )
+    return capacity.capacity_masks(
+        top_k_indices, softmax_probs, self.num_experts, self.num_experts_per_tok, self.config.capacity_factor,
+        self._maybe_shard_with_logical,
     )
-    max_logging.log("Applying potential token dropping with a batch expert_capacity of" f" {expert_capacity_per_batch}")
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    expert_mask_fused = jnp.reshape(
-        expert_mask,
-        (batch_size, seq_len * self.num_experts_per_tok, self.num_experts),
-    )
-    expert_mask_fused = self._maybe_shard_with_logical(expert_mask_fused, ("activation_batch_moe", None, None))
-    expert_token_count_fused = jnp.cumsum(expert_mask_fused, axis=1)
-    expert_token_count = jnp.reshape(
-        expert_token_count_fused,
-        ((batch_size, seq_len, self.num_experts_per_tok, self.num_experts)),
-    )
-    expert_token_count = self._maybe_shard_with_logical(
-        expert_token_count,
-        ("activation_batch", "activation_norm_length", None, None),
-    )
-    trunc_expert_mask = expert_mask * jnp.less_equal(expert_token_count, expert_capacity_per_batch)
-    combined_expert_mask = jnp.sum(trunc_expert_mask, axis=2)
-    softmax_probs *= combined_expert_mask
-    expert_token_position_fused = expert_mask_fused * expert_token_count_fused
-    expert_token_position = jnp.reshape(
-        expert_token_position_fused,
-        (batch_size, seq_len, self.num_experts_per_tok, self.num_experts),
-    )
-    combined_expert_token_position = jnp.sum(expert_token_position, axis=2) * combined_expert_mask
-    expert_token_position_in_capacity = jax.nn.one_hot(
-        combined_expert_token_position,
-        num_classes=expert_capacity_per_batch + 1,
-        dtype=jnp.int32,
-    )
-    combine_mask = softmax_probs[..., None] * expert_token_position_in_capacity
-    combine_mask = combine_mask[..., 1:]
-    dispatch_mask = combine_mask.astype(bool)
-    return dispatch_mask, combine_mask
 
   def load_balance_loss(self, top_k_indices, logits, density_prob=None) -> jax.Array:
     """Compute the sequence-wise load balance loss.
@@ -4524,7 +3938,7 @@ class RoutedAndSharedMoE(nnx.Module):
         is_hash_routing=self.is_hash_routing,
     )
 
-    shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
+    shared_expert_mlp_dim = ffn_flops.get_shared_expert_mlp_dim(self.config)
     # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
     clamp_shared = (
         self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0

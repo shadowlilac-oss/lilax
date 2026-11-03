@@ -9,10 +9,11 @@ import jax
 from lilax._backend.common import common_types, train_state_nnx
 from lilax._backend.configs import pyconfig
 from lilax._backend.trainers.pre_train import train_compile as pre_train_compile
+from lilax._backend.training_engine import kernel_compilation
 from lilax._backend.training_engine import maxtext_engine
 from lilax._backend.utils import gcs_utils, max_utils, maxtext_utils, model_creation_utils
 
-KERNEL_NAMES = maxtext_engine.KERNEL_NAMES
+KERNEL_NAMES = kernel_compilation.KERNEL_NAMES
 HLO_DUMP_DEFAULTS = {
     "dump_hlo_local_module_name": f"jit_({'|'.join(KERNEL_NAMES)})",
     "dump_hlo_module_name": "jit_",

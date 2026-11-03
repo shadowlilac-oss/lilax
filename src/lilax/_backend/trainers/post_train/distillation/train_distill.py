@@ -23,7 +23,7 @@ from lilax._backend.layers.learn_to_init_layer import apply_lti_model_update
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.distillation import distillation_utils, lti_utils
 from lilax._backend.trainers.post_train.hooks import GoodputTrainingHooks
-from lilax._backend.utils import max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, maxtext_utils, model_creation_utils
 
 
 class ReportingMetricsLogger(metrics_logger.MetricsLogger):
@@ -418,7 +418,7 @@ def _train_distill_impl(
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     if mesh is None:
       devices = jax.devices()
-      devices_array = maxtext_utils.create_device_mesh(student_config, devices)
+      devices_array = device_mesh.create_device_mesh(student_config, devices)
       mesh = jax.sharding.Mesh(devices_array, student_config.mesh_axes)
     max_logging.log("Applying logical axis rules for model initialization and training...")
     with jax.set_mesh(mesh), logical_axis_rules(student_config.logical_axis_rules):

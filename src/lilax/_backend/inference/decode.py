@@ -94,9 +94,11 @@ def decode(config):
     tokens = mm_processor.prepare_text_for_image_fusion(tokens=tokens, config=config, processor_output=processor_outputs)
     true_length += image_offsets
     if config.use_mrope:
-      from lilax._backend.multimodal import processor_qwen3_omni
+      # Loads the decord/GCS video dependencies here, as the former processor import did.
+      from lilax._backend.multimodal.qwen3_omni.video import loading  # pylint: disable=unused-import
+      from lilax._backend.multimodal.qwen3_omni import positions
 
-      position_ids, mrope_position_deltas = processor_qwen3_omni.get_rope_index(
+      position_ids, mrope_position_deltas = positions.get_rope_index(
           input_ids=tokens[np.newaxis, :], image_grid_thw=processor_outputs.pixel_grid_thw,
           video_grid_thw=processor_outputs.video_grid_thw, attention_mask=np.ones_like(tokens)[np.newaxis, :],
           use_audio_in_video=config.use_audio and getattr(processor_outputs, "num_videos", 0) > 0,

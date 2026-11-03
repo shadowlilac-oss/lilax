@@ -1,7 +1,7 @@
 """Calculate training TFLOPs per device."""
 
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.utils.maxtext_utils import calculate_tflops_training_per_device
+from lilax._backend.common.training_flops import calculate_tflops_training_per_device
 
 
 def get_flops(config):

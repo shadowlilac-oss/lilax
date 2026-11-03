@@ -18,7 +18,7 @@ import qwix
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
-from lilax._backend.utils import gcs_utils, max_logging, max_utils, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, gcs_utils, max_logging, max_utils, model_creation_utils, state_abstraction
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
 
 
@@ -114,7 +114,7 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
       optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-    unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, create_train_state_fn, True)
+    unboxed_abstract_state, _, _ = state_abstraction.get_abstract_state(config, mesh, create_train_state_fn, True)
     lora_config_path = lora_adapter_path + "adapter_config.json"
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
     base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
@@ -450,7 +450,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
   mesh = getattr(model, "mesh", None)
   if mesh is None:
     try:
-      mesh = maxtext_utils.get_mesh_from_config(mt_config)
+      mesh = device_mesh.get_mesh_from_config(mt_config)
     except Exception:
       mesh = None
   abstract_lora_params = nnx.state(model, nnx.LoRAParam)
@@ -505,7 +505,7 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
     target_sharding = getattr(variable, "sharding", None)
     if not isinstance(target_sharding, jax.sharding.Sharding):
       try:
-        mesh = getattr(model, "mesh", None) or maxtext_utils.get_mesh_from_config(mt_config)
+        mesh = getattr(model, "mesh", None) or device_mesh.get_mesh_from_config(mt_config)
         if mesh:
           if isinstance(target_sharding, jax.sharding.PartitionSpec):
             pspec = target_sharding

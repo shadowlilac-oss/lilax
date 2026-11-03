@@ -1,8 +1,7 @@
-"""Expert feed-forward execution."""
+"""Gated FFN activation applied between the expert up- and down-projections."""
 
 import jax
 import jax.numpy as jnp
-
 from lilax._backend.common import common_types as ctypes
 
 

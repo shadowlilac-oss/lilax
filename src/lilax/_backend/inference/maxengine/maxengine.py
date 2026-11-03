@@ -36,6 +36,7 @@ from lilax._backend.inference.maxengine import maxengine_model_transfer
 from lilax._backend.inference.maxengine import maxengine_params
 from lilax._backend.inference.maxengine import maxengine_prefill_cache
 from lilax._backend.inference.maxengine import maxengine_tokenizer
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils import max_utils
 from lilax._backend.utils import maxtext_utils
@@ -89,7 +90,7 @@ class MaxEngine(engine_api.Engine):
 
   def __init__(self, config: Any, devices: Any | None = None):
     self.config = config
-    devices_array = maxtext_utils.create_device_mesh(config=config, devices=devices)
+    devices_array = device_mesh.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     quant = quantizations.configure_quantization(config)

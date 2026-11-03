@@ -12,7 +12,7 @@ from lilax._backend.configs import pyconfig, types
 from lilax._backend.common.profiler import xprof_server
 from lilax._backend.trainers.post_train.rl import train_rl
 from lilax._backend.trainers.post_train.rl.evaluate_rl import generate_responses
-from lilax._backend.utils import maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, model_creation_utils
 from lilax.modeling.models import MaxTextModel
 from lilax.runtime import Runtime
 from tunix.sft import checkpoint_manager
@@ -88,7 +88,7 @@ class GRPOTrainer:
     else:
       clone_reference = False
     if rollout_mesh is None:
-      devices_array = maxtext_utils.create_device_mesh(sampler_config, sampler_devices)
+      devices_array = device_mesh.create_device_mesh(sampler_config, sampler_devices)
       rollout_mesh = Mesh(devices_array, sampler_config.mesh_axes)
     if clone_reference:
       with runtime.mesh:

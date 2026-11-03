@@ -1,12 +1,12 @@
-"""MoE token dispatch operations."""
+"""Expert-parallel token exchange: all-to-all parameters and local permutation of received tokens."""
 
 import enum
 
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.kernels import sort_activations
 from lilax._backend.kernels.ragged.ragged_sort import a2a_ragged_sort
+from lilax._backend.layers.moe_ops.dispatch import sorting
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -27,67 +27,6 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
       axis=0,
   )
   return jnp.diff(clamped_cumsum_extended, axis=0)
-
-
-def _sort_activations(
-    inputs: jax.Array,
-    sort_indices: jax.Array,
-    use_custom_vjp: bool,
-) -> jax.Array:
-  """Sort activations by `sort_indices`.
-
-  If `use_custom_vjp=True`, then we use a custom backward pass that
-  reverses the sort order. Specifically, this unsort operation is simply a sort
-  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
-  the case where the compiler generates a less efficient backward pass op.
-
-  Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
-  of `jnp.arange(inputs.shape[0])`.
-
-  Args:
-    inputs: `(tokens, ...)`-shaped array of input activations to sort.
-    sort_indices: `(tokens,)`-shaped array containing the sort order.
-    use_custom_vjp: Whether to use the explicit backward pass.
-
-  Returns:
-    `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
-  """
-  assert inputs.shape[0] == sort_indices.shape[0]
-
-  with jax.named_scope("sort_activations"):
-    if use_custom_vjp:
-      return _sort_activations_custom(inputs, sort_indices)
-    return inputs[sort_indices, ...]
-
-
-def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
-  """Groups token activations by expert without materializing Top-K copies."""
-  selected_experts = selected_experts.reshape((inputs.shape[0], -1))
-  # When use_gather_mosaic_kernel=False, use the general JAX backward, which
-  # gathers and sums gradients from all expert copies of each token. The
-  # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
-  # experts per token and is enabled only by the specialized batch-split path.
-  return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
-
-
-@jax.custom_vjp
-def _sort_activations_custom(inputs: jax.Array, sort_indices: jax.Array) -> jax.Array:
-  """Sort functions with custom vjp."""
-  return inputs[sort_indices, ...]
-
-
-def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array) -> tuple[jax.Array, jax.Array]:
-  """Forward pass of the custom vjp for `_sort_activations()`."""
-  return _sort_activations_custom(inputs, sort_indices), sort_indices
-
-
-def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
-  """Backward pass of the custom vjp for `_sort_activations()`."""
-  sort_indices = residuals
-  return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
-
-
-_sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
 class ExpertDispatch:
@@ -144,7 +83,7 @@ class ExpertDispatch:
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
       sorted_inputs = a2a_ragged_sort(inputs, sorted_indices, valid_end, use_single_sparsecore=use_single_sparsecore)
     else:
-      sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
+      sorted_inputs = sorting._sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
     return sorted_inputs, sorted_indices, local_group_size, sorted_experts_ids
 

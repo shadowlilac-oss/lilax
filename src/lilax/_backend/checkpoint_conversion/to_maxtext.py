@@ -26,7 +26,7 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
 )
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs.types import DType
-from lilax._backend.utils import max_logging, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, model_creation_utils
 from lilax._backend.utils.globals import HF_IDS
 
 
@@ -118,7 +118,7 @@ def get_maxtext_model_info(config):
       flattened parameter list.
     abstract_params_treedef: The tree structure definition of the abstract model parameters.
   """
-  devices_array = maxtext_utils.create_device_mesh(config)
+  devices_array = device_mesh.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   max_logging.log("Initializing MaxText abstract model...")

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import contextlib
-import dataclasses
-import functools
-from typing import Any, Optional
+from typing import Any
 
 from absl import logging
 from flax import nnx
@@ -16,288 +14,30 @@ import jax.numpy as jnp
 from lilax._backend.common import common_types
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
-from lilax._backend.integration.tunix.weight_mapping import raiden_unscan
-from lilax._backend.integration.vllm.convert_utils import (
-    is_verify_weights_enabled,
-    resolve_prefuse_moe_weights,
-    resolve_rollout_tp,
-)
 from lilax._backend.m3 import models as m3_models
-from lilax._backend.trainers.pre_train import train as maxtext_train
 from lilax._backend.training_engine import abstract_engine
+from lilax._backend.training_engine import batch_sharding
+from lilax._backend.training_engine import batch_signature
 from lilax._backend.training_engine import checkpointing
+from lilax._backend.training_engine import compiled_kernels
+from lilax._backend.training_engine import gradient_accumulation
+from lilax._backend.training_engine import gradient_sharding
 from lilax._backend.training_engine import inflight_throttler
+from lilax._backend.training_engine import kernel_compilation
+from lilax._backend.training_engine import loss_invocation
 from lilax._backend.training_engine import metrics as metrics_module
 from lilax._backend.training_engine import micro_step_profiler as profiler_module
-from lilax._backend.utils import max_utils
-from lilax._backend.utils import maxtext_utils
+from lilax._backend.training_engine import payload_inputs
+from lilax._backend.training_engine import pure_state
+from lilax._backend.training_engine import router_replay
+from lilax._backend.training_engine import state_placement
+from lilax._backend.training_engine import step_kernels
+from lilax._backend.training_engine import weight_sync
+from lilax._backend.training_engine import zero1
 from lilax._backend.utils import model_creation_utils
-from lilax._backend.utils import sharding
 from lilax._backend.utils import train_utils
-import numpy as np
-from tunix.dist_rl.weight_sync import raiden_synchronizer
 
 EMPTY_METRICS_BUFFER_ID = -1
-_MODEL_STATE_KEY = "model"
-_OPTIMIZER_STATE_KEY = "optimizer"
-KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
-_PURE_STATE_FALLBACK_WARNING = (
-    "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
-    "update will re-walk the NNX module graph. That is correct but slow -- the two "
-    "`nnx.split` calls cost ~92 ms per step on an unrolled 28-layer qwen3-0.6b, against "
-    "~2 ms for the pure-state equivalent. Logged once per engine instance."
-)
-
-
-def _is_jax_dynamic(value: Any) -> bool:
-  leaves = jax.tree.leaves(value)
-  if not leaves:
-    return True
-  return any(isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct, np.ndarray, np.generic)) for leaf in leaves)
-
-
-def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
-  if not isinstance(batch, dict):
-    return batch, {}
-  dynamic: dict[str, Any] = {}
-  static: dict[str, Any] = {}
-  for key, value in batch.items():
-    if isinstance(value, (int, float, bool)) or not _is_jax_dynamic(value):
-      static[key] = value
-    else:
-      dynamic[key] = value
-  return dynamic, static
-
-
-def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
-  leaves, treedef = jax.tree.flatten(dynamic_batch)
-  shapes = tuple((jnp.shape(leaf), jnp.result_type(leaf)) for leaf in leaves)
-  return (treedef, shapes, static_batch)
-
-
-_REPLICATED_BATCH_DIM_WARNING = (
-    "Loss input with batch dim %d does not divide mesh axis %r (size %d), so that "
-    "dimension is replicated instead of sharded: every device along the axis holds and "
-    "computes the whole micro-batch, %dx the work a sharded one would do there. Results "
-    "stay correct. If it was not deliberate -- a sequence-packed micro-batch is always "
-    "size 1 and has no alternative -- make the micro-batch a multiple of the axis size."
-)
-_UNCOMPARABLE_SIGNATURE_WARNING = (
-    "Could not compare %s between fwd_bwd calls (%s), so the engine cannot tell whether "
-    "the compiled kernel is still valid and will recompile on EVERY fwd_bwd from now on. %s"
-)
-_UNCOMPARABLE_STATIC_HINT = (
-    "This happens when a `gen_model_input_fn` returns a fresh object each call that holds "
-    "an array -- a dataclass or SimpleNamespace whose `__eq__` then compares elementwise, "
-    "where `bool()` is ambiguous. (Reusing one instance is fine: comparison short-circuits "
-    "on identity.) Fix by returning arrays as top-level entries of the batch dict, so they "
-    "are traced rather than closed over, or by holding the config object fixed across calls."
-)
-_UNCOMPARABLE_STRUCTURE_HINT = (
-    "This is unexpected: the structural half is built from pytree treedefs, shapes and "
-    "dtypes, which compare cleanly. Recompilation stays correct, but the cost is now paid "
-    "every step, so this is worth reporting rather than living with."
-)
-_DATA_AXIS = "data"
-
-
-def _tag_sharding(named_sharding: jax.sharding.NamedSharding, field: str) -> jax.sharding.NamedSharding:
-  if _DATA_AXIS in sharding.get_mesh_axes_used_by_tensor_spec(named_sharding.spec.partitions):
-    return named_sharding
-  return named_sharding.update(spec=named_sharding.spec.update(**{field: {_DATA_AXIS}}))
-
-
-def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any) -> tuple[Any, Any]:
-  if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
-    return None, None
-  if mesh is None or mesh.shape.get(_DATA_AXIS, 1) <= 1:
-    return None, None
-  if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
-    return None, None
-  if any(size > 1 for axis, size in mesh.shape.items() if axis != _DATA_AXIS):
-    return None, None
-  try:
-    batch_axes = sharding.batch_mesh_axes(mesh, rules=config.logical_axis_rules)
-  except (KeyError, ValueError, IndexError):
-    return None, None
-  if batch_axes != frozenset({_DATA_AXIS}):
-    return None, None
-  return (
-      jax.tree.map(lambda s: _tag_sharding(s, "reduced"), params_shardings),
-      jax.tree.map(lambda s: _tag_sharding(s, "unreduced"), params_shardings),
-  )
-
-
-_ZERO1_DECLINED_WARNING = (
-    "`shard_optimizer_over_data` (Zero-1) is set, but this engine cannot honour it (%s), so the "
-    "optimizer state stays replicated over the data axis. Logged once per engine instance."
-)
-
-
-def _zero1_active(config: Any, mesh: Any) -> str | None:
-  if not getattr(config, "shard_optimizer_over_data", False):
-    return "it is not enabled"
-  if getattr(config, "shard_mode", None) != common_types.ShardMode.EXPLICIT:
-    return "it needs shard_mode=explicit"
-  if mesh is None:
-    return "the engine has no mesh"
-  if mesh.shape.get(_DATA_AXIS, 1) <= 1:
-    return f"the mesh has no {_DATA_AXIS!r} axis to shard the optimizer over"
-  if any(axis_type != jax.sharding.AxisType.Explicit for axis_type in mesh.axis_types):
-    return "the mesh has non-Explicit axes"
-  return None
-
-
-def _zero1_sharding(mesh: Any, aval: Any, base: jax.sharding.NamedSharding | None) -> jax.sharding.NamedSharding | None:
-  if base is None or not hasattr(aval, "shape"):
-    return None
-  try:
-    target = sharding.add_data_to_sharding(mesh, (), aval, base)
-  except AssertionError:
-    return None
-  return None if target == base else target
-
-
-def _conform_accumulator(value: Any, target: jax.sharding.NamedSharding) -> Any:
-  current = getattr(value, "sharding", None)
-  if current == target:
-    return value
-  if getattr(current, "spec", None) is not None and current.spec.unreduced:
-    return jax.sharding.reshard(value, target)
-  return jax.device_put(value, target)
-
-
-def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutput:
-  if isinstance(out, abstract_engine.LossOutput):
-    return out
-  if isinstance(out, abstract_engine.WeightedMetric):
-    return abstract_engine.LossOutput(primary_loss=out, aux_metrics={})
-  if isinstance(out, (tuple, list)) and len(out) == 2:
-    loss_val, aux = out
-    if isinstance(loss_val, abstract_engine.WeightedMetric):
-      primary_loss = loss_val
-    elif isinstance(aux, dict) and "xent_sum" in aux and "total_weights" in aux:
-      primary_loss = abstract_engine.WeightedMetric(unreduced_sum=aux["xent_sum"], denominator=aux["total_weights"])
-    else:
-      raise TypeError(
-          f"Cannot construct WeightedMetric from 2-tuple loss return with elements "
-          f"of type ({type(loss_val).__name__}, {type(aux).__name__}). Expected first element to be a "
-          "WeightedMetric, or second element to be a dict containing 'xent_sum' and 'total_weights'."
-      )
-    return abstract_engine.LossOutput(primary_loss=primary_loss, aux_metrics=aux if (has_aux and isinstance(aux, dict)) else {})
-  raise TypeError(
-      f"Unsupported return type from loss function: {type(out)}. "
-      "Expected abstract_engine.LossOutput, abstract_engine.WeightedMetric, "
-      "or a 2-element tuple/list: (loss, aux_metrics)."
-  )
-
-
-def _to_aval(value: Any) -> Any:
-  if not hasattr(value, "shape") or not hasattr(value, "dtype"):
-    return value
-  return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
-
-
-def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
-  parts = [jnp.asarray(payload.prompt_ids), jnp.asarray(payload.completion_ids)]
-  masks = [
-      jnp.ones_like(part) if mask is None else jnp.asarray(mask).astype(jnp.int32)
-      for part, mask in zip(parts, (payload.prompt_mask, payload.completion_mask))
-  ]
-  return jnp.concatenate(parts, axis=-1), jnp.concatenate(masks, axis=-1).astype(jnp.int32)
-
-
-def _aligned(field: Any, name: str, width: int) -> jax.Array | None:
-  if field is None:
-    return None
-  array = jnp.asarray(field)
-  if array.shape[-1] != width:
-    raise ValueError(
-        f"{name} has width {array.shape[-1]} but the model row is {width} wide. Tunix sets "
-        f"{name} only on the packed path, where `prompt_ids` is zero-width and the two agree; "
-        "a completion-width array cannot be aligned against a non-empty prompt."
-    )
-  return array
-
-
-def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) -> dict[str, Any]:
-  token_ids, token_mask = _row_and_mask(payload)
-  width = token_ids.shape[-1]
-  segment_ids = _aligned(payload.segment_ids, "segment_ids", width)
-  segment_positions = _aligned(payload.segment_positions, "segment_positions", width)
-  if segment_ids is None:
-    segment_ids = token_mask
-  if segment_positions is not None:
-    positions = segment_positions.astype(jnp.int32)
-  else:
-    real = (token_mask != 0).astype(jnp.int32)
-    preceding = jnp.cumsum(real, axis=-1) - real
-    starts = jnp.concatenate(
-        [jnp.ones((segment_ids.shape[0], 1), dtype=bool), segment_ids[:, 1:] != segment_ids[:, :-1]], axis=-1
-    )
-    segment_start_count = jax.lax.cummax(jnp.where(starts, preceding, -1), axis=preceding.ndim - 1)
-    positions = (preceding - segment_start_count).astype(jnp.int32)
-  targets_segmentation = jnp.roll(token_mask, -1, axis=-1)
-  targets_segmentation = targets_segmentation.at[:, -1].set(0)
-  same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
-  targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
-  kwargs = {
-      "inputs": token_ids,
-      "inputs_position": positions,
-      "inputs_segmentation": segment_ids,
-      "targets": jnp.roll(token_ids, -1, axis=-1),
-      "targets_segmentation": targets_segmentation,
-  }
-  routed_experts = getattr(payload, "routed_experts", None)
-  if routed_experts is not None:
-    kwargs["forced_routed_experts"] = jnp.asarray(routed_experts)
-  return kwargs
-
-
-def make_router_replay_loss_fn(
-    config: pyconfig.HyperParameters, dropout_rng: jax.Array | None = None
-) -> Callable[..., Any]:
-  if config.enable_dropout and dropout_rng is None:
-    raise ValueError(
-        "make_router_replay_loss_fn requires a dropout_rng when"
-        " config.enable_dropout is set; pass one, or set enable_dropout=False"
-        " for router replay."
-    )
-
-  def router_replay_loss_fn(
-      model, inputs, inputs_position, inputs_segmentation, targets, targets_segmentation, forced_routed_experts=None
-  ):
-    data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_segmentation": targets_segmentation,
-    }
-    if forced_routed_experts is not None:
-      data["forced_routed_experts"] = forced_routed_experts
-    return maxtext_train.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
-
-  return router_replay_loss_fn
-
-
-def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., Any]:
-  def decorator(method: Callable[..., Any]) -> Callable[..., Any]:
-    @functools.wraps(method)
-    def wrapper(self, *args: Any, **kwargs: Any) -> Any:
-      step_to_profile = self.total_micro_steps
-      current_micro_step_count = self.micro_step_count
-      if control_profile:
-        self._profiler.maybe_activate(step_to_profile, current_micro_step_count, self.train_step, blocking_object=self._state)
-      with jax.profiler.StepTraceAnnotation(name, step_num=self.train_step):
-        result = method(self, *args, **kwargs)
-      if control_profile:
-        self._profiler.maybe_deactivate(step_to_profile, current_micro_step_count, self.train_step, blocking_object=self._state)
-      return result
-
-    return wrapper
-
-  return decorator
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -335,33 +75,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._loss_fn: Callable[..., Any] | None = None
     self._has_aux: bool = True
     self._gen_model_input_fn: Callable[[Any], dict[str, Any]] | None = None
-    self._compiled = False
-    self._compile_requested = False
-    self._compiled_signature: Any = None
-    self._jitted_kernels: dict[str, Any] = {}
-    self._compiled_eval: Any = None
-    self._compiled_eval_signature: Any = None
-    self._signature_compare_warned: bool = False
-    self._replicated_batch_warned: bool = False
+    self._kernels = compiled_kernels.CompiledKernels()
+    self._recompile_detector = batch_signature.RecompileDetector()
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = model if model is not None else self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
+    self._batch_sharder = batch_sharding.BatchSharder(self._config, self._mesh)
     self._state: Any = None
-    self._params_pure: Any = None
-    self._rest_pure: Any = None
-    self._state_pure: Any = None
-    self._pure_state_warned: bool = False
-    self._accumulated_grads: Any = None
-    self._accumulated_denominator: Any = None
-    self._reduced_params_shardings: Any = None
-    self._unreduced_grad_shardings: Any = None
-    self._plain_grad_shardings: Any = None
-    self._zero1_params_shardings: Any = None
-    self._gathered_params_shardings: Any = None
-    self._zero1_warned = False
-    self._micro_step_count = 0
+    self._pure_state = pure_state.PureStateCache()
+    self._grad_plan = gradient_sharding.GradientShardingPlan()
+    self._zero1 = zero1.Zero1Planner(self._config)
+    self._accumulation = gradient_accumulation.GradientAccumulation()
     self._total_micro_steps = 0
-    self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
     self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model, mesh=self._mesh)
     self._optimizer = self._build_optimizer(tx)
     if self._config.use_m3_model:
@@ -373,30 +98,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._metrics_logger = metrics_module.MetricsLogger(config=self._config)
     self._throttler = inflight_throttler.InflightThrottler(config=self._config, metrics_logger=self._metrics_logger)
     self._profiler = profiler_module.MicroStepProfiler(self._config)
-    self._raiden_sync: Any = None
-    self._last_staged_step: Optional[int] = None
-    self._staged_metadata: Any = None
-    self._target_state: Any = None
-    self._use_weight_converter = bool(self._config.use_weight_converter)
-    self._rollout_backend = self._config.rollout_backend
-    rollout_tp = resolve_rollout_tp(self._config)
-    kv_tp = self._config.kv_tp_size or rollout_tp
-    moe_tp = self._config.moe_mlp_tp_size or rollout_tp
-    prefuse_moe = resolve_prefuse_moe_weights(self._config)
-    if self._use_weight_converter:
-      from lilax._backend.integration.vllm.weight_converter import WeightConverter
-
-      self._weight_converter = WeightConverter(
-          config=self._config,
-          tp=rollout_tp,
-          kv_tp_size=kv_tp,
-          moe_mlp_tp_size=moe_tp,
-          prefuse_moe_weights=prefuse_moe,
-          rollout_backend=self._rollout_backend,
-          debug=self._config.weight_sync_debug,
-      )
-    else:
-      self._weight_converter = None
+    self._weight_sync = weight_sync.WeightSyncStager(self._config)
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     model_or_model_mesh_pair = model_creation_utils.from_pretrained(
@@ -429,14 +131,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @model.setter
   def model(self, new_model: Any) -> None:
     self._model = new_model
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
-    self._model_graphdef = None
-    self._invalidate_pure_state()
+    self._kernels.invalidate_train()
+    self._kernels.invalidate_eval()
+    self._pure_state.model_graphdef = None
+    self._pure_state.invalidate()
 
   @property
   def optimizer(self) -> Any:
@@ -445,14 +143,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @optimizer.setter
   def optimizer(self, new_optimizer: Any) -> None:
     self._optimizer = new_optimizer
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._state_graphdef = None
-    self._invalidate_pure_state()
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._kernels.invalidate_train()
+    self._pure_state.state_graphdef = None
+    self._pure_state.invalidate()
+    self._kernels.invalidate_eval()
 
   @property
   def train_step(self) -> int:
@@ -471,36 +165,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   @state.setter
   def state(self, new_state: Any) -> None:
     self._state = new_state
-    self._compiled = False
-    self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
-    self._compiled_update = None
-    self._state_graphdef = None
-    self._invalidate_pure_state()
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._kernels.invalidate_train()
+    self._pure_state.state_graphdef = None
+    self._pure_state.invalidate()
+    self._kernels.invalidate_eval()
 
   @property
   def micro_step_count(self) -> int:
-    return self._micro_step_count
+    return self._accumulation.micro_step_count
 
   @property
   def has_accumulated_grads(self) -> bool:
-    return self._accumulated_grads is not None
+    return self._accumulation.grads is not None
 
   def with_loss_fn(self, customized_fn: Callable[..., Any], has_aux: bool = False) -> "MaxTextTrainingEngine":
     self._loss_fn = customized_fn
     self._has_aux = has_aux
-    self._compiled = False
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._kernels.compiled = False
+    self._kernels.invalidate_eval()
     return self
 
   def with_gen_model_input_fn(self, gen_model_input_fn: Callable[[Any], dict[str, Any]]) -> "MaxTextTrainingEngine":
     self._gen_model_input_fn = gen_model_input_fn
-    self._compiled = False
-    self._compiled_eval = None
-    self._compiled_eval_signature = None
+    self._kernels.compiled = False
+    self._kernels.invalidate_eval()
     return self
 
   @contextlib.contextmanager
@@ -511,415 +199,129 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     with jax.set_mesh(self._mesh), logical_axis_rules(self._config.logical_axis_rules):
       yield
 
-  def _invalidate_pure_state(self) -> None:
-    self._params_pure = None
-    self._rest_pure = None
-    self._state_pure = None
-
-  def _disable_pure_state(self, reason: str) -> None:
-    self._invalidate_pure_state()
-    if not self._pure_state_warned:
-      self._pure_state_warned = True
-      logging.warning(_PURE_STATE_FALLBACK_WARNING, reason)
-
-  @staticmethod
-  def _with_model_state(state_pure: Any, model_pure: Any) -> Any:
-    return nnx.State({**state_pure.raw_mapping, _MODEL_STATE_KEY: model_pure.raw_mapping})
-
-  def _check_pure_state_reusable(self, state_pure: Any, params_pure: Any, rest_pure: Any) -> str | None:
-    if not isinstance(state_pure, nnx.State) or _MODEL_STATE_KEY not in state_pure:
-      return f"the train state's pure form has no {_MODEL_STATE_KEY!r} entry"
-    if not hasattr(state_pure, "raw_mapping"):
-      return "this version of flax.nnx.State does not expose raw_mapping"
-    rebuilt = self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
-    if jax.tree.structure(rebuilt) != jax.tree.structure(state_pure):
-      return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
-    return None
-
-  def _refresh_pure_state(self) -> None:
+  def _ensure_state(self) -> None:
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
-    self._state_graphdef, state_pure = nnx.split(self._state)
-    self._model_graphdef, params_pure, rest_pure = nnx.split(model, nnx.Param, ...)
-    reason = self._check_pure_state_reusable(state_pure, params_pure, rest_pure)
-    if reason is not None:
-      self._disable_pure_state(reason)
-      return
-    self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, state_pure
 
-  def _read_model_pure(self, model: Any) -> tuple[Any, Any]:
-    if self._params_pure is not None:
-      return self._params_pure, self._rest_pure
-    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
-    return params, rest
-
-  def _read_state_pure(self) -> Any:
-    if self._state_pure is not None:
-      return self._state_pure
-    self._state_graphdef, state_pure = nnx.split(self._state)
-    return state_pure
-
-  def _publish_model_rest(self, new_rest: Any) -> None:
-    if self._params_pure is None:
-      return
-    if jax.tree.structure(new_rest) != jax.tree.structure(self._rest_pure):
-      self._disable_pure_state("fwd_bwd returned a wider non-parameter state than the model was split into")
-      return
-    self._rest_pure = new_rest
-    self._state_pure = self._with_model_state(self._state_pure, nnx.merge_state(self._params_pure, new_rest))
-
-  def _publish_state(self, new_state_pure: Any) -> None:
-    if self._params_pure is None:
-      return
-    if not isinstance(new_state_pure, nnx.State) or _MODEL_STATE_KEY not in new_state_pure:
-      self._disable_pure_state("the update kernel returned a state with no model entry")
-      return
-    params_pure, rest_pure = nnx.split_state(new_state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
-    if jax.tree.structure(params_pure) != jax.tree.structure(self._params_pure):
-      self._disable_pure_state("the update kernel's output does not partition into the same parameters")
-      return
-    self._params_pure, self._rest_pure, self._state_pure = params_pure, rest_pure, new_state_pure
-
-  def _note_zero1_declined(self, reason: str) -> None:
-    if getattr(self._config, "shard_optimizer_over_data", False) and not self._zero1_warned:
-      self._zero1_warned = True
-      logging.warning(_ZERO1_DECLINED_WARNING, reason)
-
-  def _zero1_shardings_for(self, params_pure: Any, params_shardings: Any) -> Any:
-    declined = _zero1_active(self._config, self._mesh)
-    if declined is not None:
-      self._note_zero1_declined(declined)
-      return None
-
-    def target(leaf, base):
-      sharded = _zero1_sharding(self._mesh, leaf, base)
-      return base if sharded is None else sharded
-
-    return jax.tree.map(target, params_pure, params_shardings)
+  def _refresh_pure_state(self) -> None:
+    self._ensure_state()
+    self._pure_state.refresh(self._state, getattr(self._state, pure_state.MODEL_STATE_KEY, self._model))
 
   def _place_leaf(self, leaf: Any, target: jax.sharding.Sharding) -> Any:
     return jax.device_put(leaf, target)
 
+  def _adopt_placed_state(self, placed: Any) -> None:
+    with self._sharding_ctx():
+      nnx.update(self._state, placed)
+    self._pure_state.invalidate()
+    self._refresh_pure_state()
+
   def _place_state_on_mesh(self) -> None:
     if self._mesh is None or self._state is None:
       return
-    moved = False
-
-    def place(leaf):
-      nonlocal moved
-      if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
-        return leaf
-      leaf_sharding = getattr(leaf, "sharding", None)
-      if isinstance(leaf_sharding, jax.sharding.NamedSharding) and leaf_sharding.mesh == self._mesh:
-        return leaf
-      moved = True
-      return self._place_leaf(leaf, self._mesh_sharding(leaf))
-
-    placed = jax.tree.map(place, self._read_state_pure())
-    if not moved:
-      return
-    with self._sharding_ctx():
-      nnx.update(self._state, placed)
-    self._invalidate_pure_state()
-    self._refresh_pure_state()
+    placed = state_placement.place_state_on_mesh(self._mesh, self._pure_state.read_state(self._state), self._place_leaf)
+    if placed is not None:
+      self._adopt_placed_state(placed)
 
   def _shard_optimizer_state_over_data(self) -> None:
-    if _zero1_active(self._config, self._mesh) is not None:
+    if zero1.zero1_active(self._config, self._mesh) is not None:
       return
-    state_pure = self._read_state_pure()
-    if _OPTIMIZER_STATE_KEY not in state_pure:
-      return
-    moved = False
+    optimizer_pure = zero1.shard_optimizer_state(self._mesh, self._pure_state.read_state(self._state), self._place_leaf)
+    if optimizer_pure is not None:
+      self._adopt_placed_state(nnx.State({pure_state.OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
 
-    def place(leaf):
-      nonlocal moved
-      target = _zero1_sharding(self._mesh, leaf, self._mesh_sharding(leaf))
-      if target is None:
-        return leaf
-      moved = True
-      return self._place_leaf(leaf, target)
+  def _mesh_shardings(self, tree: Any) -> Any:
+    return jax.tree.map(lambda leaf: state_placement.mesh_sharding(self._mesh, leaf), tree)
 
-    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
-    if not moved:
-      return
-    with self._sharding_ctx():
-      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
-    self._invalidate_pure_state()
-    self._refresh_pure_state()
-
-  def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
-    params_pure, rest_pure = nnx.split_state(state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
-    params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
-    return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+  def _loss_spec(self) -> loss_invocation.LossSpec:
+    return loss_invocation.LossSpec(self._loss_fn, self._has_aux, self._gen_model_input_fn is not None)
 
   def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
-    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
-
-    def diff_wrapper(params_state, rest_state, inputs):
-      model = nnx.merge(self._model_graphdef, params_state, rest_state, copy=True)
-      if self._gen_model_input_fn is not None:
-        if not isinstance(inputs, dict):
-          raise TypeError(
-              "gen_model_input_fn must return a dict of loss-fn keyword arguments, got " f"{type(inputs).__name__}."
-          )
-        out = loss_callable(model, **inputs)
-      else:
-        out = loss_callable(model, self._config, inputs, None, None, is_train=True)
-      _, _, new_rest = nnx.split(model, nnx.Param, ...)
-      loss_out = _normalize_loss_output(out, self._has_aux)
-      return loss_out.primary_loss.unreduced_sum, (loss_out, new_rest)
-
-    if self._reduced_params_shardings is not None:
-      params = jax.tree.map(jax.sharding.reshard, params, self._reduced_params_shardings)
-    grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
-    (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
-    micro_grads = jax.tree.map(
-        lambda grad: (
-            grad.astype(self._config.grad_dtype)
-            if hasattr(grad, "dtype") and jnp.issubdtype(grad.dtype, jnp.floating) and grad.dtype != self._config.grad_dtype
-            else grad
-        ),
-        micro_grads,
+    return step_kernels.fwd_bwd_kernel(
+        self._config, self._loss_spec(), self._pure_state.model_graphdef, self._grad_plan,
+        params, rest, batch, acc_grads, acc_denom,
     )
-    denominator = loss_out.primary_loss.denominator.astype(jnp.float32)
-    if acc_grads is None:
-      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
-    acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
-    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
 
   def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
-    grad_norm = None
-    is_skipped_val = None
-    if state_pure is not None:
-      grad_target = self._zero1_params_shardings
-      if grad_target is None:
-        grad_target = self._plain_grad_shardings
-      if grad_target is not None:
-        accumulated_grads = jax.tree.map(jax.sharding.reshard, accumulated_grads, grad_target)
-      if self._zero1_params_shardings is not None:
-        state_pure = self._reshard_model_params(state_pure, self._zero1_params_shardings)
-      has_weights = accumulated_denominator > 0
-      safe_denominator = jnp.where(has_weights, accumulated_denominator, 1.0)
-      grads = jax.tree.map(
-          lambda grad: jnp.where(has_weights, grad / safe_denominator.astype(grad.dtype), jnp.zeros_like(grad)),
-          accumulated_grads,
-      )
-      grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda grad: grad.astype(jnp.float32), grads))
-      if self._config.gradient_clipping_threshold > 0:
-        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
-      local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
-      if hasattr(local_state, "apply_gradients"):
-        if self._config.skip_step_on_spikes:
-          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
-          opt_obj = getattr(local_state, "optimizer", self._optimizer)
-          if opt_obj is not None:
-            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
-            is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
-            if is_skipped is not None:
-              is_skipped_val = is_skipped.astype(jnp.float32)
-        else:
-          local_state.apply_gradients(grads)
-      _, new_state_pure = nnx.split(local_state)
-      if self._zero1_params_shardings is not None:
-        new_state_pure = self._reshard_model_params(new_state_pure, self._gathered_params_shardings)
-      return new_state_pure, grad_norm, is_skipped_val
-    return state_pure, grad_norm, is_skipped_val
+    return step_kernels.update_kernel(
+        self._config, self._pure_state.state_graphdef, self._optimizer, self._grad_plan,
+        state_pure, accumulated_grads, accumulated_denominator, mean_loss,
+    )
 
   def _eval_kernel(self, params, rest, batch):
-    loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
-    model = nnx.merge(self._model_graphdef, params, rest, copy=True)
-    if self._gen_model_input_fn is not None:
-      if not isinstance(batch, dict):
-        raise TypeError(
-            "gen_model_input_fn must return a dict of loss-fn keyword arguments, got " f"{type(batch).__name__}."
-        )
-      out = loss_callable(model, **batch)
-    else:
-      out = loss_callable(model, self._config, batch, None, None, is_train=False)
-    loss_out = _normalize_loss_output(out, self._has_aux)
-    return loss_out.primary_loss, loss_out.aux_metrics
-
-  def _warn_uncomparable(self, what: str, hint: str, exc: Exception) -> None:
-    if self._signature_compare_warned:
-      return
-    self._signature_compare_warned = True
-    logging.warning(_UNCOMPARABLE_SIGNATURE_WARNING, what, exc, hint)
-
-  def _needs_recompile(self, signature: Any, previous: Any) -> bool:
-    if previous is None:
-      return True
-    try:
-      if bool(previous[:2] != signature[:2]):
-        return True
-    except Exception as exc:
-      self._warn_uncomparable("batch structure", _UNCOMPARABLE_STRUCTURE_HINT, exc)
-      return True
-    try:
-      return bool(previous[2] != signature[2])
-    except Exception as exc:
-      self._warn_uncomparable("static loss arguments", _UNCOMPARABLE_STATIC_HINT, exc)
-      return True
-
-  def _prepare_batch(self, payload: Any) -> Any:
-    if self._gen_model_input_fn is not None:
-      if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
-        payload = dataclasses.replace(payload, metadata={})
-      return self._gen_model_input_fn(payload)
-    if dataclasses.is_dataclass(payload):
-      return {
-          key: getattr(payload, key)
-          for key in payload.__dataclass_fields__
-          if getattr(payload, key) is not None and key != "metadata"
-      }
-    return payload
-
-  def _mesh_sharding(self, leaf: Any) -> jax.sharding.Sharding | None:
-    if leaf is None:
-      return None
-    leaf_sharding = getattr(leaf, "sharding", None)
-    if isinstance(leaf_sharding, jax.sharding.NamedSharding) and leaf_sharding.mesh == self._mesh:
-      return leaf_sharding
-    return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
-
-  def _batch_axis_size(self, axis_names: Any) -> int:
-    if axis_names is None:
-      return 1
-    names = axis_names if isinstance(axis_names, tuple) else (axis_names,)
-    size = 1
-    for name in names:
-      size *= self._mesh.shape[name]
-    return size
-
-  def _input_data_spec(self) -> tuple[Any, ...]:
-    return tuple(sharding.get_input_data_sharding(self._config, self._mesh).spec)
-
-  def _leaf_data_sharding(self, leaf: Any, data_spec: tuple[Any, ...]) -> jax.sharding.NamedSharding | None:
-    if leaf is None:
-      return None
-    rank = jnp.ndim(leaf)
-    spec = list(data_spec[:rank])
-    if spec and spec[0] is not None:
-      axis_size = self._batch_axis_size(spec[0])
-      if leaf.shape[0] % axis_size:
-        if not self._replicated_batch_warned:
-          self._replicated_batch_warned = True
-          logging.warning(_REPLICATED_BATCH_DIM_WARNING, leaf.shape[0], spec[0], axis_size, axis_size)
-        spec[0] = None
-    return jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec(*spec))
-
-  def _batch_data_shardings(self, dynamic_batch: Any) -> Any:
-    data_spec = self._input_data_spec()
-    return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
+    return step_kernels.eval_kernel(self._config, self._loss_spec(), self._pure_state.model_graphdef, params, rest, batch)
 
   def _compile_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     self._refresh_pure_state()
     self._place_state_on_mesh()
     self._shard_optimizer_state_over_data()
-    state_pure = self._read_state_pure()
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    state_pure = self._pure_state.read_state(self._state)
+    params_pure, rest_pure = self._pure_state.read_model(getattr(self._state, pure_state.MODEL_STATE_KEY, self._model))
 
     def fwd_bwd(params, rest, dynamic):
-      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
-      return self._fwd_bwd_kernel(params, rest, batch)
+      return self._fwd_bwd_kernel(params, rest, batch_signature.merge_static(dynamic, static_batch))
 
     def fwd_bwd_accum(params, rest, dynamic, acc_grads, acc_denom):
-      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
-      return self._fwd_bwd_kernel(params, rest, batch, acc_grads, acc_denom)
+      return self._fwd_bwd_kernel(params, rest, batch_signature.merge_static(dynamic, static_batch), acc_grads, acc_denom)
 
     def update(state_pure, accumulated_grads, accumulated_denominator, mean_loss):
       return self._update_kernel(state_pure, accumulated_grads, accumulated_denominator, mean_loss)
 
     if self._mesh is not None:
-      replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
-      state_mesh_shardings = jax.tree.map(self._mesh_sharding, state_pure)
-      params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
-      rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
-      batch_shardings = self._batch_data_shardings(dynamic_batch)
-      self._reduced_params_shardings, self._unreduced_grad_shardings = _deferred_all_reduce_shardings(
+      state_mesh_shardings = self._mesh_shardings(state_pure)
+      params_shardings = self._mesh_shardings(params_pure)
+      rest_shardings = self._mesh_shardings(rest_pure)
+      batch_shardings = self._batch_sharder.data_shardings(dynamic_batch)
+      reduced_params_shardings, unreduced_grad_shardings = gradient_sharding.deferred_all_reduce_shardings(
           self._config, self._mesh, params_shardings
       )
-      self._zero1_params_shardings = self._zero1_shardings_for(params_pure, params_shardings)
-      self._gathered_params_shardings = params_shardings if self._zero1_params_shardings is not None else None
-      grad_shardings = self._unreduced_grad_shardings
-      if grad_shardings is None:
-        grad_shardings = params_shardings
-        self._plain_grad_shardings = None
-      else:
-        self._plain_grad_shardings = params_shardings
-      first_in_shardings = (params_shardings, rest_shardings, batch_shardings)
-      accum_in_shardings = first_in_shardings + (grad_shardings, replicated)
-      fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
-      update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
-      update_out_shardings = (state_mesh_shardings, None, None)
-      if self._accumulated_grads is not None:
+      zero1_params_shardings = self._zero1.params_shardings(self._mesh, params_pure, params_shardings)
+      self._grad_plan = gradient_sharding.plan_gradient_shardings(
+          params_shardings, reduced_params_shardings, unreduced_grad_shardings, zero1_params_shardings
+      )
+      shardings = kernel_compilation.train_kernel_shardings(
+          self._mesh, state_mesh_shardings, params_shardings, rest_shardings, batch_shardings, self._grad_plan.grads
+      )
+      if self._accumulation.grads is not None:
         with self._sharding_ctx():
-          self._accumulated_grads = jax.tree.map(_conform_accumulator, self._accumulated_grads, grad_shardings)
+          self._accumulation.grads = jax.tree.map(
+              gradient_sharding.conform_accumulator, self._accumulation.grads, self._grad_plan.grads
+          )
     else:
-      first_in_shardings = None
-      accum_in_shardings = None
-      fwd_bwd_out_shardings = None
-      update_in_shardings = None
-      update_out_shardings = None
-      self._reduced_params_shardings = None
-      self._unreduced_grad_shardings = None
-      self._plain_grad_shardings = None
-      self._note_zero1_declined(_zero1_active(self._config, self._mesh))
-      self._zero1_params_shardings = None
-      self._gathered_params_shardings = None
+      shardings = kernel_compilation.TrainKernelShardings()
+      self._zero1.note_declined(zero1.zero1_active(self._config, self._mesh))
+      self._grad_plan = gradient_sharding.GradientShardingPlan()
 
-    self._compiled_fwd_bwd = jax.jit(
-        fwd_bwd, in_shardings=first_in_shardings, out_shardings=fwd_bwd_out_shardings
-    )
-    self._compiled_fwd_bwd_accum = jax.jit(
-        fwd_bwd_accum, in_shardings=accum_in_shardings, out_shardings=fwd_bwd_out_shardings, donate_argnums=(3, 4)
-    )
-    self._compiled_update = jax.jit(
-        update, in_shardings=update_in_shardings, out_shardings=update_out_shardings, donate_argnums=(0,)
-    )
-    self._jitted_kernels = {
-        "fwd_bwd": self._compiled_fwd_bwd,
-        "fwd_bwd_accum": self._compiled_fwd_bwd_accum,
-        "update": self._compiled_update,
-    }
-    self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
-    self._compiled = True
+    jitted = kernel_compilation.jit_train_kernels(fwd_bwd, fwd_bwd_accum, update, shardings)
+    self._kernels.fwd_bwd = jitted["fwd_bwd"]
+    self._kernels.fwd_bwd_accum = jitted["fwd_bwd_accum"]
+    self._kernels.update = jitted["update"]
+    self._kernels.jitted = jitted
+    self._kernels.signature = batch_signature.batch_signature(dynamic_batch, static_batch)
+    self._kernels.compiled = True
 
   def _compile_eval_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
-    self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
+    self._pure_state.model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
 
     def kernel(params, rest, dynamic):
-      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
-      return self._eval_kernel(params, rest, batch)
+      return self._eval_kernel(params, rest, batch_signature.merge_static(dynamic, static_batch))
 
     if self._mesh is not None:
-      params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
-      rest_shardings = jax.tree.map(self._mesh_sharding, rest_pure)
-      eval_in_shardings = (params_shardings, rest_shardings, self._batch_data_shardings(dynamic_batch))
+      params_shardings = self._mesh_shardings(params_pure)
+      rest_shardings = self._mesh_shardings(rest_pure)
+      eval_in_shardings = (params_shardings, rest_shardings, self._batch_sharder.data_shardings(dynamic_batch))
       eval_out_shardings = (None, None)
     else:
       eval_in_shardings = None
       eval_out_shardings = None
-    self._compiled_eval = jax.jit(kernel, in_shardings=eval_in_shardings, out_shardings=eval_out_shardings)
-    self._compiled_eval_signature = _batch_signature(dynamic_batch, static_batch)
+    self._kernels.eval = jax.jit(kernel, in_shardings=eval_in_shardings, out_shardings=eval_out_shardings)
+    self._kernels.eval_signature = batch_signature.batch_signature(dynamic_batch, static_batch)
 
   def compile(
       self, dummy_data: abstract_engine.TrainerPayload | None = None, compiler_options: dict[str, Any] | None = None
   ) -> None:
-    def _resolve_dummy_routed_experts(data: Any) -> Any:
-      if not isinstance(data, abstract_engine.RLTrainerPayload):
-        return data
-      routed_experts = data.routed_experts
-      if routed_experts is None or routed_experts.size != 0:
-        return data
-      num_layers = self._config.num_decoder_layers
-      top_k = self._config.num_experts_per_tok
-      batch_size, seq_len = routed_experts.shape[:2]
-      expanded = np.zeros((batch_size, seq_len, num_layers, top_k), dtype=routed_experts.dtype)
-      return dataclasses.replace(data, routed_experts=expanded)
-
-    self._compile_requested = True
-    if self._compiled:
+    self._kernels.requested = True
+    if self._kernels.compiled:
       return
     if dummy_data is None:
       logging.info(
@@ -927,90 +329,85 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "against the first fwd_bwd payload instead."
       )
       return
-    dummy_data = _resolve_dummy_routed_experts(dummy_data)
+    dummy_data = router_replay.expand_dummy_routed_experts(self._config, dummy_data)
     compiled = self.compile_kernels(dummy_data, compiler_options)
-    self._compiled_fwd_bwd = compiled["fwd_bwd"]
-    self._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]
-    self._compiled_update = compiled["update"]
+    self._kernels.fwd_bwd = compiled["fwd_bwd"]
+    self._kernels.fwd_bwd_accum = compiled["fwd_bwd_accum"]
+    self._kernels.update = compiled["update"]
     self._compile_eval(dummy_data, compiler_options)
 
   def compile_kernels(
       self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None = None
   ) -> dict[str, jax.stages.Compiled]:
-    options = self._xla_options(compiler_options)
+    options = kernel_compilation.xla_options(self._config, compiler_options)
     lowered = self._lower_kernels(dummy_data)
     with self._sharding_ctx():
-      return {name: lowered[name].compile(compiler_options=options) for name in KERNEL_NAMES}
-
-  def _xla_options(self, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
-    if compiler_options is None and getattr(self._config, "compile_xla_flags", ""):
-      return max_utils.parse_libtpu_flags_to_dict(self._config.compile_xla_flags)
-    return compiler_options
+      return {name: lowered[name].compile(compiler_options=options) for name in kernel_compilation.KERNEL_NAMES}
 
   def _compile_eval(self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None) -> None:
-    dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
+    dynamic_batch, static_batch = batch_signature.split_static_and_dynamic(
+        payload_inputs.prepare_batch(dummy_data, self._gen_model_input_fn)
+    )
     self._compile_eval_for_batch(dynamic_batch, static_batch)
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._pure_state.read_model(getattr(self._state, pure_state.MODEL_STATE_KEY, self._model))
+    to_aval = kernel_compilation.to_aval
     with self._sharding_ctx():
-      self._compiled_eval = self._compiled_eval.lower(
-          jax.tree.map(_to_aval, params_pure), jax.tree.map(_to_aval, rest_pure), jax.tree.map(_to_aval, dynamic_batch)
-      ).compile(compiler_options=self._xla_options(compiler_options))
+      self._kernels.eval = self._kernels.eval.lower(
+          jax.tree.map(to_aval, params_pure), jax.tree.map(to_aval, rest_pure), jax.tree.map(to_aval, dynamic_batch)
+      ).compile(compiler_options=kernel_compilation.xla_options(self._config, compiler_options))
 
   def _lower_kernels(self, dummy_data: abstract_engine.TrainerPayload) -> dict[str, jax.stages.Lowered]:
     if dummy_data is None:
       raise ValueError(
           "compile_kernels() needs a dummy payload -- unlike compile(), it cannot defer to the first real batch."
       )
-    dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
+    dynamic_batch, static_batch = batch_signature.split_static_and_dynamic(
+        payload_inputs.prepare_batch(dummy_data, self._gen_model_input_fn)
+    )
     self._compile_for_batch(dynamic_batch, static_batch)
-    state_aval = jax.tree.map(_to_aval, self._read_state_pure())
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
-    params_aval = jax.tree.map(_to_aval, params_pure)
-    rest_aval = jax.tree.map(_to_aval, rest_pure)
-    batch_aval = jax.tree.map(_to_aval, dynamic_batch)
+    to_aval = kernel_compilation.to_aval
+    state_aval = jax.tree.map(to_aval, self._pure_state.read_state(self._state))
+    params_pure, rest_pure = self._pure_state.read_model(getattr(self._state, pure_state.MODEL_STATE_KEY, self._model))
+    params_aval = jax.tree.map(to_aval, params_pure)
+    rest_aval = jax.tree.map(to_aval, rest_pure)
+    batch_aval = jax.tree.map(to_aval, dynamic_batch)
     mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._config.skip_step_on_spikes else None
     with self._sharding_ctx():
-      fwd_bwd = self._jitted_kernels["fwd_bwd"].lower(params_aval, rest_aval, batch_aval)
-      _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
-      return {
-          "fwd_bwd": fwd_bwd,
-          "fwd_bwd_accum": self._jitted_kernels["fwd_bwd_accum"].lower(
-              params_aval, rest_aval, batch_aval, grads_aval, denominator_aval
-          ),
-          "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
-      }
+      return kernel_compilation.lower_train_kernels(
+          self._kernels.jitted, state_aval, params_aval, rest_aval, batch_aval, mean_loss_aval
+      )
 
-  @_profiled_step("fwd_bwd", control_profile=True)
+  @profiler_module.profiled_step("fwd_bwd", control_profile=True)
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
-    batch = self._prepare_batch(payload)
+    batch = payload_inputs.prepare_batch(payload, self._gen_model_input_fn)
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
     self._throttler.wait_for_next()
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
-    if self._compile_requested:
-      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      signature = _batch_signature(dynamic_batch, static_batch)
-      if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
+    self._ensure_state()
+    model = getattr(self._state, pure_state.MODEL_STATE_KEY, self._model)
+    accumulation = self._accumulation
+    if self._kernels.requested:
+      dynamic_batch, static_batch = batch_signature.split_static_and_dynamic(batch)
+      signature = batch_signature.batch_signature(dynamic_batch, static_batch)
+      if not self._kernels.compiled or self._recompile_detector.needs_recompile(signature, self._kernels.signature):
         self._compile_for_batch(dynamic_batch, static_batch)
-      params, rest = self._read_model_pure(model)
+      params, rest = self._pure_state.read_model(model)
       with self._sharding_ctx():
-        if self._accumulated_grads is None:
-          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd(params, rest, dynamic_batch)
+        if accumulation.grads is None:
+          loss, aux, new_rest, acc_grads, acc_denom = self._kernels.fwd_bwd(params, rest, dynamic_batch)
         else:
-          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd_accum(
-              params, rest, dynamic_batch, self._accumulated_grads, self._accumulated_denominator
+          loss, aux, new_rest, acc_grads, acc_denom = self._kernels.fwd_bwd_accum(
+              params, rest, dynamic_batch, accumulation.grads, accumulation.denominator
           )
     else:
-      params, rest = self._read_model_pure(model)
+      params, rest = self._pure_state.read_model(model)
       with self._sharding_ctx():
         loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
-            params, rest, batch, self._accumulated_grads, self._accumulated_denominator
+            params, rest, batch, accumulation.grads, accumulation.denominator
         )
     nnx.update(model, new_rest)
-    self._publish_model_rest(new_rest)
+    self._pure_state.publish_model_rest(new_rest)
     self._throttler.add_computation(computation=loss, metrics=None)
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
@@ -1018,41 +415,32 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       for key, value in aux.items():
         if value is not None:
           self.record_metrics(key, value)
-    self._cached_losses.append(loss)
-    self._accumulated_grads = acc_grads
-    self._accumulated_denominator = acc_denom
-    self._micro_step_count += 1
+    accumulation.add(loss, acc_grads, acc_denom)
     self._total_micro_steps += 1
 
-  @_profiled_step("update")
+  @profiler_module.profiled_step("update")
   def update(self) -> int:
-    if self._accumulated_grads is None:
+    accumulation = self._accumulation
+    if accumulation.grads is None:
       return self.train_step
     if self._learning_rate_schedule is not None:
       lr = self._learning_rate_schedule(self.train_step)
       self.record_metrics("learning_rate", lr)
     self._throttler.wait_for_next()
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    state_pure = self._read_state_pure()
-    if not self._config.skip_step_on_spikes:
-      mean_loss = None
-    elif self._cached_losses:
-      loss_values = [loss.compute() if isinstance(loss, abstract_engine.WeightedMetric) else loss for loss in self._cached_losses]
-      mean_loss = jnp.mean(jnp.stack(loss_values)) if len(loss_values) > 1 else loss_values[0]
-    else:
-      mean_loss = jnp.array(0.0)
+    self._ensure_state()
+    state_pure = self._pure_state.read_state(self._state)
+    mean_loss = accumulation.mean_loss(self._config.skip_step_on_spikes)
     with self._sharding_ctx():
-      if self._compiled and hasattr(self, "_compiled_update"):
-        new_state_pure, grad_norm, is_skipped = self._compiled_update(
-            state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
+      if self._kernels.compiled and hasattr(self._kernels, "update"):
+        new_state_pure, grad_norm, is_skipped = self._kernels.update(
+            state_pure, accumulation.grads, accumulation.denominator, mean_loss
         )
       else:
         new_state_pure, grad_norm, is_skipped = self._update_kernel(
-            state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
+            state_pure, accumulation.grads, accumulation.denominator, mean_loss
         )
     nnx.update(self._state, new_state_pure)
-    self._publish_state(new_state_pure)
+    self._pure_state.publish_state(new_state_pure)
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if is_skipped is not None:
@@ -1061,10 +449,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         grad_norm if grad_norm is not None else (self._state if self._state is not None else self._model),
         self._metrics_recorder.get_step_metrics(self.train_step),
     )
-    self._cached_losses.clear()
-    self._accumulated_grads = None
-    self._accumulated_denominator = None
-    self._micro_step_count = 0
+    accumulation.reset()
     self._train_step += 1
     return self.train_step
 
@@ -1081,18 +466,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._eval_metrics_recorder.cleanup()
 
   def eval_step(self, payload: abstract_engine.TrainerPayload) -> None:
-    batch = self._prepare_batch(payload)
+    batch = payload_inputs.prepare_batch(payload, self._gen_model_input_fn)
     model = getattr(self._state, "model", self._model) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
-    self._model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    self._pure_state.model_graphdef, params, rest = nnx.split(model, nnx.Param, ...)
     self._throttler.wait_for_next()
-    if self._compile_requested:
-      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      signature = _batch_signature(dynamic_batch, static_batch)
-      if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
+    if self._kernels.requested:
+      dynamic_batch, static_batch = batch_signature.split_static_and_dynamic(batch)
+      signature = batch_signature.batch_signature(dynamic_batch, static_batch)
+      if self._kernels.eval is None or self._recompile_detector.needs_recompile(signature, self._kernels.eval_signature):
         self._compile_eval_for_batch(dynamic_batch, static_batch)
-      loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+      loss, aux = self._kernels.eval(params, rest, dynamic_batch)
     else:
       loss, aux = self._eval_kernel(params, rest, batch)
     self._throttler.add_computation(computation=loss, metrics=None)
@@ -1105,34 +490,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         if value is not None:
           self.record_metrics(key, value, mode=metrics_module.Mode.EVAL)
 
-  def _place_read_only_inputs(self, inputs: Any) -> Any:
-    if self._mesh is None:
-      return inputs
-    data_spec = self._input_data_spec()
-
-    def place(leaf: Any) -> Any:
-      if not isinstance(leaf, (jax.Array, np.ndarray)):
-        return leaf
-      if leaf.ndim == 0 or 0 in leaf.shape:
-        return leaf
-      if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
-        return leaf
-      target = self._leaf_data_sharding(leaf, data_spec)
-      if target is None or getattr(leaf, "sharding", None) == target:
-        return leaf
-      return jax.device_put(leaf, target)
-
-    return jax.tree.map(place, inputs)
-
   def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    self._ensure_state()
+    model = getattr(self._state, pure_state.MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
     self._throttler.wait_for_next()
     with self._sharding_ctx():
-      args, kwargs = self._place_read_only_inputs((args, kwargs))
+      args, kwargs = self._batch_sharder.place_read_only_inputs((args, kwargs))
       out = fn(model, *args, **kwargs)
     self._throttler.add_computation(
         computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)], metrics=None
@@ -1140,9 +505,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return out
 
   def save_checkpoint(self, metadata: Any = None, *, step: int | None = None, force: bool = False) -> None:
-    if self._micro_step_count > 0:
+    if self._accumulation.micro_step_count > 0:
       raise ValueError(
-          f"Mid-step checkpointing is not supported; micro_step_count must be 0, got {self._micro_step_count}."
+          "Mid-step checkpointing is not supported; micro_step_count must be 0, got "
+          f"{self._accumulation.micro_step_count}."
       )
     if not self._config.enable_checkpointing or not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
@@ -1172,13 +538,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if restored_step is None:
       return None
     logging.info("Checkpoint restored from step %d.", restored_step)
-    self._invalidate_pure_state()
+    self._pure_state.invalidate()
     self.train_step = restored_step
     self._metrics_recorder.cleanup()
-    self._cached_losses.clear()
-    self._accumulated_grads = None
-    self._accumulated_denominator = None
-    self._micro_step_count = 0
+    self._accumulation.reset()
     return restored_metadata.get("additional_metadata", None) if restored_metadata else None
 
   def record_metrics(
@@ -1224,79 +587,32 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return self.model
 
   def set_target_state(self, target_state: Any) -> None:
-    self._target_state = target_state
+    self._weight_sync.set_target_state(target_state)
 
   def prepare_weight_sync(self, *, sync_request: Any = None, staging_transport: str = "raiden") -> Any:
     del sync_request
     if staging_transport == "raiden":
-      if self._raiden_sync is not None and self._last_staged_step == self.train_step and self._staged_metadata is not None:
-        logging.info(
-            "Trainer reusing staged weight sync for step %d (%d variables)",
-            self.train_step, sum(len(metadata.variables) for metadata in self._staged_metadata),
-        )
-        return self._staged_metadata
+      staged = self._weight_sync.reuse_staged(self.train_step)
+      if staged is not None:
+        return staged
       self._throttler.wait_for_all()
-      params_state = self._get_trainable_params_state()
-      if self._use_weight_converter:
-        converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
-      else:
-        params_state = jax.tree_util.tree_map(
-            lambda value: value.astype(jnp.bfloat16)
-            if hasattr(value, "dtype") and jnp.issubdtype(value.dtype, jnp.floating) else value,
-            params_state,
-        )
-        if self._config.scan_layers:
-          converted_state = raiden_unscan.unscan_layers(
-              params_state,
-              num_layers=self._config.num_decoder_layers,
-              scan_axis=self._config.param_scan_axis,
-              cycle_interval=self._config.inhomogeneous_layer_cycle_interval,
-          )
-        else:
-          converted_state = params_state
-      del params_state
-      if self._raiden_sync is None:
-        self._raiden_sync = raiden_synchronizer.RaidenSynchronizer(
-            job_name="trainer", worker_index=jax.process_index(), auto_h2d=False, parallelism=4
-        )
-      self._raiden_sync.bind(converted_state)
-      del converted_state
-      if self._raiden_sync.active:
-        self._raiden_sync.d2h()
-      verify_weights = is_verify_weights_enabled()
-      if verify_weights:
-        logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
-      all_metadata = self._raiden_sync.work_unit_metadata_all()
-      total_variables = sum(len(metadata.variables) for metadata in all_metadata)
-      logging.info(
-          "Trainer prepared weight sync for step %d: registered %d work unit(s) with %d variables on mesh %s",
-          self.train_step, len(all_metadata), total_variables, all_metadata[0].mesh_axes if all_metadata else (),
-      )
-      self._last_staged_step = self.train_step
-      self._staged_metadata = all_metadata
-      return all_metadata
+      return self._weight_sync.stage(self._get_trainable_params_state(), self.train_step)
     raise ValueError(f"unknown staging_transport {staging_transport!r}; expected 'raiden'.")
 
   def release_weight_sync(self, *, sync_request: Any = None) -> Any:
     del sync_request
-    self._last_staged_step = None
-    self._staged_metadata = None
-    if self._raiden_sync:
-      logging.vlog(1, "Trainer Raiden metrics: %s", self._raiden_sync.metrics())
+    self._weight_sync.release()
     return True
 
   def close(self) -> None:
     if self._profiler is not None:
-      self._profiler.close(blocking_object=self._read_state_pure() if self._state is not None else None)
-    if self._raiden_sync:
-      if hasattr(self._raiden_sync, "close"):
-        self._raiden_sync.close()
-      self._raiden_sync = None
-    self._last_staged_step = None
-    self._staged_metadata = None
+      self._profiler.close(blocking_object=self._pure_state.read_state(self._state) if self._state is not None else None)
+    self._weight_sync.close()
     if self._config.enable_checkpointing and self._checkpoint_dir() and self._checkpoint_manager:
-      if self._micro_step_count > 0:
-        logging.warning("Closing mid-step (micro_step_count=%d); skipping the final checkpoint.", self._micro_step_count)
+      if self._accumulation.micro_step_count > 0:
+        logging.warning(
+            "Closing mid-step (micro_step_count=%d); skipping the final checkpoint.", self._accumulation.micro_step_count
+        )
       else:
         self.save_checkpoint(metadata=None, force=True)
       self._checkpoint_manager.close()

@@ -12,7 +12,8 @@ import jax
 import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
 from lilax._backend.training_engine import abstract_engine
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils
+from lilax._backend.utils import max_logging, max_utils
+from lilax._backend.utils.diagnostics import config_summary
 import numpy as np
 
 _METRICS_TO_LOG = ["learning_rate", "loss", "perplexity", "total_weights", "gradient_norm", "step_skipped", "step_time", "tflops"]
@@ -198,7 +199,7 @@ class MetricsLogger:
       return
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self._tb_writer)
     max_utils.add_text_to_summary_writer("libtpu_init_args", os.getenv("LIBTPU_INIT_ARGS", ""), self._tb_writer)
-    maxtext_utils.add_config_to_summary_writer(self._config, self._tb_writer)
+    config_summary.add_config_to_summary_writer(self._config, self._tb_writer)
 
   def _log_metrics(self, step: int, metrics: dict[str, Any], mode: Mode) -> None:
     if mode == Mode.TRAIN:

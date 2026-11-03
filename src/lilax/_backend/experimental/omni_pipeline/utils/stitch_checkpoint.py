@@ -8,7 +8,7 @@ import jax
 from orbax import checkpoint as ocp
 
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, model_creation_utils
+from lilax._backend.utils import device_mesh, max_logging, max_utils, maxtext_utils_nnx, model_creation_utils
 
 
 def _unwrap_var(v):
@@ -89,7 +89,7 @@ def stitch_and_save_checkpoints(
   max_logging.log(f"  Output Stitched Path:  {output_checkpoint_path}")
   max_logging.log("=" * 60)
 
-  mesh = maxtext_utils.get_mesh_from_config(config)
+  mesh = device_mesh.get_mesh_from_config(config)
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
   max_logging.log("Generating target omni model from config with initial random weights...")
   with jax.set_mesh(mesh):

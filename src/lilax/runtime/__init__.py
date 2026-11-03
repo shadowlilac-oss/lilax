@@ -7,7 +7,7 @@ import jax
 from flax.core.spmd import logical_axis_rules
 
 from lilax._backend.configs.runtime import resolve_initialized_config, resolve_runtime_config
-from lilax._backend.utils import elastic_utils, maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, elastic_utils, model_creation_utils
 from lilax.configuration.schema import RLConfig
 
 
@@ -73,7 +73,7 @@ class Runtime:
     self._overrides = combined_overrides
     if self.mesh is None:
       self.mesh = elastic_utils.get_or_build(
-          elastic_retry_cache, "mesh", partial(maxtext_utils.get_mesh_from_config, self.config, self.devices)
+          elastic_retry_cache, "mesh", partial(device_mesh.get_mesh_from_config, self.config, self.devices)
       )
     return self
 

@@ -9,7 +9,7 @@ import jax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.utils import maxtext_utils, model_creation_utils
+from lilax._backend.utils import device_mesh, model_creation_utils
 from lilax.configuration.schema import MaxTextConfig
 
 
@@ -101,7 +101,7 @@ def get_model_mdn(model_name, scan_layers=True, verbose=False, include_routers=T
       model_name=model_name, scan_layers=scan_layers, attention="dot_product",
       muon_include_routers=include_routers, skip_jax_distributed_system=True,
   ))
-  devices_array = maxtext_utils.create_device_mesh(config)
+  devices_array = device_mesh.create_device_mesh(config)
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
   _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
   muon_weight_dimension_numbers = get_muon_weight_dimension_numbers(model, config, verbose=verbose)

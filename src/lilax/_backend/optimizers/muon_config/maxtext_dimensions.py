@@ -8,7 +8,7 @@ import jax
 
 from lilax._backend.optimizers.muon import ShardedMuonDimensionNumbers as smdn
 from lilax._backend.optimizers.muon_config import dimensions as muon_utils
-from lilax._backend.utils import maxtext_utils
+from lilax._backend.utils import device_mesh
 from lilax._backend.utils import sharding as sharding_lib
 
 
@@ -32,7 +32,7 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
   if mesh is None:
     if config is None:
       raise ValueError("Either mesh or config must be provided to get_maxtext_muon_weight_dimension_numbers.")
-    mesh = maxtext_utils.get_mesh_from_config(config)
+    mesh = device_mesh.get_mesh_from_config(config)
   if config is not None:
     logical_rules = getattr(config, "logical_axis_rules", ())
   else:
