@@ -244,14 +244,18 @@ def setup_train_loop(
           elastic_retry_cache, "abstract_model",
           functools.partial(nnx_abstract_model.create_nnx_abstract_model, config, mesh, devices),
       )
+      init_state_args = ()
     else:
-      def create_model():
-        return supplied_model
+      supplied_graphdef, supplied_state = nnx.split(supplied_model)
+      init_state_args = (supplied_state,)
+
+      def create_model(model_state=supplied_state):
+        return nnx.merge(supplied_graphdef, model_state)
 
     learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
 
-    def create_train_state_fn():
-      train_model = create_model()
+    def create_train_state_fn(*model_args):
+      train_model = create_model(*model_args)
       wrt = (
           getattr(nnx, "LoRAParam", nnx.Param)
           if getattr(getattr(config, "lora", None), "enable_lora", False)
@@ -319,7 +323,7 @@ def setup_train_loop(
     snapshotter = None if elastic_retry_cache is None else elastic_retry_cache.snapshotter
     state, _, state_mesh_shardings, data_iterator, _ = state_setup.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=snapshotter, step=checkpoint_step,
-        selected_source=selected_source,
+        selected_source=selected_source, init_state_args=init_state_args,
     )
     if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
       target_model_state = (

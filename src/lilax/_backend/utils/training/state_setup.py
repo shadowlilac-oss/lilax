@@ -14,17 +14,18 @@ from lilax._backend.utils import state_abstraction
 
 
 def setup_training_state(
-    data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None, step=-1, selected_source=None
+    data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None, step=-1, selected_source=None,
+    init_state_args=(),
 ):
   return setup_initial_state(
       data_iterator, config, mesh, checkpoint_manager, init_state_fn, True, snapshotter=snapshotter, step=step,
-      selected_source=selected_source,
+      selected_source=selected_source, init_state_args=init_state_args,
   )
 
 
 def setup_initial_state(
     data_iterator, config, mesh, checkpoint_manager, init_state_fn, is_training=True, snapshotter=None, step=-1,
-    selected_source=None,
+    selected_source=None, init_state_args=(),
 ):
   unboxed_abstract_state, state_mesh_annotations, state_mesh_shardings = state_abstraction.get_abstract_state(
       config, mesh, init_state_fn, is_training
@@ -39,7 +40,9 @@ def setup_initial_state(
     was_restored = bool(restored is not None or raw_params is not None)
     init_state_partial = init_state_fn
     init_state_partial.__name__ = "initialize_state"
-    state = jax.jit(lambda: nnx.state(init_state_partial()), in_shardings=None, out_shardings=state_mesh_shardings)()
+    state = jax.jit(
+        lambda *args: nnx.state(init_state_partial(*args)), in_shardings=None, out_shardings=state_mesh_shardings
+    )(*init_state_args)
     if raw_params:
       _restore_raw_params(state, raw_params, native, config, mesh)
     if restored:
