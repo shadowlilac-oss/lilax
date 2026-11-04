@@ -25,6 +25,7 @@ from lilax._backend.common.common_types import (
     DType,
     Config,
     Array,
+    is_fp8_dtype,
     DECODE_LENGTH,
     DECODE_BATCH,
     PREFILL_KV_BATCH,
@@ -54,7 +55,7 @@ from lilax._backend.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, Glob
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.inference import kvcache
 from lilax._backend.inference.kvcache import KVQuant
-from lilax._backend.distributed.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
+from lilax._backend.distributed.sharding import maybe_shard_with_logical, maybe_shard_with_name, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -625,9 +626,19 @@ class Attention(nnx.Module):
     """Initializes the a fused QKV projection using only one DenseGeneral module."""
     self._validate_kv_heads()
 
+    block_size = getattr(self.config, "weight_block_size", None) if self.is_qwen3_hybrid else None
+    if self.is_qwen3_hybrid and is_fp8_dtype(self.weight_dtype):
+      block_sizes = (block_size,) * 3 if isinstance(block_size, int) else block_size
+      if block_sizes and len(block_sizes) != 3:
+        block_sizes = (block_sizes[0],) * 3
+      if (not block_sizes or any(not size or size < 0 for size in block_sizes) or self.head_dim % block_sizes[2]
+          or 2 * (self.num_query_heads + self.num_kv_heads) >= block_sizes[1]):
+        raise NotImplementedError("Hybrid Qwen fused FP8 QKV requires exact, uncompressed block scales.")
+
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_shape),
-        out_features_shape=(self.num_query_heads + 2 * self.num_kv_heads, self.head_dim),
+        out_features_shape=((2 if self.is_qwen3_hybrid else 1) * self.num_query_heads + 2 * self.num_kv_heads,
+                            self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed_attn", "heads", "kv"),
@@ -638,6 +649,7 @@ class Attention(nnx.Module):
         weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
+        **({"block_size": block_size} if self.is_qwen3_hybrid else {}),
         rngs=self.rngs,
     )
 
@@ -652,6 +664,23 @@ class Attention(nnx.Module):
     q_bshd = self._logical_to_mesh_axes(self.query_axis_names)
     k_bshd = self._logical_to_mesh_axes(self.key_axis_names)
     v_bshd = self._logical_to_mesh_axes(self.value_axis_names)
+
+    if self.is_qwen3_hybrid:
+      replicated = jax.sharding.PartitionSpec(*q_bshd[:2], None, None)
+      qkv_proj = maybe_shard_with_name(qkv_proj, NamedSharding(self.mesh, replicated), self.config.shard_mode)
+
+      @jax.shard_map(mesh=self.mesh, in_specs=(replicated,), out_specs=(replicated, replicated, replicated))
+      def split_hybrid_qkv(projection):
+        query, gate, key, value = jnp.split(
+            projection, [self.num_query_heads, 2 * self.num_query_heads,
+                         2 * self.num_query_heads + self.num_kv_heads], axis=2
+        )
+        return jnp.concatenate((query, gate), axis=-1), key, value
+
+      query, key, value = split_hybrid_qkv(qkv_proj)
+      return (maybe_shard_with_name(query, NamedSharding(self.mesh, q_bshd), self.config.shard_mode),
+              maybe_shard_with_name(key, NamedSharding(self.mesh, k_bshd), self.config.shard_mode),
+              maybe_shard_with_name(value, NamedSharding(self.mesh, v_bshd), self.config.shard_mode))
 
     @jax.shard_map(mesh=self.mesh, in_specs=(q_bshd,), out_specs=(q_bshd, k_bshd, v_bshd))
     def split_qkv(qkv_proj: Array) -> tuple[Array, Array, Array]:
