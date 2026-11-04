@@ -48,6 +48,8 @@ def _run_deepseek4_layer_remat(
     merged_layer = nnx.merge(graphdef, params_slice, other_slice)
     out_y, _ = merged_layer(carry, **layer_kwargs)
     _, _, new_other = nnx.split(merged_layer, params_filter, ...)
+    if any(isinstance(value, nnx.LoRAParam) for _, value in nnx.iter_graph(merged_layer)):
+      out_y = out_y.astype(carry.dtype)
     return out_y, new_other
 
   if prevent_cse is None:
