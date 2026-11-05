@@ -6,9 +6,17 @@ from tempfile import TemporaryDirectory
 
 from etils import epath
 from flax import nnx
+import jax
 import orbax.checkpoint as ocp
 
+from lilax._backend.checkpoint_conversion.model_families.gpt_oss.fused import split_moe_weights
+from lilax._backend.checkpoint_conversion.model_families.qwen3_5 import fused as fused_qwen3_5
 from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggingface
+from lilax._backend.checkpoint_conversion.projection_layout import (
+    is_hybrid_qwen_adapter, projection_layout_adapter, supports_mlp_layout, validate_huggingface_projection_layout,
+    validate_mlp_only_layout,
+)
+from lilax._backend.integration.vllm.convert_utils import _partition_size
 from lilax.configuration import QwixQATConfig
 from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 
@@ -60,6 +68,12 @@ def save_pretrained(
 ):
   model.materialize(runtime=model.runtime)
   if format == "huggingface":
+    config = model.construction_config
+    if (getattr(config.decoder_block, "value", config.decoder_block) == "gpt_oss"
+        and config.prefuse_moe_weights and config.padded_base_moe_mlp_dim is not None
+        and config.padded_base_moe_mlp_dim != config.mlp_dim):
+      raise NotImplementedError("Hugging Face export of padded GPT-OSS expert output weights is not supported.")
+    validate_huggingface_projection_layout(model.construction_config)
     if model.existing_graph_qat_config is not None:
       raise NotImplementedError("Hugging Face export of Qwix QAT models is not supported.")
     capabilities = get_model_capabilities(model.runtime.config.model_name)
@@ -92,13 +106,67 @@ def save_pretrained(
   updates["scan_layers"] = model.construction_config.scan_layers
   updates["hardware"] = model.runtime.config.hardware
   updates["qwix_qat_config"] = model.existing_graph_qat_config
-  saved_config = public_config.model_copy(update=updates)
-  config_json = saved_config.model_dump_json(exclude={"hf_access_token"}, indent=2)
   state = (
       nnx.state(model.native_model)
       .filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)))
       .to_pure_dict()
   )
+  config = model.construction_config
+  decoder = getattr(config.decoder_block, "value", config.decoder_block)
+  if decoder == "gpt_oss" and config.prefuse_moe_weights:
+    if model.existing_graph_qat_config is not None:
+      raise NotImplementedError("Portable GPT-OSS prefused export does not support Qwix QAT.")
+    width = config.mlp_dim
+    padded_width = config.padded_base_moe_mlp_dim if config.padded_base_moe_mlp_dim is not None else width
+    if not isinstance(width, int) or not isinstance(padded_width, int) or width <= 0 or padded_width < width:
+      raise ValueError("Cannot determine GPT-OSS prefused weight widths from the model configuration.")
+    if padded_width != width:
+      raise NotImplementedError("Portable GPT-OSS prefused export does not support padded expert weights.")
+    def split_live_moe(node):
+      if not isinstance(node, dict):
+        return 0
+      count = 0
+      mlp = node.get("GptOssMlp")
+      if isinstance(mlp, dict) and "wi" in mlp:
+        wi = mlp.pop("wi")
+        if mlp.get("wi_scale") is not None:
+          raise NotImplementedError("Portable GPT-OSS prefused FP8 expert weights are not supported.")
+        sharding = getattr(wi, "sharding", None)
+        if not isinstance(sharding, jax.sharding.NamedSharding):
+          raise ValueError("Cannot determine GPT-OSS prefused source shard count from wi sharding.")
+        axis = wi.ndim - 1
+        partition = sharding.spec[axis] if axis < len(sharding.spec) else None
+        shards = _partition_size(partition, sharding.mesh)
+        if wi.shape[axis] != 2 * padded_width or width % shards or padded_width % shards:
+          raise ValueError("GPT-OSS prefused weights have incompatible widths or uneven shard chunks.")
+        weights = split_moe_weights(wi, axis=axis, num_shards=shards)
+        mlp["wi_0"], mlp["wi_1"] = weights
+        count += 1
+      for value in node.values():
+        count += split_live_moe(value)
+      return count
+
+    if not split_live_moe(state):
+      raise ValueError("GPT-OSS prefused model does not contain the expected expert wi weights.")
+    updates["prefuse_moe_weights"] = False
+  validate_mlp_only_layout(config)
+  layout_adapter = projection_layout_adapter(config)
+  unfuse_weights = layout_adapter is not None and (
+      config.fused_qkv or (supports_mlp_layout(layout_adapter) and config.fused_mlp)
+  )
+  if unfuse_weights:
+    if model.existing_graph_qat_config is not None:
+      raise NotImplementedError("Portable fused projection export does not support Qwix QAT.")
+    target_mlp = False if supports_mlp_layout(layout_adapter) else config.fused_mlp
+    if is_hybrid_qwen_adapter(layout_adapter) and layout_adapter is not fused_qwen3_5:
+      converted = layout_adapter.convert_native_state({"decoder": state["decoder"]}, config,
+                                                       fused_qkv=False, fused_mlp=target_mlp)
+      state["decoder"] = converted["decoder"]
+    else:
+      state = layout_adapter.convert_native_state(state, config, fused_qkv=False, fused_mlp=target_mlp)
+    updates.update({"fused_qkv": False, "fused_mlp": target_mlp})
+  saved_config = public_config.model_copy(update=updates)
+  config_json = saved_config.model_dump_json(exclude={"hf_access_token"}, indent=2)
 
   def wrap_value(node):
     if isinstance(node, dict):
@@ -112,6 +180,10 @@ def save_pretrained(
   checkpointer.save(save_directory, wrap_value(state), force=True)
   (epath.Path(save_directory) / "config.json").write_text(config_json, encoding="utf-8")
   explicit_keys = public_config._explicit_keys | {"scan_layers"}
+  if decoder == "gpt_oss" and config.prefuse_moe_weights:
+    explicit_keys |= {"prefuse_moe_weights"}
+  if unfuse_weights:
+    explicit_keys |= {"fused_qkv", "fused_mlp"}
   if model.existing_graph_qat_config is not None:
     explicit_keys |= {"qwix_qat_config"}
   metadata = {"explicit_keys": sorted(explicit_keys - {"hf_access_token"})}

@@ -7,6 +7,11 @@ import jax
 import jax.numpy as jnp
 from transformers import AutoProcessor, AutoTokenizer
 
+from lilax._backend.checkpoint_conversion.projection_layout import (
+    is_hybrid_qwen_adapter, mlp_only_adapter, projection_layout_adapter, validate_huggingface_projection_layout,
+    validate_mlp_only_layout,
+)
+from lilax._backend.checkpoint_conversion.model_families.qwen3_5 import fused as fused_qwen3_5
 from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import HOOK_FNS, PARAM_MAPPING
 from lilax._backend.checkpoint_conversion.model_families.hf_shape_registry import HF_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
@@ -269,6 +274,8 @@ def _transform_and_save_weights(
 
 def convert_to_huggingface(config, *, override_model_architecture=False, hf_model_path=None):
   """Convert a checkpoint using a resolved native configuration and return its output path."""
+  validate_mlp_only_layout(config)
+  validate_huggingface_projection_layout(config, hf_config=HF_MODEL_CONFIGS.get(config.model_name))
   assert (
       config.load_full_state_path == ""
   ), "This script expects parameters, not a full state. Use generate_param_only_checkpoint first if needed."
@@ -300,6 +307,9 @@ def convert_to_huggingface(config, *, override_model_architecture=False, hf_mode
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  if ((config.fused_qkv or config.fused_mlp) and mlp_only_adapter(config) is not None
+      and hf_config_obj.to_dict().get("quantization_config")):
+    raise NotImplementedError("Fused projection conversion to a quantized Hugging Face model is not supported.")
   _validate_or_update_architecture(hf_config_obj, config, override=override_model_architecture)
   if getattr(config, "rope_type", None) == "yarn":
     _apply_yarn_rope_config(hf_config_obj, config)
@@ -315,6 +325,24 @@ def convert_to_huggingface(config, *, override_model_architecture=False, hf_mode
   shape_map = mappings["shape_mapping"]
   hook_fn_map = mappings["hook_fn_mapping"]
   maxtext_state_dict = detect_and_extract_checkpoint(checkpoint_dict)
+  if any(key.endswith("-GptOssMlp-wi") for key in maxtext_state_dict):
+    raise NotImplementedError("Cannot split stored GPT-OSS prefused weights: source shard-count provenance is missing.")
+  layout_adapter = projection_layout_adapter(config)
+  if layout_adapter is not None:
+    if layout_adapter is fused_qwen3_5 and any(key.startswith("params-vision_encoder-") for key in maxtext_state_dict):
+      raise NotImplementedError("Hugging Face export of Qwen3.5 vision weights is not supported.")
+    if (mlp_only_adapter(config) is not None and (config.fused_qkv or config.fused_mlp)
+        and any("lora_" in key.lower() for key in maxtext_state_dict)):
+      raise NotImplementedError("Fused projection conversion with LoRA is not supported for this model.")
+    if any(("-qkv_proj-" in key or "-wi-" in key) and "lora_" in key.lower() for key in maxtext_state_dict):
+      raise NotImplementedError("Export of fused projection LoRA factors is not supported.")
+    if is_hybrid_qwen_adapter(layout_adapter):
+      text_weights = {key: value for key, value in maxtext_state_dict.items() if key.startswith("params-decoder-")}
+      for key in text_weights:
+        del maxtext_state_dict[key]
+      maxtext_state_dict.update(layout_adapter.unfuse_for_huggingface(text_weights, config))
+    else:
+      maxtext_state_dict = layout_adapter.unfuse_for_huggingface(maxtext_state_dict, config)
   state_keys = {key.replace("_lora_a", "").replace("_lora_b", "") for key in maxtext_state_dict}
   filtered_map_keys = validate_and_filter_param_map_keys(param_map, state_keys)
   if not config.use_multimodal:
