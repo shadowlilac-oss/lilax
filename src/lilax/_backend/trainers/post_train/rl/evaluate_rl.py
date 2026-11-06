@@ -100,7 +100,7 @@ def _compute_row_reward(reward_fns, prompt, question, responses, answer, row_idx
     score_sum = 0.0
     for response in responses:
       for fn in reward_fns:
-        scores = fn(prompts=[prompt], completions=[response], answer=[answer], question=question)
+        scores = fn(prompts=[prompt], completions=[response], answer=[answer], question=[question])
         if scores:
           score_sum += float(scores[0])
     return score_sum, len(responses)
