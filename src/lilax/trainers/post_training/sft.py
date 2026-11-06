@@ -17,6 +17,7 @@ class SFTConfig(_PostTrainingArguments):
       eval_data_columns=None, tokenize_train_data=None, tokenize_eval_data=None, num_epoch=None,
       enable_data_shuffling=None, data_shuffle_seed=None, chat_template=None, chat_template_path=None,
       formatting_func_path=None, formatting_func_kwargs=None, max_segments_per_seq=None, grain_worker_count=None,
+      tokenizer_path=None, tokenizer_type=None, add_bos=None,
       hf_path=None, hf_name=None, hf_data_dir=None, hf_train_files=None, hf_eval_split=None,
       hf_eval_files=None, hf_access_token=None, dataset_path=None, dataset_name=None, eval_dataset_name=None,
       train_split=None, eval_split=None, grain_train_mixture_config_path=None, grain_use_elastic_iterator=None,
@@ -65,6 +66,9 @@ class SFTConfig(_PostTrainingArguments):
     self.formatting_func_kwargs = formatting_func_kwargs
     self.max_segments_per_seq = max_segments_per_seq
     self.grain_worker_count = grain_worker_count
+    self.tokenizer_path = tokenizer_path
+    self.tokenizer_type = tokenizer_type
+    self.add_bos = add_bos
     self.hf_path = hf_path
     self.hf_name = hf_name
     self.hf_data_dir = hf_data_dir
@@ -113,6 +117,7 @@ class SFTConfig(_PostTrainingArguments):
             ("chat_template_path", self.chat_template_path), ("formatting_func_path", self.formatting_func_path),
             ("formatting_func_kwargs", self.formatting_func_kwargs), ("max_segments_per_seq", self.max_segments_per_seq),
             ("grain_worker_count", self.grain_worker_count),
+            ("tokenizer_path", self.tokenizer_path), ("tokenizer_type", self.tokenizer_type), ("add_bos", self.add_bos),
             ("hf_path", self.hf_path), ("hf_name", self.hf_name),
             ("hf_data_dir", self.hf_data_dir), ("hf_train_files", self.hf_train_files),
             ("hf_eval_split", self.hf_eval_split), ("hf_eval_files", self.hf_eval_files),
