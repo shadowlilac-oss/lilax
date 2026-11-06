@@ -23,7 +23,8 @@ class AutoConfig:
       model_name: str | None = None,
       **overrides,
   ) -> MaxTextConfig:
-    resolved_name = resolve_model_name(pretrained_model_name_or_path, model_name=model_name)
+    if model_name is not None:
+      resolve_model_name(pretrained_model_name_or_path, model_name=model_name)
     snapshot = resolve_model_snapshot(
         pretrained_model_name_or_path,
         revision=revision,
@@ -31,6 +32,7 @@ class AutoConfig:
         cache_dir=cache_dir,
         local_files_only=local_files_only,
     )
+    resolved_name = resolve_model_name(pretrained_model_name_or_path, model_name=model_name, snapshot=snapshot)
     saved_values = None
     saved_explicit_keys = []
     snapshot_config_path = snapshot / "config.json"
