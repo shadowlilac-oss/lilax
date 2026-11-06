@@ -43,6 +43,10 @@ from lilax._backend.utils import max_logging
 from lilax._backend.trainers.post_train.rl.setup.rollout_parallelism import get_rollout_kwargs_for_parallelism
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from lilax.configuration.loading import load_config_values
+from lilax.trainers.post_training.openenv.factory import FactoryAgent, FactoryEnvironment
+from lilax.trainers.post_training.openenv.learner import FactoryGRPOLearner
+from lilax.trainers.post_training.openenv.parser import QwenFactoryParser
+from lilax.trainers.post_training.openenv.registry import EnvironmentRegistry
 
 
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
@@ -257,6 +261,7 @@ def build_rl_profiler_config(trainer_config: Any) -> rl_cluster_lib.RLProfileCon
 def create_rl_components(
     trainer_config, sampler_config, sampler_devices, actor_model, actor_mesh, reference_model, reference_mesh,
     rollout_mesh, model_tokenizer, *, vllm_config, checkpoint_step=None, metric_backend=None, report_to=None,
+    agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
 ):
   optimizer = utils_rl.get_optimizer(trainer_config)
   if trainer_config.enable_checkpointing:
@@ -358,7 +363,9 @@ def create_rl_components(
       restore_trainer_step(rl_cluster.actor_trainer, os.path.join(checkpoint_dir, "actor"), checkpoint_step)
     rl_cluster.sync_weights()
     rl_cluster.global_steps = 0
-  reward_fns = build_reward_fns(trainer_config, lambda fn: _RewardFn(fn, trainer_config))
+  reward_fns = (build_reward_fns(trainer_config, lambda fn: _RewardFn(fn, trainer_config))
+                if reward_funcs is None and environment_factory is None else [] if reward_funcs is None
+                else [reward_funcs] if callable(reward_funcs) else list(reward_funcs))
   if trainer_config.rl.use_agentic_rollout:
     grpo_config = agentic_grpo_learner.GRPOConfig(
         num_generations=trainer_config.rl.num_generations, num_iterations=trainer_config.rl.num_iterations,
@@ -371,13 +378,35 @@ def create_rl_components(
         reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
     )
     max_logging.log("GRPO config resolved:\n" + "\n".join(f"  {key} = {value!r}" for key, value in sorted(dataclasses.asdict(grpo_config).items())))
-    template_config = load_data_template_from_file(_template_path(trainer_config.data_template_path))
-    if template_config is None:
-      raise ValueError(f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}")
-    chat_parser = utils_rl.MaxTextChatParser(model_tokenizer, template_config, trainer_config)
-    rl_trainer = agentic_grpo_learner.GRPOLearner(
+    if environment_factory is None:
+      template_config = load_data_template_from_file(_template_path(trainer_config.data_template_path))
+      if template_config is None:
+        raise ValueError(f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}")
+      chat_parser = utils_rl.MaxTextChatParser(model_tokenizer, template_config, trainer_config)
+    else:
+      with open(os.path.join(MAXTEXT_PKG_DIR, "assets/tokenizers/qwen3-tokenizer/tokenizer_config.json"),
+                encoding="utf-8") as template_file:
+        expected_template = json.load(template_file)["chat_template"]
+      chat_parser = QwenFactoryParser(model_tokenizer, expected_template)
+      agent_class, env_class = FactoryAgent, FactoryEnvironment
+      env_kwargs = {"environment_factory": environment_factory, "has_reward_funcs": bool(reward_fns)}
+      if reward_fns:
+        if trainer_config.reward_num_workers not in (0, 1):
+          raise ValueError("environment_factory with reward_funcs requires reward_num_workers 0 or 1.")
+        environment_registry = EnvironmentRegistry()
+        env_kwargs["environment_registry"] = environment_registry
+    agentic_kwargs = {
+        key: value for key, value in {
+            "agent_class": agent_class, "agent_kwargs": agent_kwargs,
+            "env_class": env_class, "env_kwargs": env_kwargs,
+        }.items() if value is not None
+    }
+    learner_class = FactoryGRPOLearner if environment_factory is not None and reward_fns else agentic_grpo_learner.GRPOLearner
+    learner_kwargs = {"environment_registry": environment_registry} if learner_class is FactoryGRPOLearner else {}
+    rl_trainer = learner_class(
         rl_engine=rl_cluster, reward_fns=reward_fns, algo_config=grpo_config, chat_parser=chat_parser,
-        metric_fns=[utils_rl.get_correctness_metrics],
+        metric_fns=[utils_rl.get_correctness_metrics] if environment_factory is None else None,
+        **agentic_kwargs, **learner_kwargs,
     )
   else:
     grpo_config = grpo_learner.GRPOConfig(
@@ -413,6 +442,7 @@ def _train(
     reference_model=None, reference_mesh=None, rollout_mesh=None, model_tokenizer=None,
     train_dataset=None, eval_dataset=None, train_iterator=None, eval_iterator=None, goodput_recorder=None,
     checkpoint_step=None, metric_backend=None, report_to=None,
+    agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
 ):
   maxtext_vllm_adapter.register()
   if model_tokenizer is None:
@@ -468,6 +498,8 @@ def _train(
         trainer_config, sampler_config, sampler_devices, actor_model, mesh, reference_model, reference_mesh,
         rollout_mesh, model_tokenizer, vllm_config=vllm_config, checkpoint_step=checkpoint_step,
         metric_backend=metric_backend, report_to=report_to,
+        agent_class=agent_class, agent_kwargs=agent_kwargs, env_class=env_class, env_kwargs=env_kwargs,
+        reward_funcs=reward_funcs, environment_factory=environment_factory,
     )
   if trainer_config.num_test_batches > 0:
     rl_cluster.rollout.update_params(nnx.state(rl_cluster.actor_trainer.model, nnx.Param))
@@ -507,7 +539,19 @@ def train(
     reference_model=None, reference_mesh=None, rollout_mesh=None, model_tokenizer=None,
     train_dataset=None, eval_dataset=None, train_iterator=None, eval_iterator=None, goodput_recorder=None,
     checkpoint_step=None, metric_backend=None, report_to=None,
+    agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
 ):
+  if environment_factory is not None:
+    if not trainer_config.rl.use_agentic_rollout:
+      raise ValueError("environment_factory requires agentic rollout.")
+    if any(value is not None for value in (agent_class, agent_kwargs, env_class, env_kwargs)):
+      raise ValueError("environment_factory cannot be combined with custom agent or environment options.")
+    if trainer_config.num_test_batches > 0:
+      raise ValueError("environment_factory does not support native RL evaluation.")
+  if not trainer_config.rl.use_agentic_rollout and any(
+      value is not None for value in (agent_class, agent_kwargs, env_class, env_kwargs)
+  ):
+    raise ValueError("Custom agent and environment options require agentic rollout.")
   install_pathways_multihost_profiler_patch(trainer_config.rl.profiler_max_num_hosts)
   if sampler_config is None:
     if trainer_config.num_trainer_slices != -1 or trainer_config.num_samplers_slices != -1:
@@ -533,6 +577,8 @@ def train(
         eval_dataset=eval_dataset, train_iterator=train_iterator, eval_iterator=eval_iterator,
         goodput_recorder=goodput_recorder, checkpoint_step=checkpoint_step, metric_backend=metric_backend,
         report_to=report_to,
+        agent_class=agent_class, agent_kwargs=agent_kwargs, env_class=env_class, env_kwargs=env_kwargs,
+        reward_funcs=reward_funcs, environment_factory=environment_factory,
     )
   record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return result

@@ -110,6 +110,7 @@ class GRPOTrainer:
       data_collator=None, optimizers=(None, None), callbacks=None, *, reference_model=None,
       sampler_config=None, sampler_devices=None, vllm_config=None, rollout_mesh=None, model_tokenizer=None,
       train_iterator=None, eval_iterator=None, goodput_recorder=None,
+      agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
   ):
     if processing_class is not None or data_collator is not None:
       raise NotImplementedError("Native RL does not accept a processing class or data collator.")
@@ -133,6 +134,12 @@ class GRPOTrainer:
     self.train_iterator = train_iterator
     self.eval_iterator = eval_iterator
     self.goodput_recorder = goodput_recorder
+    self.agent_class = agent_class
+    self.agent_kwargs = agent_kwargs
+    self.env_class = env_class
+    self.env_kwargs = env_kwargs
+    self.reward_funcs = reward_funcs
+    self.environment_factory = environment_factory
     self.native_trainer = None
     self.rl_cluster = None
     self.optimizer = None
@@ -176,6 +183,8 @@ class GRPOTrainer:
           train_dataset=self.train_dataset, eval_dataset=self.eval_dataset,
           vllm_config=self.vllm_config, rollout_mesh=self.rollout_mesh, model_tokenizer=self.model_tokenizer,
           train_iterator=self.train_iterator, eval_iterator=self.eval_iterator, goodput_recorder=self.goodput_recorder,
+          agent_class=self.agent_class, agent_kwargs=self.agent_kwargs, env_class=self.env_class, env_kwargs=self.env_kwargs,
+          reward_funcs=self.reward_funcs, environment_factory=self.environment_factory,
             checkpoint_step=checkpoint_step, metric_backend=backend, report_to=report_to,
         )
     finally:
@@ -187,6 +196,8 @@ class GRPOTrainer:
     return self.native_trainer
 
   def evaluate(self, eval_iterator=None):
+    if self.environment_factory is not None:
+      raise NotImplementedError("Native RL evaluation does not support environment_factory.")
     if self.rl_cluster is None:
       raise RuntimeError("Training must complete before evaluation.")
     if eval_iterator is None:

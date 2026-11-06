@@ -82,6 +82,84 @@ enablement). Set either to `False` for full-model checkpointing. QAT with LoRA r
 to be `False`; adapter-only checkpoints omit QAT statistics. Supply a matching base model
 when restoring adapter-only checkpoints. The native SFT lifecycle does not support these controls.
 
+### OpenEnv with agentic GRPO
+
+`GRPOTrainer` can create an environment for each rollout and expose its public methods as tools.
+For example, with the OpenEnv Echo client installed and a configured model and training dataset:
+
+```python
+from echo_env import EchoEnv
+from lilax.trainers.post_training.reinforcement import GRPOTrainer
+
+
+class EchoTools:
+    def __init__(self):
+        self.env = EchoEnv(base_url=ENV_URL).sync()
+        self.reward = 0.0
+
+    def reset(self) -> None:
+        self.env.reset()
+        self.reward = 0.0
+
+    def echo(self, message: str) -> str:
+        """Echo a message.
+
+        Args:
+            message: Message to echo.
+
+        Returns:
+            The echoed message.
+        """
+        result = self.env.call_tool("echo_message", message=message)
+        self.reward = float(len(result))
+        return result
+
+    def get_reward(self) -> float:
+        return self.reward
+
+    def close(self) -> None:
+        self.env.close()
+
+
+trainer = GRPOTrainer(
+    model=model,
+    train_dataset=train_dataset,
+    environment_factory=EchoTools,
+)
+trainer.train()
+```
+
+Set `ENV_URL` to an Echo environment server. This example defines its own reward as the length of
+the last echoed message; it is not an environment-provided reward.
+
+Enable `rl.use_agentic_rollout` and use the bundled Qwen3 chat template and its `<|im_end|>` EOS.
+The existing dataset preprocessing still applies; alternatively supply a `train_iterator` in the
+native RL format. `reset()` returns a string appended to the prompt, or `None`. Public synchronous
+methods other than `reset`, `get_reward`, and `close` become tools; their typed arguments and
+docstrings must support Transformers' tool schema conversion. The model can call multiple tools per
+turn and continues until it answers without a tool call or reaches the rollout limit. Async tools,
+multiple environment factories, and native RL evaluation are not supported.
+Tunix labels a normally completed rollout `SUCCEEDED`; that label does not report whether the
+environment's task was solved. Rollouts filtered at a context limit do not receive a final reward.
+
+`get_reward()` is called before closing each completed environment. Alternatively provide a callable
+or list of callables in `reward_funcs`; these receive batched `prompts` and `completions` strings and
+available dataset fields, and return one numeric reward per prompt. They can also accept `environments`,
+the corresponding factory instances in batch order. Environments have completed `close()` before the
+reward call: their retained attributes are available, but their clients are not necessarily usable.
+`close()` must be synchronous. The dataset fields `environments` and `_lilax_environment_token`
+are reserved when batch reward functions are configured.
+If close times out or has not completed, batch reward computation fails instead of reading that instance.
+Set `reward_num_workers` to 0 or 1 for this path; environment instances are not sent to worker processes.
+Tunix currently supplies the first assistant response as the completion, not the full conversation.
+If both reward sources are provided, their scores are added; do not score the same signal twice.
+No configured default reward functions are added for `environment_factory`.
+For non-environment training, `reward_funcs` replaces the configured reward functions as before.
+
+This path has not been runtime-verified. Tunix attempts to close the environment after each episode
+with a bounded wait. A timed-out synchronous call can continue while cleanup waits; closing the client
+does not guarantee remote work has stopped. The existing callback-based bridge remains available.
+
 ## More
 
 - See the [training operations guide](TRAINING_OPERATIONS.md) for multi-node GPU launch, quantization,
