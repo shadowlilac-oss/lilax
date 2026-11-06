@@ -71,11 +71,11 @@ def validate_attention_options(self) -> "MaxTextConfig":
           f"Delayed activation forwarding requires at least 2 * num_stages microbatches, but {num_stages} stages "
           f"are used with {self.num_pipeline_microbatches} microbatches"
       )
-    self._pipeline_input_layout = copy.deepcopy({
+    self._pipeline_input_layout.update(copy.deepcopy({
         "logical_axis_rules": self.logical_axis_rules,
         "mesh_axes": self.mesh_axes,
         "data_sharding": self.data_sharding,
-    })
+    }))
     for rule in self.logical_axis_rules:
       if rule and rule[0] == "activation_embed_and_logits_batch":
         rule[1] = ["stage", "data", "fsdp", "fsdp_transpose", "expert"]

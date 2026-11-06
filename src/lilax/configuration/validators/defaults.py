@@ -34,6 +34,7 @@ def resolve_inert_defaults(self):
     self.steps = self.learning_rate_schedule_steps
   if self.eval_per_device_batch_size == 0.0:
     self.eval_per_device_batch_size = self.per_device_batch_size
+  self._pipeline_input_layout.setdefault("mu_dtype", self.mu_dtype)
   if not self.mu_dtype:
     self.mu_dtype = self.weight_dtype
   if self.attn_logits_soft_cap == 0.0:
@@ -72,6 +73,7 @@ def resolve_inert_defaults(self):
       ("local_sa_fuse_reciprocal", "sa_fuse_reciprocal"),
       ("local_sa_use_base2_exp", "sa_use_base2_exp"),
   ):
+    self._pipeline_input_layout.setdefault(local_name, getattr(self, local_name))
     if getattr(self, local_name) is None:
       setattr(self, local_name, getattr(self, global_name))
   return self

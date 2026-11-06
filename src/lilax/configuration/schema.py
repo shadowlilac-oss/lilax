@@ -159,6 +159,11 @@ class MaxTextConfig(
   def model_post_init(self, __context: Any) -> None:
     self._explicit_keys = frozenset(self.model_fields_set)
     self._learning_rate_schedule_steps_input = self.learning_rate_schedule_steps
+    self._pipeline_input_layout = {
+        "pipeline_parallel_layers": self.pipeline_parallel_layers,
+        "num_pipeline_repeats": self.num_pipeline_repeats,
+        "num_pipeline_microbatches": self.num_pipeline_microbatches,
+    }
 
   def model_copy(self, *, update: dict[str, Any] | None = None, deep: bool = False) -> "MaxTextConfig":
     config = super().model_copy(update=update, deep=deep)
