@@ -1,4 +1,4 @@
-"""Native profiling operations."""
+"""Internal staging of captured profiler output."""
 
 import contextlib
 import os

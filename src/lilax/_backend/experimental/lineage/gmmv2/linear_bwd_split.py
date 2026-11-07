@@ -479,7 +479,7 @@ def _dgrad_kernel(
       #    of gate_0 / gate_1 at a time.
       dyq = dyq_buf[slot, :bucket_m, :]
       # The SiLU backward runs in bf16 on the bf16-rounded grad_act, like
-      # `ops.ragged_silu_mul_bwd`; its coefficient gradient sums in f32.
+      # `ragged_silu_mul.ragged_silu_mul_bwd`; its coefficient gradient sums in f32.
       ct = jnp.bfloat16
       coef = coef_buf[slot, :bucket_m, :].astype(ct)
       rows = lax.broadcasted_iota(jnp.int32, (bucket_m, 1), 0)

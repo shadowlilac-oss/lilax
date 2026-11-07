@@ -1,4 +1,4 @@
-"""Standalone native pretraining initialization and retry orchestration."""
+"""Internal pretraining initialization and retry orchestration for infrastructure jobs."""
 
 import os
 
