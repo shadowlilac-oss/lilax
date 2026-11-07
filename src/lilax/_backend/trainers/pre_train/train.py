@@ -21,6 +21,8 @@ from lilax._backend.utils import elastic_utils as elastic
 from lilax._backend.trainers import stop_training as exceptions
 from lilax._backend.observability import max_logging
 from lilax._backend.utils import train_utils
+from lilax._backend.trainers.pre_train import checkpoint_progress
+from lilax._backend.distributed import dcn_throttling
 
 
 def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=None, reporter_factory=None,
@@ -31,9 +33,9 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
       init_rng, checkpoint_manager, state_mesh_shardings, model, mesh, learning_rate_schedule,
       data_iterator, data_loader, rampup_manager, eval_data_iterator, state,
   ) = setup
-  train_utils.maybe_apply_dcn_throttling(config)
+  dcn_throttling.maybe_apply_dcn_throttling(config)
   start_step = get_first_step(model, state)
-  train_utils.validate_completed_steps(start_step, config.steps)
+  checkpoint_progress.validate_completed_steps(start_step, config.steps)
   state, state_mesh_shardings, programs = build_step_programs(
       config, model, mesh, state, state_mesh_shardings, eval_data_iterator, elastic_retry_cache
   )
@@ -155,5 +157,5 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
       record_goodput(recorder, RECORD_JOB_END_TIME)
       samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
       mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
-    train_utils.maybe_cleanup_dcn_throttling(config)
+    dcn_throttling.maybe_cleanup_dcn_throttling(config)
   return state

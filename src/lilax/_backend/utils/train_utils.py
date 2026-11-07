@@ -39,6 +39,7 @@ from lilax._backend.integration.transformer_engine import moe_bootstrap
 from lilax._backend.trainers.setup import state_setup
 from lilax._backend.trainers.setup.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
 from lilax._backend.trainers.setup.rampup_batch import create_rampup_manager
+from lilax._backend.trainers.pre_train import checkpoint_progress
 
 
 def prepare_before_run_start(
@@ -280,7 +281,7 @@ def setup_train_loop(
           else checkpointing.latest_step(checkpoint_manager) if checkpoint_step < 0 else checkpoint_step
       )
       if restore_step is not None:
-        validate_completed_steps(restore_step + 1, config.steps)
+        checkpoint_progress.validate_completed_steps(restore_step + 1, config.steps)
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
     if data_iterator is None:
@@ -412,52 +413,3 @@ def validate_train_config(config):
     )
 
 
-def validate_completed_steps(completed_steps: int, config_steps: int):
-  """Raise if training has already completed up to config_steps."""
-  if completed_steps >= config_steps:
-    raise RuntimeError(
-        f"Requested training up to step {config_steps}, but a checkpoint already exists at step {completed_steps - 1} "
-        f"(which means {completed_steps} steps have been completed). "
-        f"Did you mean to continue training past step {completed_steps} (you should set steps > {completed_steps}) "
-        f"or to not load the checkpoint (use enable_checkpointing=False?)"
-    )
-
-
-def maybe_apply_dcn_throttling(config):
-  """Apply a configured traffic control bandwidth limit."""
-  if not config.dcn_bandwidth_limit:
-    return
-  interface = config.dcn_bandwidth_interface
-  try:
-    subprocess.run(
-        ["tc", "qdisc", "del", "dev", interface, "root"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
-  except Exception as error:
-    max_logging.error(f"Failed to clean up existing traffic control on {interface}: {error}")
-  rate = config.dcn_bandwidth_limit
-  burst = config.dcn_bandwidth_burst
-  latency = config.dcn_bandwidth_latency
-  max_logging.log(f"Applying tc egress limit of {rate} (burst: {burst}, latency: {latency}) on {interface}...")
-  try:
-    cmd = ["tc", "qdisc", "add", "dev", interface, "root", "tbf", "rate", rate, "burst", burst, "latency", latency]
-    subprocess.run(cmd, check=True)
-    max_logging.log("DCN Bandwidth throttling applied successfully.")
-  except Exception as error:
-    max_logging.error(f"Failed to apply DCN bandwidth throttling: {error}")
-
-
-def maybe_cleanup_dcn_throttling(config):
-  """Clean up traffic control rules."""
-  if not config.dcn_bandwidth_limit:
-    return
-  interface = config.dcn_bandwidth_interface
-  max_logging.log(f"Cleaning up tc egress limit on {interface}...")
-  try:
-    subprocess.run(
-        ["tc", "qdisc", "del", "dev", interface, "root"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
-    max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
-  except Exception as error:
-    max_logging.error(f"Failed to clean up DCN bandwidth throttling: {error}")
