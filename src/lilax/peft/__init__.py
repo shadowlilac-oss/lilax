@@ -80,6 +80,11 @@ class PeftModel(MaxTextModel):
     model = self._base_model
     model.materialize(runtime=runtime)
     config = self._adapter_config if self._pending_native_model is not None else copy.deepcopy(model.construction_config)
+    if model.existing_graph_qat_config is not None and not config.lora_input_adapters_path:
+      raise ValueError(
+          "PEFT LoRA cannot be applied to a Qwix QAT model or QAT checkpoint. "
+          "Load a base model without Qwix QAT to apply LoRA, or use QAT without PEFT LoRA."
+      )
     source = self._adapter_source
     if source is not None and source[0] == "huggingface":
       _, model_id, revision, token = source
