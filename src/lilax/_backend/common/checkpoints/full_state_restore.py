@@ -12,7 +12,7 @@ from lilax._backend.common.checkpoints.linen_compatibility import (
 from lilax._backend.common.checkpoints.lora_filter import _filter_lora_trainable_state
 from lilax._backend.common.checkpoints.restore_source_types import _normalize_checkpoint_root
 from lilax._backend.trainers.diloco import checkpointing as diloco_checkpoint_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 

@@ -12,7 +12,7 @@ from lilax._backend.benchmarks.convergence.c4_exp import (
 from lilax._backend.benchmarks.convergence.convergence_utils import (
     ConvHParams, DatasetHParams, load_checkpoint, setup_convergence_configs, setup_dataset, setup_model_convergence,
 )
-from lilax.configuration import MaxTextConfig
+from lilax._backend.configs.inert import MaxTextConfig
 
 
 def c4_deepseek_v3_config(**overrides) -> MaxTextConfig:

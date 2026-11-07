@@ -5,12 +5,15 @@ try:
 except ImportError:
   pass
 
-from .compilation.aot import compile_train_step, is_oom
-from .pretraining.trainer import Trainer, train_pretraining
-from lilax.tokenization.training import build_grain_iterator, train_tokenizer, train_tokenizer_from_files
+from .pretraining.trainer import Trainer
 from .arguments.training_args import TrainingArguments
+from .post_training.sft import SFTConfig, SFTTrainer
+from .post_training.dpo import DPOConfig, DPOTrainer
+from .post_training.distillation import DistillationConfig, DistillationTrainer
+from .post_training.grpo_config import GRPOConfig
+from .post_training.reinforcement import GRPOTrainer
 
 __all__ = [
-    "Trainer", "TrainingArguments", "build_grain_iterator", "train_tokenizer", "train_tokenizer_from_files",
-    "compile_train_step", "is_oom", "train_pretraining",
+    "Trainer", "TrainingArguments", "SFTConfig", "SFTTrainer", "DPOConfig", "DPOTrainer",
+    "DistillationConfig", "DistillationTrainer", "GRPOConfig", "GRPOTrainer",
 ]

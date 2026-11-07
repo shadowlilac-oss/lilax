@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 if TYPE_CHECKING:
   from lilax._backend.experimental.lineage import dsv3_config

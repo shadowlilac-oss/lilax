@@ -5,8 +5,8 @@ from jax.sharding import Mesh
 
 from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging
-from lilax._backend.utils.model_creation.pretrained import from_pretrained
+from lilax._backend.observability import max_logging
+from lilax._backend.models.creation.pretrained import from_pretrained
 
 
 def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):

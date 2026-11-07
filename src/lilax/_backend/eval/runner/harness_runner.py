@@ -1,11 +1,12 @@
 """lm-evaluation-harness and evalchemy evaluation runner."""
 
 import logging
+from contextlib import nullcontext
 
-import evalchemy
 import jax
 from jax.experimental import multihost_utils
 import lm_eval
+from lm_eval.tasks import TaskManager
 
 from lilax._backend.eval.reporting.json_reporter import write_results
 from lilax._backend.eval.runner.common import build_server_manager, maybe_upload_to_gcs, resolve_token
@@ -47,7 +48,7 @@ def _map_results(raw_results: dict, tasks: list[str]) -> dict:
   return scores
 
 
-def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
+def run_harness(cfg: dict, hf_token: str | None = None, *, endpoint=None, eval_dataset=None, compute_metrics=None) -> dict:
   backend = cfg.get("backend", "lm_eval")
   model_name = cfg["model_name"]
   hf_path = cfg["hf_path"]
@@ -62,7 +63,8 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   token = resolve_token(cfg, hf_token)
   lm_model_type = "local-chat-completions" if backend == "evalchemy" else "local-completions"
   raw_results: dict = {}
-  with build_server_manager(cfg, token, enable_chat_api=backend == "evalchemy") as server:
+  with (build_server_manager(cfg, token, enable_chat_api=backend == "evalchemy")
+        if endpoint is None else nullcontext(endpoint)) as server:
     is_rank0 = jax.process_index() == 0
     if is_rank0:
       if not cfg.get("skip_warmup"):
@@ -84,8 +86,18 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
           "tasks": tasks,
           "num_fewshot": num_fewshot,
           "limit": num_samples,
-          "log_samples": False,
+          "log_samples": compute_metrics is not None,
       }
+      if eval_dataset is not None:
+        manager = TaskManager()
+        loaded = manager.load(list(tasks))
+        for name, task in loaded["tasks"].items():
+          source = eval_dataset[name] if isinstance(eval_dataset, dict) else eval_dataset
+          split = task.config.test_split if task.has_test_docs() else task.config.validation_split
+          task.dataset[split] = source
+          task.task_docs = task.eval_docs
+        simple_eval_kwargs["tasks"] = list(loaded["tasks"].values())
+        simple_eval_kwargs["task_manager"] = manager
       if cfg.get("max_num_seqs") is not None:
         simple_eval_kwargs["batch_size"] = cfg["max_num_seqs"]
       if apply_chat_template:
@@ -99,6 +111,13 @@ def run_harness(cfg: dict, hf_token: str | None = None) -> dict:
   if not is_rank0:
     return {}
   scores = _map_results(raw_results, tasks)
+  if compute_metrics is not None:
+    for task_name, samples in raw_results.get("samples", {}).items():
+      responses = [sample["filtered_resps"][0] for sample in samples]
+      references = [sample["target"] for sample in samples]
+      if any(not isinstance(value, str) for value in (*responses, *references)):
+        raise ValueError("compute_metrics requires a generation task with text predictions and text references.")
+      scores.update({f"{task_name}_{name}": value for name, value in compute_metrics(responses, references).items()})
   logger.info("%s scores: %s", backend, scores)
   output = write_results(
       benchmark="+".join(tasks), model_name=model_name, scores=scores,

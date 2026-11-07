@@ -14,9 +14,9 @@ import jax
 from lilax._backend.checkpoint_conversion.model_families import hf_model_config_registry
 from lilax._backend.checkpoint_conversion.model_families import param_mapping_registry
 from lilax._backend.checkpoint_conversion.utils import tensor_handling
-from lilax._backend.utils import gcs_utils
+from lilax._backend.storage import gcs as gcs_utils
 from lilax._backend.utils import globals as maxtext_globals
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 

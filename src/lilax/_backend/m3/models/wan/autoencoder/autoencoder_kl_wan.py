@@ -10,7 +10,7 @@ from jax import tree_util
 import jax.numpy as jnp
 
 from lilax._backend.m3.core.sharding import Sharding, TensorType
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from .autoencoder_posterior_wan import (DiagonalGaussianDistribution, WanDiagonalGaussianDistribution,
                                         _wan_diag_gauss_dist_flatten, _wan_diag_gauss_dist_unflatten)
 from ..utils_wan import constrain, get_activation, param_metadata

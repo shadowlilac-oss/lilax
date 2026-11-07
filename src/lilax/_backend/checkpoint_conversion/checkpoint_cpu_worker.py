@@ -12,7 +12,7 @@ from lilax._backend.checkpoint_conversion.reshard_checkpoint import _reshard_che
 from lilax._backend.checkpoint_conversion.standalone_scripts.convert_qwen3_next_unscanned import _convert
 from lilax._backend.configs import pyconfig, types
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax.configuration import deserialize_config
+from lilax.configuration.serialization import deserialize_config
 
 
 def run(result_fd):

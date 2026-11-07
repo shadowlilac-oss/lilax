@@ -4,7 +4,7 @@ import grain.python as grain
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator
 from grain.experimental import TFRecordIterDataset
 
-from lilax._backend.utils import gcs_utils
+from lilax._backend.storage import gcs as gcs_utils
 
 
 class _GCSTFRecordReader(_TFRecordReader):

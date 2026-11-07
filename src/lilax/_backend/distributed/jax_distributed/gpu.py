@@ -4,7 +4,7 @@ import os
 
 import jax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def initialize_jax_for_gpu(raw_keys):

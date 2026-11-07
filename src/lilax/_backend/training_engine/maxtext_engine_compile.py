@@ -11,9 +11,10 @@ from lilax._backend.configs import pyconfig
 from lilax._backend.trainers.pre_train import train_compile as pre_train_compile
 from lilax._backend.training_engine import kernel_compilation
 from lilax._backend.training_engine import maxtext_engine
-from lilax._backend.utils import gcs_utils, maxtext_utils
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.utils import maxtext_utils
 from lilax._backend.observability.diagnostics import system_info
-from lilax._backend.utils.model_creation import nnx_abstract_model, scan_layers_sync
+from lilax._backend.models.creation import nnx_abstract_model, scan_layers_sync
 
 KERNEL_NAMES = kernel_compilation.KERNEL_NAMES
 HLO_DUMP_DEFAULTS = {

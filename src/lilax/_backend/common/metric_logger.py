@@ -33,15 +33,16 @@ from lilax._backend.common.cloud import is_decoupled
 from lilax._backend.common import flops, training_flops
 from lilax._backend.common.gcp_workload_monitor import GCPWorkloadMonitor
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
-from lilax._backend.utils import exceptions
+from lilax._backend.trainers import stop_training as exceptions
 from lilax._backend.common.telemetry import mllog_utils
-from lilax._backend.utils import gcs_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import elastic_utils
+from lilax._backend.utils import elastic_utils as elastic
 from lilax._backend.observability.tensorboard_logging import config_summary
 from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.observability.tensorboard_logging import summary_writing
+from lilax._backend.observability.metric_storage import ScalarMetricStorage
 from collections import defaultdict
 
 
@@ -76,14 +77,6 @@ def step_diagnostics_text(scalars):
   for name, key in STEP_DIAGNOSTICS_KEYS:
     parts.append(f"{name}={float(scalars[key]):.9e}" if key in scalars else f"{name}=n/a")
   return "diag: " + " ".join(parts)
-
-
-def _prepare_metrics_for_json(metrics, step, run_name):
-  """Converts metric dictionary into json supported types (e.g. float)"""
-  metrics_dict = {val: float(metrics["scalar"][val]) for val in metrics["scalar"]}
-  metrics_dict["step"] = float(step)
-  metrics_dict["run_name"] = run_name
-  return metrics_dict
 
 
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
@@ -121,7 +114,7 @@ class MetricLogger:
     self.config = config
     self.reporter = reporter
     self.metadata = {}
-    self.running_gcs_metrics = [] if config.gcs_metrics else None
+    self.metric_storage = ScalarMetricStorage(config)
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
     self.start_step = start_step
@@ -216,10 +209,10 @@ class MetricLogger:
               f"seconds: {scalars['perf/step_time_seconds']:.3f}",
           ]
       )
-      if elastic_utils.elastic_enabled(self.config):
+      if elastic.elastic_enabled(self.config):
         log_parts.extend(
             [
-                f"live slice count: {len(elastic_utils.live_slice_indices(self.config))}",
+                f"live slice count: {len(elastic.live_slice_indices(self.config))}",
             ]
         )
 
@@ -359,29 +352,11 @@ class MetricLogger:
 
   def write_metrics_locally(self, metrics, step):
     """Writes metrics locally for testing."""
-    with open(self.config.metrics_file, "a", encoding="utf8") as local_metrics_file:
-      if step == 0:
-        local_metrics_file.truncate(0)
-
-      metrics_dict = _prepare_metrics_for_json(metrics, step, self.config.run_name)
-      local_metrics_file.write(str(json.dumps(metrics_dict)) + "\n")
+    self.metric_storage.write_locally(metrics, step)
 
   def write_metrics_for_gcs(self, metrics, step, metric_type):
     """Writes metrics to GCS."""
-    metrics_dict_step = _prepare_metrics_for_json(metrics, step, self.config.run_name)
-    self.running_gcs_metrics.append(metrics_dict_step)
-    if metric_type == "train" and (step + 1) % self.config.log_period == 0 or step == self.config.steps - 1:
-      start_step = (step // self.config.log_period) * self.config.log_period
-      metrics_filename = f"metrics_step_{start_step:06}_to_step_{step:06}.txt"
-      with open(metrics_filename, "wt", encoding="utf8") as metrics_for_gcs:
-        for metrics_step in self.running_gcs_metrics:
-          metrics_for_gcs.write(str(json.dumps(metrics_step)) + "\n")
-
-      gcs_filename = os.path.join(self.config.metrics_dir, metrics_filename)
-      max_logging.log(f"Moving file {metrics_filename} to GCS...")
-      gcs_utils.upload_blob(gcs_filename, metrics_filename)
-      max_logging.log(f"File {metrics_filename} moved successfully!")
-      self.running_gcs_metrics = []  # reset running_metrics to empty list
+    self.metric_storage.write_for_gcs(metrics, step, metric_type)
 
   def write_metrics_to_tensorboard(self, metrics, step, metric_type):
     """Writes metrics to TensorBoard."""
@@ -450,7 +425,7 @@ class MetricLogger:
         gcp_workload_monitor.start_performance_reporting_thread(performance_metric_queue)
     return performance_metric_queue
 
-  def buffer_and_write_metrics(self, metrics, step, step_time_delta=None, is_training=True):
+  def buffer_and_write_metrics(self, metrics, step, step_time_delta=None, is_training=True, *, record_train=True):
     """
     Per-step entry point for both train and eval metrics. Flushes the single deferred entry from
     the previous call, then queues this step's metrics. The buffer is a queue of length 1: a new
@@ -469,7 +444,8 @@ class MetricLogger:
     if self.buffered_metrics:
       self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
     if is_training:
-      self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
+      if record_train:
+        self.record_train_metrics(metrics, step, step_time_delta.total_seconds())
       self.buffered_metrics.append(("train", step, metrics, step_time_delta))
       if self._pending_eval_step_count > 0 or getattr(self.config, "enable_mllog", False):
         # Under enable_mllog, flush this step's entry now so tracked_stats stays ahead of

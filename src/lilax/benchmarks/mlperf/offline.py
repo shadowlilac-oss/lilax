@@ -5,7 +5,7 @@ from pathlib import Path
 
 from lilax._backend.inference.mlperf.offline_inference import InputData, OfflineInference
 from lilax._backend.inference.mlperf.offline_mode import OfflineModeArguments, run_offline
-from lilax.generation.engine import create_engine_from_config
+from lilax.generation._engine import create_engine_from_config
 from lilax.benchmarks.mlperf.accuracy import evaluate_accuracy, evaluate_accuracy_fast
 
 

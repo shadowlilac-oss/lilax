@@ -41,7 +41,7 @@ from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.observability.diagnostics import pytree
-from lilax._backend.utils.model_creation import model_factory
+from lilax._backend.models.creation import model_factory
 from lilax._backend.pytree import partitioning
 from lilax._backend.common.common_types import MODEL_MODE_PREFILL, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE
 

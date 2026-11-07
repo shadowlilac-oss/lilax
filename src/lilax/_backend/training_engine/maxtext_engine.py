@@ -35,7 +35,7 @@ from lilax._backend.training_engine import step_kernels
 from lilax._backend.training_engine import weight_sync
 from lilax._backend.training_engine import zero1
 from lilax._backend.utils import train_utils
-from lilax._backend.utils.model_creation import pretrained
+from lilax._backend.models.creation import pretrained
 
 EMPTY_METRICS_BUFFER_ID = -1
 

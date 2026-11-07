@@ -74,6 +74,7 @@ def resolve_model_snapshot(
     token: str | bool | None = None,
     cache_dir: str | Path | None = None,
     local_files_only: bool = False,
+    allow_patterns: list[str] | None = None,
 ) -> Path:
   path = Path(pretrained_model_name_or_path).expanduser()
   if path.is_dir():
@@ -85,5 +86,6 @@ def resolve_model_snapshot(
           token=token,
           cache_dir=cache_dir,
           local_files_only=local_files_only,
+          allow_patterns=allow_patterns,
       )
   )

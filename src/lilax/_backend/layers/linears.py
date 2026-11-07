@@ -24,7 +24,7 @@ from lilax._backend.layers.quantization.modes import in_serve_mode
 from lilax._backend.layers.quantization.nnx_ops import make_dot_general
 from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization, native_fp8_dot_general
 from lilax._backend.layers.quantization.weights import WeightQuantConfig, dequantize_weight, get_weight_quant_config
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.device_memory import memory_kinds
 from lilax._backend.distributed.sharding import maybe_shard_with_logical
 from lilax._backend.distributed.sharding import maybe_shard_with_name

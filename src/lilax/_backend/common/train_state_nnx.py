@@ -6,7 +6,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 class TrainStateNNX(nnx.Module):

@@ -19,9 +19,11 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import gcs_utils, max_logging, state_abstraction
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.observability import max_logging
+from lilax._backend.distributed import state_abstraction
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
-from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.models.creation import nnx_abstract_model
 from lilax._backend.pytree import partitioning
 
 

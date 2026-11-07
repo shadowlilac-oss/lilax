@@ -12,7 +12,9 @@ from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.common.goodput import GoodputEvent, maybe_record_goodput
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.trainers.pre_train.loop.evaluation import run_evaluation
-from lilax._backend.utils import elastic_utils, gcs_utils, max_logging
+from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import pytree
 
 
@@ -54,7 +56,7 @@ def _run_train_programs(
 
 def training_loop_iteration(
     jax_device_state: dict[str, Any], python_vars: dict[str, Any], immutable_data: dict[str, Any],
-    elastic_retry_cache: elastic_utils.RetryCache | None = None,
+    elastic_retry_cache: elastic.RetryCache | None = None,
 ):
   state = jax_device_state["state"]
   init_rng = jax_device_state["init_rng"]
@@ -106,21 +108,41 @@ def training_loop_iteration(
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
   completed_step = step + 1
-  checkpointing.maybe_save_checkpoint(
-      checkpoint_manager, state, config, data_iterator, step, training_graph=immutable_data["training_graph"]
-  )
+  jax_device_state["state"] = state
+  lifecycle = python_vars.get("lifecycle")
+  if lifecycle is not None:
+    metric_logger_instance.record_train_metrics(metrics, step, step_time_delta.total_seconds())
+    lifecycle._train_state = state
+    lifecycle._end_step(completed_step, metrics["scalar"]["learning/loss"])
+    if lifecycle.control.should_log:
+      lifecycle.log({"loss": float(metrics["scalar"]["learning/loss"]),
+                     **{name: float(value) for name, value in metrics["scalar"].items()}})
+    ran_eval = lifecycle.control.should_evaluate
+    if ran_eval:
+      lifecycle.evaluate()
+    receipt = checkpointing.maybe_save_checkpoint(
+        checkpoint_manager, state, config, data_iterator, step, training_graph=immutable_data["training_graph"],
+        **lifecycle._save_action(completed_step), return_result=True,
+        force=lifecycle.control.should_save,
+    )
+    lifecycle._resolve_save(receipt, checkpoint_manager)
+  else:
+    checkpointing.maybe_save_checkpoint(
+        checkpoint_manager, state, config, data_iterator, step, training_graph=immutable_data["training_graph"],
+    )
   snapshotting.maybe_save_snapshot(snapshotter, config, state, step, checkpoint_manager, data_iterator)
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)
-    gcs_utils.upload_dump(
+    gcs.upload_dump(
         dump_hlo_local_dir, dump_hlo_gcs_dir, module_name=dump_hlo_module_name,
         delete_local_after=dump_hlo_delete_local_after, all_host_upload=dump_hlo_upload_all,
     )
-  ran_eval = (
-      eval_interval > 0 and step >= start_step and step >= eval_start_step
-      and (step - eval_start_step) % eval_interval == 0
-  )
-  if ran_eval:
+  if lifecycle is None:
+    ran_eval = (
+        eval_interval > 0 and step >= start_step and step >= eval_start_step
+        and (step - eval_start_step) % eval_interval == 0
+    )
+  if ran_eval and lifecycle is None:
     run_evaluation(
         config, mesh, state, step, completed_step, start_step, eval_steps, step_rng_args, logical_axis_rules_for_eval,
         p_eval_step, p_eval_step_dropless, eval_data_iterator, metric_logger_instance, python_vars,
@@ -128,7 +150,7 @@ def training_loop_iteration(
   prof.maybe_deactivate_profiler(step, state)
   if step == start_step:
     pytree.print_mem_stats("After params initialized")
-  metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
+  metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta, record_train=lifecycle is None)
   if not ran_eval:
     mllog_utils.step_end(config, completed_step)
   if config.elastic_enabled and completed_step < immutable_data["steps"]:

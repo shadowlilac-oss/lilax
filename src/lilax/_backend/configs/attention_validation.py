@@ -1,7 +1,7 @@
 """Validation of native attention configuration."""
 
 from lilax._backend.common.common_types import AttentionType, DecoderBlockType
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def validate_attention_backend_support(config):

@@ -15,7 +15,7 @@ from tunix.sft import peft_trainer
 from lilax._backend.common import training_flops
 from lilax._backend.common.checkpoints import grain_utility
 from lilax._backend.trainers.post_train.checkpoint_selection import TrainingCheckpointManager
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 @flax.struct.dataclass(frozen=True)
@@ -339,7 +339,7 @@ class MaxTextCheckpointManager(TrainingCheckpointManager):
 
   def save(self, step, model, optimizer=None, save_only_lora_params=False, force=False, custom_metadata=None):
     """Save model, optimizer, and Grain iterator state."""
-    if self._checkpointer is None:
+    if self._checkpointer is None or not self.allow_saves:
       return False
     if self.save_only_lora_params is not None:
       save_only_lora_params = self.save_only_lora_params

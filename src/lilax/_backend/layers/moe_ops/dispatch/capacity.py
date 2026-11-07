@@ -4,7 +4,7 @@ import math
 
 import jax
 import jax.numpy as jnp
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def subgroup_capacity_masks(

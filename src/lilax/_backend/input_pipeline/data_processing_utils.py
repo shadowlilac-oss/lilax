@@ -15,7 +15,7 @@ from lilax._backend.input_pipeline.sources import example_parsing
 from lilax._backend.input_pipeline.transforms import feature_transforms
 from lilax._backend.input_pipeline.transforms import pad_or_trim
 from lilax._backend.input_pipeline.transforms import target_shift
-from lilax._backend.utils import elastic_utils
+from lilax._backend.utils import elastic_utils as elastic
 
 
 def parse_and_keep_features(dataset, config, data_columns, tokenize):
@@ -28,11 +28,15 @@ def parse_and_keep_features(dataset, config, data_columns, tokenize):
   return dataset
 
 
-def get_tokenizer_and_pad_id(config, add_bos: bool | None = None, add_eos: bool | None = None):
+def get_tokenizer_and_pad_id(config, add_bos: bool | None = None, add_eos: bool | None = None, *, processing_class=None):
   """Builds tokenizer and extracts pad_id safely."""
   bos = config.add_bos if add_bos is None else add_bos
   eos = config.add_eos if add_eos is None else add_eos
-  tokenizer_model = tokenizer.build_tokenizer(config.tokenizer_path, config.tokenizer_type, bos, eos, config.hf_access_token)
+  tokenizer_model = (
+      tokenizer.HFTokenizer(config.tokenizer_path, bos, eos, config.hf_access_token, processing_class=processing_class)
+      if processing_class is not None
+      else tokenizer.build_tokenizer(config.tokenizer_path, config.tokenizer_type, bos, eos, config.hf_access_token)
+  )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id
   elif tokenizer_model.unk_id is not None:
@@ -55,7 +59,7 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
 def get_local_batch_size(config):
   """Computes local batch size based on process count and expansion factor."""
   if config.elastic_enabled:
-    batch_size = elastic_utils.get_local_batch_size(config)
+    batch_size = elastic.get_local_batch_size(config)
   else:
     batch_size = config.global_batch_size_to_load // jax.process_count()
   if config.expansion_factor_real_data > 1:

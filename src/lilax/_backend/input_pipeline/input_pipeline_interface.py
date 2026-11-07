@@ -6,6 +6,8 @@ import jax
 from jax.sharding import PartitionSpec as P
 
 from lilax._backend.configs import pyconfig
+from lilax._backend.input_pipeline.evaluation import FiniteEvaluationLoader
+from lilax._backend.input_pipeline.multihost_dataloading import MultiHostDataLoadIterator
 from lilax._backend.input_pipeline.grain_data_processing import make_grain_train_iterator, make_grain_eval_iterator
 from lilax._backend.input_pipeline.hf_data_processing import make_hf_train_iterator, make_hf_eval_iterator
 from lilax._backend.input_pipeline.olmo.olmo_grain_data_processing import (
@@ -13,7 +15,7 @@ from lilax._backend.input_pipeline.olmo.olmo_grain_data_processing import (
     make_olmo_grain_eval_iterator,
 )
 from lilax._backend.input_pipeline.synthetic_data_processing import SyntheticDataIterator, PlaceHolderDataIterator
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed.sharding import remove_size_one_mesh_axis
 
 
@@ -33,24 +35,34 @@ def get_process_loading_real_data(
 
 
 def create_process_specific_iterator(
-    config: pyconfig.HyperParameters, mesh, process_indices, input_iterator, is_training: bool = True
+    config: pyconfig.HyperParameters, mesh, process_indices, input_iterator, is_training: bool = True,
+    finite_evaluation: bool = False,
 ):
   """Create a real iterator on loading processes and a placeholder elsewhere."""
   if jax.process_index() in process_indices:
     iterator_fn = functools.partial(input_iterator, config, mesh, process_indices)
     output_iterator = iterator_fn()
+  elif finite_evaluation:
+    output_iterator = MultiHostDataLoadIterator((), mesh)
   else:
     output_iterator = PlaceHolderDataIterator(config, mesh, is_training=is_training)
+  if finite_evaluation and isinstance(output_iterator, MultiHostDataLoadIterator):
+    output_iterator.dataloader = FiniteEvaluationLoader(output_iterator.dataloader)
+    output_iterator.generate_padding_batch = False
+    output_iterator.reset()
   return output_iterator
 
 
 def create_data_iterator(
-    config: pyconfig.HyperParameters, mesh, *, train_dataset=None, eval_dataset=None, processing_class=None
+    config: pyconfig.HyperParameters, mesh, *, train_dataset=None, eval_dataset=None, processing_class=None,
+    formatting_func=None, dataset_text_field="text", data_collator=None,
+    evaluation_only=False,
+    finite_evaluation=False,
 ):
   """Create train and eval data iterators given configs and mesh."""
   if config.dataset_type == "synthetic":
     eval_iterator = SyntheticDataIterator(config, mesh) if config.eval_interval > 0 else None
-    return SyntheticDataIterator(config, mesh), eval_iterator
+    return None if evaluation_only else SyntheticDataIterator(config, mesh), eval_iterator
 
   dataset_type_to_train_eval_iterator = {
       "grain": (make_grain_train_iterator, make_grain_eval_iterator),
@@ -68,8 +80,13 @@ def create_data_iterator(
       assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
     train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
     if config.dataset_type == "hf":
-      train_iterator = functools.partial(train_iterator, dataset=train_dataset, processing_class=processing_class)
-      eval_iterator = functools.partial(eval_iterator, dataset=eval_dataset, processing_class=processing_class)
+      options = dict(processing_class=processing_class, formatting_func=formatting_func,
+                     dataset_text_field=dataset_text_field, data_collator=data_collator)
+      train_iterator = functools.partial(train_iterator, dataset=train_dataset, **options)
+      eval_iterator = functools.partial(eval_iterator, dataset=eval_dataset, **options)
+    elif config.dataset_type == "grain":
+      train_iterator = functools.partial(train_iterator, processing_class=processing_class)
+      eval_iterator = functools.partial(eval_iterator, processing_class=processing_class)
   else:
     max_logging.log(
         f"WARNING: '{config.dataset_type}' is not a supported dataset type."
@@ -85,12 +102,14 @@ def create_data_iterator(
       config.max_target_length,
       mesh,
   )
-  output_train_iterator = create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
+  output_train_iterator = (
+      None if evaluation_only else create_process_specific_iterator(config, mesh, process_indices_train, train_iterator)
+  )
   if config.expansion_factor_real_data > 1:
     assert len(process_indices_train) == jax.process_count() // config.expansion_factor_real_data
 
   output_eval_iterator = None
-  if config.eval_interval > 0:
+  if config.eval_interval > 0 or eval_dataset is not None:
     process_indices_eval = get_process_loading_real_data(
         config.data_sharding,
         config.global_batch_size_to_load_eval,
@@ -101,6 +120,6 @@ def create_data_iterator(
     if config.expansion_factor_real_data > 1:
       assert len(process_indices_eval) == jax.process_count() // config.expansion_factor_real_data
     output_eval_iterator = create_process_specific_iterator(
-        config, mesh, process_indices_eval, eval_iterator, is_training=False
+        config, mesh, process_indices_eval, eval_iterator, is_training=False, finite_evaluation=finite_evaluation,
     )
   return output_train_iterator, output_eval_iterator

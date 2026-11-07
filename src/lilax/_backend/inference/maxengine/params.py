@@ -5,10 +5,10 @@ from flax import nnx
 from flax.core.spmd import logical_axis_rules
 
 from lilax._backend.common.common_types import MODEL_MODE_AUTOREGRESSIVE
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.distributed import sharding
-from lilax._backend.utils.model_creation import pretrained
+from lilax._backend.models.creation import pretrained
 
 
 def initialize_model_state(model, mesh, create_model_fn):

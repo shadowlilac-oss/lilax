@@ -2,6 +2,7 @@
 
 import logging
 import time
+from contextlib import nullcontext
 
 import jax
 from jax.experimental import multihost_utils
@@ -57,7 +58,8 @@ def _build_results_path(cfg: dict) -> str:
   return f"{base_output_directory}/{run_name}/eval_results"
 
 
-def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
+def run_eval(cfg: dict, hf_token: str | None = None, *, endpoint=None, processing_class=None,
+             eval_dataset=None, compute_metrics=None) -> dict:
   benchmark = cfg["benchmark"]
   model_name = cfg["model_name"]
   hf_path = cfg["hf_path"]
@@ -73,14 +75,17 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   gcs_results_path = cfg.get("gcs_results_path")
   token = resolve_token(cfg, hf_token)
   logger.info("Loading tokenizer from %s.", hf_path)
-  tokenizer = AutoTokenizer.from_pretrained(hf_path, token=token)
+  tokenizer = (AutoTokenizer.from_pretrained(hf_path, token=token) if processing_class is None
+               else getattr(processing_class, "tokenizer", processing_class))
   logger.info("Loading benchmark dataset: %s", benchmark)
   dataset = get_dataset(benchmark)
-  requests = dataset.sample_requests(num_samples=num_samples, tokenizer=tokenizer)
+  requests = dataset.sample_requests(num_samples=num_samples, tokenizer=tokenizer, **(
+      {"dataset": eval_dataset} if eval_dataset is not None else {}
+  ))
   logger.info("Loaded %d samples.", len(requests))
   prompts = [request.prompt for request in requests]
   references = [request.reference for request in requests]
-  with build_server_manager(cfg, token) as server:
+  with (build_server_manager(cfg, token) if endpoint is None else nullcontext(endpoint)) as server:
     is_rank0 = jax.process_index() == 0
     if is_rank0:
       base_url = server.base_url
@@ -101,7 +106,7 @@ def run_eval(cfg: dict, hf_token: str | None = None) -> dict:
   errors = [result for result in results if result.error]
   if errors:
     logger.warning("%d generation errors (out of %d).", len(errors), len(results))
-  scorer = get_scorer(benchmark)
+  scorer = get_scorer(benchmark) if compute_metrics is None else compute_metrics
   scores = scorer(responses, references)
   logger.info("Scores: %s", scores)
   generation_stats = {

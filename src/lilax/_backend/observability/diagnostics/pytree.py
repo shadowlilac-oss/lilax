@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import psutil
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def calculate_num_params_from_pytree(params):

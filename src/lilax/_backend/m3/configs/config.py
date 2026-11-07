@@ -7,7 +7,7 @@ from typing import Any, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from pydantic import BaseModel, ConfigDict, Field
 import yaml
 

@@ -11,7 +11,7 @@ from jetstream.engine import chunked_prefill
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.observability.diagnostics import system_info
-from lilax.configuration import MaxTextConfig, RLConfig
+from lilax._backend.configs.inert import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime
 
 _WARMUP_ITERS = 2

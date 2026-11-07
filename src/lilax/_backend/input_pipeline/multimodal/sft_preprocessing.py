@@ -1,6 +1,7 @@
 """Per-example prompt, response, and media preprocessing for multimodal SFT."""
 
 import numpy as np
+import grain.python as grain
 
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.multimodal import utils as mm_utils
@@ -90,3 +91,15 @@ def prepare_text_for_image_fusion(example, column_name, config):
       tokens=example[column_name], config=config, processor_output=example["images"]
   )
   return example
+
+
+class PrepareImageFusion(grain.MapTransform):
+  """Keep native media objects inside Grain rather than an Arrow dataset column."""
+
+  def __init__(self, column_name, config):
+    self.column_name = column_name
+    self.config = config
+
+  def map(self, example):
+    example = pre_process_image_sft(example, "images", self.config)
+    return prepare_text_for_image_fusion(example, self.column_name, self.config)

@@ -1,9 +1,7 @@
 """Child-side CPU checkpoint conversion callable."""
 
-import base64
 import json
 import os
-import pickle
 import sys
 
 import jax
@@ -11,7 +9,8 @@ import jax
 from lilax._backend.checkpoint_conversion.to_maxtext import convert_to_maxtext
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax.configuration import deserialize_config, project_cpu_conversion_config
+from lilax.configuration.serialization import deserialize_config
+from lilax.configuration.conversion import project_cpu_conversion_config
 
 
 def run(result_fd):
@@ -20,17 +19,10 @@ def run(result_fd):
     payload = json.load(sys.stdin)
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
     if payload["native_config"] is not None:
-      pydantic_config, flat_config = pickle.loads(base64.b64decode(payload["native_config"]))
-      overrides = {
-          "base_output_directory": payload["output_root"],
-          "skip_jax_distributed_system": True,
-      }
-      if payload["conversion_mode"] == "automatic":
-        overrides["use_multimodal"] = False
-      config = pyconfig.HyperParameters.__new__(pyconfig.HyperParameters)
-      object.__setattr__(config, "_pydantic_config", pydantic_config.model_copy(update=overrides))
-      flat_config.update(overrides)
-      object.__setattr__(config, "_flat_config", flat_config)
+      config = pyconfig.initialize(
+          [""], **payload["native_config"], base_output_directory=payload["output_root"], use_multimodal=False,
+          skip_jax_distributed_system=True,
+      )
     else:
       public_config = deserialize_config(payload["config"])
       public_config = project_cpu_conversion_config(

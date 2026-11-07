@@ -4,7 +4,7 @@ import os
 import subprocess
 
 from lilax._backend.common.cloud import is_decoupled
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def get_project():

@@ -40,7 +40,7 @@ from lilax._backend.layers.quantization.modes import in_serve_mode
 from lilax._backend.layers.quantization.nnx_ops import apply_einsum_in_nnx, create_fp8_einsum, make_dot_general
 from lilax._backend.layers.quantization.serve_fp8 import ServeFp8WeightQuantization, infer_scale_granularity
 from lilax._backend.layers.quantization.weights import WeightQuantConfig, dequantize_weight, get_weight_quant_config
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.kernels.tiling import eval_tiles
 from lilax._backend.integration.transformer_engine import moe_bootstrap
 from lilax._backend.pytree import partitioning

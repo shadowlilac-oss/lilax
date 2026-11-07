@@ -15,11 +15,38 @@ from lilax._backend.checkpoint_conversion.model_families.qwen3_5 import fused as
 from lilax._backend.checkpoint_conversion.model_families.qwen3_vl import fused as fused_qwen3_vl
 from lilax._backend.checkpoint_conversion.model_families.qwen3_omni import fused as fused_qwen3_omni
 from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax.configuration import MaxTextConfig
+from lilax._backend.configs.inert import MaxTextConfig
+from lilax.configuration.loading import AutoConfig
+from lilax.configuration.conversion import project_cpu_conversion_config
+from lilax.configuration.model_mapping import model_config_from_source, project_model_config
 from lilax.configuration.values import load_config_values
+from lilax.checkpoints.importing import CheckpointConversionConfig, import_huggingface_checkpoint
 
 
-def convert_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None):
+def convert_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None, config: CheckpointConversionConfig | None = None):
+  """Import supported HF weights or convert a Lilax checkpoint's projection layout on CPU."""
+  destination = Path(destination).expanduser().resolve()
+  if destination.exists():
+    raise ValueError(f"Destination already exists: {destination}")
+  source_path = Path(source).expanduser()
+  if source_path.is_dir() and (source_path / "maxtext_easy_config_metadata.json").is_file():
+    if config is not None and config.model_dump() != CheckpointConversionConfig().model_dump():
+      raise ValueError("CheckpointConversionConfig worker settings apply to Hugging Face import only.")
+    return _convert_native_checkpoint(source, destination, fused_qkv=fused_qkv, fused_mlp=fused_mlp)
+  options = config or CheckpointConversionConfig()
+  source_config, public_config = import_huggingface_checkpoint(
+      source, destination, options, fused_qkv=fused_qkv, fused_mlp=fused_mlp,
+  )
+  public_config.save_pretrained(destination)
+  metadata = {
+      "explicit_keys": sorted(source_config._explicit_keys - {"hf_access_token"}),
+      "checkpoint_layout": {"scan_layers": source_config.scan_layers, "param_scan_axis": source_config.param_scan_axis},
+  }
+  (destination / "maxtext_easy_config_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+  return destination
+
+
+def _convert_native_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None):
   """Convert a Lilax save_pretrained checkpoint without optimizer or training state."""
   source = Path(source).expanduser().resolve()
   destination = Path(destination).expanduser().resolve()
@@ -34,22 +61,21 @@ def convert_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None):
   metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
   if not isinstance(saved_values, dict) or not isinstance(saved_values.get("model_name"), str):
     raise ValueError("Source checkpoint config must contain a model_name.")
-  if not isinstance(metadata, dict) or set(metadata) != {"explicit_keys"}:
-    raise ValueError("Source checkpoint configuration metadata must contain only explicit_keys.")
-  explicit_keys = metadata["explicit_keys"]
-  if not isinstance(explicit_keys, list) or any(
-      not isinstance(key, str) or key not in saved_values for key in explicit_keys
-  ):
-    raise ValueError("Source checkpoint explicit_keys must be strings present in config.json.")
-  values = load_config_values(saved_values["model_name"], _saved_values=saved_values, _apply_environment=False)
-  config = MaxTextConfig._from_resolved(values, explicit_keys)
+  public_config = AutoConfig.from_pretrained(source, local_files_only=True)
+  if "hidden_size" in saved_values:
+    config = project_model_config(public_config)
+  else:
+    values = load_config_values(saved_values["model_name"], _saved_values=saved_values, _apply_environment=False)
+    config = MaxTextConfig._from_resolved(values, metadata["explicit_keys"])
   validate_mlp_only_layout(config, fused_qkv=fused_qkv, fused_mlp=fused_mlp)
   layout_adapter = projection_layout_adapter(config)
   if layout_adapter is None:
     raise ValueError(f"Projection layout conversion is not supported for {config.model_name!r}.")
   if config.qwix_qat_config is not None:
     raise NotImplementedError("Projection layout conversion does not support Qwix QAT.")
-  native_config = resolve_runtime_config(config)
+  native_config = resolve_runtime_config(project_cpu_conversion_config(
+      config, output_directory=destination.parent, conversion_mode="explicit",
+  ))
   target_qkv = config.fused_qkv if fused_qkv is None else fused_qkv
   target_mlp = config.fused_mlp if fused_mlp is None else fused_mlp
   if target_mlp != config.fused_mlp and not supports_mlp_layout(layout_adapter):
@@ -119,10 +145,12 @@ def convert_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None):
                                                      fused_qkv=target_qkv, fused_mlp=target_mlp)
     state["decoder"] = converted["decoder"]
   checkpointer.save(destination, wrap(state))
-  saved_values.pop("hf_access_token", None)
-  saved_values.update({"fused_qkv": target_qkv, "fused_mlp": target_mlp})
-  (destination / "config.json").write_text(json.dumps(saved_values, indent=2), encoding="utf-8")
-  metadata["explicit_keys"] = sorted(set(metadata["explicit_keys"]) | {"fused_qkv", "fused_mlp"})
+  config = config.model_copy(update={"fused_qkv": target_qkv, "fused_mlp": target_mlp})
+  model_config_from_source(config, metadata_config=public_config).save_pretrained(destination)
+  metadata = {
+      "explicit_keys": sorted(config._explicit_keys - {"hf_access_token"}),
+      "checkpoint_layout": {"scan_layers": config.scan_layers, "param_scan_axis": config.param_scan_axis},
+  }
   (destination / "maxtext_easy_config_metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
   return destination
 

@@ -6,7 +6,7 @@ from etils import epath
 import jax
 import orbax.checkpoint as ocp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def initialize_jax_for_tpu_with_emergency_checkpointing(raw_keys):

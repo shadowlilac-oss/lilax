@@ -14,7 +14,8 @@ from tqdm import tqdm
 
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.trainers.post_train.rl import utils_rl
-from lilax._backend.utils import gcs_utils, max_logging
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 
 SUPPORTED_DATASETS = ["HuggingFaceM4/ChartQA"]
 DEFAULT_PROMPT_TEMPLATE = """You are an expert at answering questions based
@@ -88,10 +89,11 @@ def validate_config(config):
 
 
 def evaluate(engine, params, config, *, num_examples=-1, tmp_results_file="mm_eval_results.csv",
-             remove_tmp_results=True, ckpt_type="base", image_resize=-1):
+             remove_tmp_results=True, ckpt_type="base", image_resize=-1, eval_dataset=None, tokenizer=None):
   absl.logging.set_verbosity(absl.logging.INFO)
   validate_config(config)
-  tokenizer = engine.build_tokenizer(engine.get_tokenizer())
+  if tokenizer is None:
+    tokenizer = engine.build_tokenizer(engine.get_tokenizer())
   max_prefill_length = getattr(config, "max_prefill_predict_length", 1024)
   max_target_length = getattr(config, "max_target_length", 2048)
   eos_token_ids = {tokenizer.eos_id} if getattr(tokenizer, "eos_id", None) is not None else set()
@@ -109,7 +111,8 @@ def evaluate(engine, params, config, *, num_examples=-1, tmp_results_file="mm_ev
   results_data = []
   tmvp_config = TmvpConfig()
   correct_count = total_count = 0
-  dataset = datasets.load_dataset(config.hf_path, "default", split=config.hf_eval_split)
+  dataset = (datasets.load_dataset(config.hf_path, "default", split=config.hf_eval_split)
+             if eval_dataset is None else eval_dataset)
   for idx, example in enumerate(tqdm(dataset, desc=f"Evaluating {config.hf_path} dataset")):
     parsed = parse_dataset_example(example, config.hf_path, image_resize)
     prompt = construct_prompt(parsed, config, ckpt_type)
@@ -171,12 +174,12 @@ def evaluate(engine, params, config, *, num_examples=-1, tmp_results_file="mm_ev
     if is_correct:
       correct_count += 1
     total_count += 1
-    max_logging.log(f"Running accuracy: {correct_count / total_count:.4f} | Processed: {total_count}/{len(dataset)}")
+    max_logging.log(f"Running accuracy: {correct_count / total_count:.4f} | Processed: {total_count}")
     if num_examples != -1 and total_count >= num_examples:
       break
     if idx % 100 == 0 and result_gcs_path is not None and jax.process_index() == 0:
       pd.DataFrame(results_data).to_csv(tmp_results_file, index=False)
-      gcs_utils.upload_blob(result_gcs_path, tmp_results_file)
+      gcs.upload_blob(result_gcs_path, tmp_results_file)
       max_logging.log(f"Uploaded the results file to GCS bucket: {result_gcs_path}")
 
   if total_count:
@@ -186,7 +189,7 @@ def evaluate(engine, params, config, *, num_examples=-1, tmp_results_file="mm_ev
   if result_gcs_path is not None and jax.process_index() == 0:
     pd.DataFrame(results_data).to_csv(tmp_results_file, index=False)
     max_logging.log(f"Saved predictions to {tmp_results_file}")
-    gcs_utils.upload_blob(result_gcs_path, tmp_results_file)
+    gcs.upload_blob(result_gcs_path, tmp_results_file)
     max_logging.log(f"Uploaded the results file to GCS bucket: {result_gcs_path}")
     if remove_tmp_results and os.path.exists(tmp_results_file):
       os.remove(tmp_results_file)

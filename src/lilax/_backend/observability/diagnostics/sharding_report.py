@@ -4,7 +4,7 @@ from flax import nnx
 import jax
 
 from lilax._backend.distributed import sharding
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def print_shardings_params(params, params_sharding, mesh, logical_annotations=None):

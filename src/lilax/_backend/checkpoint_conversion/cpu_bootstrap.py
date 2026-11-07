@@ -1,18 +1,39 @@
 """Run Hugging Face checkpoint conversion in an isolated CPU interpreter."""
 
-import base64
+import hashlib
 import json
 import os
-import pickle
 import subprocess
 import sys
 
 import jax
 import numpy as np
+from etils import epath
 from huggingface_hub import get_token
 from jax.experimental import multihost_utils
 
-from lilax.configuration import MaxTextConfig, RLConfig, serialize_config
+from lilax._backend.configs.inert import MaxTextConfig, RLConfig
+from lilax.configuration.serialization import serialize_config
+from lilax._backend.utils.globals import HF_IDS
+
+
+def conversion_provenance(config, snapshot_path, revision, save_dtype, simulated_cpu_devices_count,
+                          scan_layers, conversion_mode):
+  if isinstance(config, (MaxTextConfig, RLConfig)):
+    values = serialize_config(config)
+    values["values"].pop("hf_access_token", None)
+  else:
+    values = getattr(config, "_pydantic_config", config).model_dump(mode="json", exclude={"hf_access_token"})
+  digest = hashlib.sha256(json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+  return {
+      "config_sha256": digest,
+      "source": os.fspath(snapshot_path) if snapshot_path is not None else HF_IDS.get(config.model_name),
+      "revision": revision,
+      "save_dtype": str(save_dtype),
+      "simulated_cpu_devices_count": simulated_cpu_devices_count,
+      "scan_layers": scan_layers,
+      "conversion_mode": conversion_mode,
+  }
 
 
 def convert_on_cpu(
@@ -25,44 +46,64 @@ def convert_on_cpu(
   result_bytes = b""
   if is_source:
     try:
-      native_config_data = None
-      if not isinstance(public_config, (MaxTextConfig, RLConfig)):
+      provenance = conversion_provenance(
+          public_config, snapshot_path, revision, save_dtype, simulated_cpu_devices_count, scan_layers, conversion_mode
+      )
+      checkpoint_path = epath.Path(output_root) / "0" / "items"
+      provenance_path = epath.Path(output_root) / "lilax_conversion_provenance.json"
+      if checkpoint_path.exists():
+        if not provenance_path.exists() or json.loads(provenance_path.read_text(encoding="utf-8")) != provenance:
+          raise ValueError(f"Existing conversion at {checkpoint_path} has missing or incompatible provenance.")
+        result = {"checkpoint_path": str(checkpoint_path)}
+      else:
+        result = None
+      native_overrides = None
+      if result is None and not isinstance(public_config, (MaxTextConfig, RLConfig)):
         native_config = public_config
         credential = native_config.hf_access_token or get_token()
         if not credential:
           raise ValueError("hf_access_token or Hugging Face authentication is required for checkpoint conversion.")
-        native_config_data = base64.b64encode(
-            pickle.dumps((native_config._pydantic_config, native_config.get_keys()))
-        ).decode("ascii")
-      payload = {
-          "config": serialize_config(public_config) if native_config_data is None else None,
-          "native_config": native_config_data,
-          "snapshot_path": os.fspath(snapshot_path) if snapshot_path is not None else None,
-          "output_root": os.fspath(output_root),
-          "lazy_load_tensors": lazy_load_tensors,
-          "eager_load_method": eager_load_method,
-          "revision": revision,
-          "save_dtype": save_dtype,
-          "simulated_cpu_devices_count": simulated_cpu_devices_count,
-          "scan_layers": scan_layers,
-          "conversion_mode": conversion_mode,
-      }
-      environment = os.environ.copy()
-      if native_config_data is not None:
-        environment["HF_TOKEN"] = credential
-      environment["JAX_PLATFORMS"] = "cpu"
-      environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
-      child = subprocess.run(
-          [sys.executable, "-c", (
-              "import os; result_fd = os.dup(1); os.dup2(2, 1); "
-              "from lilax._backend.checkpoint_conversion.cpu_worker import run; run(result_fd)"
-          )],
-          input=json.dumps(payload), text=True, stdout=subprocess.PIPE, env=environment, check=False,
-      )
-      if child.returncode:
-        result = {"error": f"CPU conversion subprocess exited with code {child.returncode}"}
-      else:
-        result = json.loads(child.stdout)
+        native_overrides = {
+            "model_name": native_config.model_name,
+            "scan_layers": native_config.scan_layers,
+            "param_scan_axis": native_config.param_scan_axis,
+            "fused_qkv": native_config.fused_qkv,
+            "fused_mlp": native_config.fused_mlp,
+            "checkpoint_storage_use_ocdbt": native_config.checkpoint_storage_use_ocdbt,
+            "checkpoint_storage_use_zarr3": native_config.checkpoint_storage_use_zarr3,
+        }
+      if result is None:
+        payload = {
+            "config": serialize_config(public_config) if native_overrides is None else None,
+            "native_config": native_overrides,
+            "snapshot_path": os.fspath(snapshot_path) if snapshot_path is not None else None,
+            "output_root": os.fspath(output_root),
+            "lazy_load_tensors": lazy_load_tensors,
+            "eager_load_method": eager_load_method,
+            "revision": revision,
+            "save_dtype": save_dtype,
+            "simulated_cpu_devices_count": simulated_cpu_devices_count,
+            "scan_layers": scan_layers,
+            "conversion_mode": conversion_mode,
+        }
+        environment = os.environ.copy()
+        if native_overrides is not None:
+          environment["HF_TOKEN"] = credential
+        environment["JAX_PLATFORMS"] = "cpu"
+        environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+        child = subprocess.run(
+            [sys.executable, "-c", (
+                "import os; result_fd = os.dup(1); os.dup2(2, 1); "
+                "from lilax._backend.checkpoint_conversion.cpu_worker import run; run(result_fd)"
+            )],
+            input=json.dumps(payload), text=True, stdout=subprocess.PIPE, env=environment, check=False,
+        )
+        if child.returncode:
+          result = {"error": f"CPU conversion subprocess exited with code {child.returncode}"}
+        else:
+          result = json.loads(child.stdout)
+        if "checkpoint_path" in result:
+          provenance_path.write_text(json.dumps(provenance, sort_keys=True), encoding="utf-8")
     except Exception as error:
       result = {"error": f"{type(error).__name__}: {error}"}
     result_bytes = json.dumps(result).encode("utf-8")

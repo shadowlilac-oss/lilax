@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 from jax.experimental import serialize_executable
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 _FORMAT_VERSION = 1
 

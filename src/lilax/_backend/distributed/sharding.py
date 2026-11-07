@@ -12,7 +12,7 @@ from jax.core import Tracer
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec as P, reshard
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import pytree
 from orbax.checkpoint._src.arrays.sharding import construct_maximal_shardings
 

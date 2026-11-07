@@ -6,39 +6,48 @@ except ImportError:
   pass
 
 import json
+import copy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from etils import epath
 from flax import nnx
+import jax.numpy as jnp
 import orbax.checkpoint as ocp
 
 from lilax._backend.configs.pyconfig import HyperParameters
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
 from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggingface
 from lilax._backend.utils import maxtext_utils_nnx
-from lilax._backend.utils.model_creation import model_factory, pretrained, scan_layers_sync
+from lilax._backend.models.creation import model_factory, pretrained, scan_layers_sync
 from lilax.configuration import AutoConfig, QwixQATConfig
-from lilax.generation.engine import generate as generate_tokens
+from lilax.configuration.model_mapping import model_config_from_source
+from lilax.generation.configuration import ContinuousBatchingConfig, GenerationConfig
+from lilax.generation.sequences import generate_sequences
+from lilax.generation.batching import generate_batch
 from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 from lilax.runtime import Runtime
 from lilax.modeling import persistence as model_persistence
 from lilax.modeling import construction as model_construction
 from lilax.modeling import qat_application as model_qat_application
 from lilax.modeling.sources import resolve_checkpoint_path, resolve_pretrained_source
+from lilax.checkpoints.exporting import HuggingFaceExportConfig
+from lilax._processing.media import fold_media
 
 
 class MaxTextModel:
   """A native MaxText model bound to its initialized runtime."""
 
   def __init__(self, native_model, runtime, *, construction_config=None, checkpoint=None, model_options=None,
-               quantization_config=None):
+               quantization_config=None, config=None):
     self._native_model = native_model
     self.runtime = runtime
     self.construction_config = runtime.config if construction_config is None else construction_config
     self._checkpoint = checkpoint
     self._model_options = model_options
     self._quantization_config = quantization_config
+    self.config = model_config_from_source(runtime.public_config) if config is None else config
+    self.generation_config = GenerationConfig(eos_token_id=getattr(self.config, "eos_token_id", None))
 
   @property
   def is_materialized(self):
@@ -166,19 +175,44 @@ class MaxTextModel:
   def _apply_qat(self, model, config, qat_config):
     return model_qat_application.apply_qat(model, config, qat_config, self.runtime)
 
-  def __call__(self, *args, **kwargs):
-    return self.native_model(*args, **kwargs)
+  def __call__(
+      self, input_ids, *, position_ids=None, attention_mask=None, segment_ids=None, inputs_embeds=None,
+      images=None, image_masks=None, videos=None, video_masks=None, video_grid_thw=None, audio_values=None,
+      decoder_target_tokens=None, decoder_target_mask=None, enable_dropout=True,
+  ):
+    input_ids = jnp.asarray(input_ids)
+    if position_ids is None:
+      position_ids = jnp.broadcast_to(jnp.arange(input_ids.shape[-1]), input_ids.shape)
+    if segment_ids is None:
+      segment_ids = jnp.ones_like(input_ids) if attention_mask is None else jnp.asarray(attention_mask)
+    elif attention_mask is not None:
+      segment_ids = jnp.where(jnp.asarray(attention_mask) != 0, jnp.asarray(segment_ids), 0)
+    media = fold_media(self.construction_config, {
+        "images": images, "image_masks": image_masks, "videos": videos, "video_masks": video_masks,
+        "video_grid_thw": video_grid_thw, "audio_values": audio_values,
+    })
+    return self.native_model(
+        input_ids, position_ids, segment_ids, decoder_input_embeddings=inputs_embeds,
+        encoder_images=media["images"], encoder_image_masks=media["image_masks"], encoder_videos=media["videos"],
+        encoder_video_masks=media["video_masks"], encoder_video_grid_thw=media["video_grid_thw"],
+        encoder_audios=media["audio_values"],
+        decoder_target_tokens=decoder_target_tokens, decoder_target_mask=decoder_target_mask,
+        enable_dropout=enable_dropout,
+    )
 
   def generate(
-      self, padded_tokens, true_length, *, max_new_tokens=None, rng=None, algorithm=None, topk=None,
-      nucleus_topp=None, temperature=None, positions=None, mrope_deltas=None, images=None, image_masks=None,
+      self, input_ids, generation_config=None, *, attention_mask=None, max_new_tokens=None, do_sample=None,
+      top_k=None, top_p=None, temperature=None, rng=None, position_ids=None, mrope_deltas=None, images=None, image_masks=None,
       videos=None, video_masks=None, video_grid_thw=None, audio_values=None, audio_masks=None,
   ):
-    """Generate token IDs for one padded prompt with the current model state."""
-    return generate_tokens(
-        self.native_model, self.runtime, padded_tokens, true_length, construction_config=self.construction_config,
-        max_new_tokens=max_new_tokens, rng=rng,
-        algorithm=algorithm, topk=topk, nucleus_topp=nucleus_topp, temperature=temperature, positions=positions,
+    """Return prompt and generated token IDs for each supplied sequence."""
+    options = generation_config or self.generation_config
+    options = options.model_copy(update={name: value for name, value in (
+        ("max_new_tokens", max_new_tokens), ("do_sample", do_sample), ("top_k", top_k),
+        ("top_p", top_p), ("temperature", temperature),
+    ) if value is not None})
+    return generate_sequences(
+        self, input_ids, options, attention_mask=attention_mask, rng=rng, position_ids=position_ids,
         mrope_deltas=mrope_deltas, images=images, image_masks=image_masks, videos=videos, video_masks=video_masks,
         video_grid_thw=video_grid_thw, audio_values=audio_values, audio_masks=audio_masks,
     )
@@ -187,54 +221,48 @@ class MaxTextModel:
   def native_module(self):
     return self.native_model
 
+  def generate_batch(self, inputs, generation_config=None, *, continuous_batching_config=None, rng=None):
+    return generate_batch(self, inputs, generation_config or self.generation_config,
+                          continuous_batching_config or ContinuousBatchingConfig(), rng)
+
   def save_pretrained(
-      self, save_directory, *, format="maxtext", hf_model_path=None, revision=None, token=None, cache_dir=None,
-      local_files_only=False, override_model_architecture=False,
+      self, save_directory, *, format="maxtext", export_config=None,
   ):
     """Save the current model as a native checkpoint or Hugging Face model."""
-    return model_persistence.save_pretrained(
-        self, save_directory, format=format, hf_model_path=hf_model_path, revision=revision, token=token,
-        cache_dir=cache_dir, local_files_only=local_files_only,
-        override_model_architecture=override_model_architecture,
-    )
+    export_config = export_config or HuggingFaceExportConfig()
+    return model_persistence.save_pretrained(self, save_directory, format=format, **export_config.model_dump())
 
 
 class AutoModelForCausalLM:
   """Construct native MaxText models with an initialized runtime configuration."""
 
   @staticmethod
-  def from_config_linen(config, *, runtime=None, model_mode="train", quant_mode_str="train"):
-    """Construct the native deprecated Linen model without initializing its variables."""
-    return model_construction.from_config_linen(
-        config, runtime=runtime, model_mode=model_mode, quant_mode_str=quant_mode_str
-    )
-
-  @staticmethod
-  def from_config(config, *, runtime=None, rngs=None, model_mode="train", quant_mode_str="train",
-                  quantization_config=None):
+  def from_config(config, *, quantization_config=None, seed=0):
     """Create a wrapper that constructs an NNX model when materialized."""
+    config = copy.deepcopy(config)
+    if quantization_config is not None:
+      config.quantization_config = quantization_config
     runtime, model_options = model_construction.prepare_from_config(
-        config, runtime=runtime, rngs=rngs, model_mode=model_mode, quant_mode_str=quant_mode_str
+        config,
     )
+    runtime.public_config = runtime.public_config.model_copy(update={"init_weights_seed": seed})
+    runtime.config = runtime.public_config
     return MaxTextModel(
-        None, runtime, model_options=model_options, quantization_config=quantization_config,
+        None, runtime, model_options=model_options,
+        quantization_config=config.quantization_config if isinstance(config.quantization_config, QwixQATConfig) else None,
+        config=config,
     )
 
   @staticmethod
   def from_pretrained(
-      pretrained_model_name_or_path, *, config=None, runtime=None, revision=None, token=None, cache_dir=None,
-      local_files_only=False, model_mode="train", rng_key=None, wrap_with_tunix_adapter=False,
-      tokenizer_pad_id=None, quant_mode_str="train", lazy_load_tensors=True, eager_load_method="safetensors",
-      save_dtype="bfloat16", simulated_cpu_devices_count=16, conversion_output_dir=None,
-      quantization_config=None,
+      pretrained_model_name_or_path, *, config=None, revision=None, token=None, cache_dir=None,
+      local_files_only=False, quantization_config=None, fuse_qkv=None, fuse_mlp=None, precision_config=None,
   ):
     """Create a native model; token selects model snapshot access, not adapter credentials."""
     runtime, checkpoint = resolve_pretrained_source(
-        pretrained_model_name_or_path, config=config, runtime=runtime, revision=revision, token=token,
-        cache_dir=cache_dir, local_files_only=local_files_only, model_mode=model_mode, rng_key=rng_key,
-        wrap_with_tunix_adapter=wrap_with_tunix_adapter, tokenizer_pad_id=tokenizer_pad_id,
-        quant_mode_str=quant_mode_str, lazy_load_tensors=lazy_load_tensors, eager_load_method=eager_load_method,
-        save_dtype=save_dtype, simulated_cpu_devices_count=simulated_cpu_devices_count,
-        conversion_output_dir=conversion_output_dir,
+        pretrained_model_name_or_path, config=config, revision=revision, token=token,
+        cache_dir=cache_dir, local_files_only=local_files_only, quantization_config=quantization_config,
+        fuse_qkv=fuse_qkv, fuse_mlp=fuse_mlp, precision_config=precision_config,
     )
-    return MaxTextModel(None, runtime, checkpoint=checkpoint, quantization_config=quantization_config)
+    qat = quantization_config if isinstance(quantization_config, QwixQATConfig) else None
+    return MaxTextModel(None, runtime, checkpoint=checkpoint, quantization_config=qat, config=checkpoint["public_config"])

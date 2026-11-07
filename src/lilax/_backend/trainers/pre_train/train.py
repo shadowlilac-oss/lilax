@@ -17,11 +17,14 @@ from lilax._backend.trainers.pre_train.loop.run_clock import start_run_clock
 from lilax._backend.trainers.pre_train.loop.te_moe_overflow import track_te_moe_overflow
 from lilax._backend.trainers.pre_train.loop.warmup import build_warmup_fn
 from lilax._backend.trainers.pre_train.start_step import get_first_step
-from lilax._backend.utils import elastic_utils, exceptions, max_logging, train_utils
+from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.trainers import stop_training as exceptions
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import train_utils
 
 
 def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=None, reporter_factory=None,
-               training_graph=None):
+               training_graph=None, lifecycle=None):
   if setup is None:
     setup = train_utils.setup_train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
   (
@@ -43,16 +46,19 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
       config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
   )
   def on_capture_complete(**capture):
-    if metric_logger_instance.reporter is not None:
+    if lifecycle is not None:
+      lifecycle._log_capture(**capture)
+    elif metric_logger_instance.reporter is not None:
       metric_logger_instance.reporter.log_capture(**capture)
 
-  prof = profiler.Profiler(config, offset_step=start_step, on_capture_complete=on_capture_complete)
+  prof = profiler.Profiler(config, offset_step=start_step, on_capture_complete=on_capture_complete,
+                           profile_dir=getattr(lifecycle.args, "xprof_dir", None) if lifecycle is not None else None)
   if config.enable_diloco:
     setup_params = state.params
   else:
     _, setup_params, _ = nnx.split(state.model, nnx.Param, ...)
   metric_logger_instance.write_setup_info_to_tensorboard(setup_params)
-  elastic_utils.record_elastic_reinit_end()
+  elastic.record_elastic_reinit_end()
   jax_device_state = {
       "state": state, "init_rng": init_rng, "mesh": mesh, "state_mesh_shardings": state_mesh_shardings,
       **programs, "model": model,
@@ -62,6 +68,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
       "rampup_manager": rampup_manager, "recorder": recorder, "checkpoint_manager": checkpoint_manager,
       "data_iterator": data_iterator, "eval_data_iterator": eval_data_iterator,
       "metric_logger_instance": metric_logger_instance, "prof": prof,
+      "lifecycle": lifecycle,
   }
   immutable_data = {
       "config": config, "training_graph": training_graph, "logical_axis_rules_for_train": config.logical_axis_rules,
@@ -91,21 +98,54 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None, *, setup=
     python_vars["eval_prefill_thread"] = None
     if config.eval_cache_prefill_in_background and eval_data_iterator is not None:
       python_vars["eval_prefill_thread"] = train_utils.start_eval_cache_prefill(eval_data_iterator)
+    if lifecycle is not None:
+      lifecycle._train_state = state
+      lifecycle._begin_training(start_step)
+      if lifecycle.args.eval_on_start:
+        lifecycle.evaluate()
     while python_vars["step"] < immutable_data["steps"]:
+      if lifecycle is not None:
+        if lifecycle.control.should_training_stop or lifecycle.control.should_epoch_stop:
+          break
+        lifecycle._begin_step()
+        if lifecycle.control.should_training_stop or lifecycle.control.should_epoch_stop:
+          break
       step = python_vars["step"]
       metrics = training_loop_iteration(jax_device_state, python_vars, immutable_data, elastic_retry_cache=elastic_retry_cache)
       python_vars["step"] += 1
       if getattr(config, "te_moe_block", False):
         track_te_moe_overflow(config, step, metrics, te_moe_overflow_window, prof)
     state = jax_device_state["state"]
+    if lifecycle is not None:
+      lifecycle._train_state = state
+      lifecycle._event("on_epoch_end")
     if immutable_data["save_checkpoint_on_completion"]:
-      checkpointing.maybe_save_checkpoint(
-          checkpoint_manager, state, config, data_iterator, training_graph=training_graph
-      )
+      if lifecycle is None:
+        checkpointing.maybe_save_checkpoint(
+            checkpoint_manager, state, config, data_iterator, training_graph=training_graph,
+        )
+      else:
+        receipt = checkpointing.maybe_save_checkpoint(
+            checkpoint_manager, state, config, data_iterator, training_graph=training_graph,
+            **lifecycle._save_action(get_first_step(model, state)), return_result=True,
+        )
+        lifecycle._resolve_save(receipt, checkpoint_manager)
+    if lifecycle is not None:
+      lifecycle._terminal_actions()
+      lifecycle._event("on_train_end")
     if checkpoint_manager is not None:
       checkpointing.wait_until_finished(checkpoint_manager)
     job_completed_gracefully = True
   except exceptions.StopTraining as error:
+    state = jax_device_state["state"]
+    if lifecycle is not None:
+      lifecycle._train_state = state
+      lifecycle.state.global_step = get_first_step(model, state)
+      if hasattr(error, "save_receipt"):
+        lifecycle._resolve_save(error.save_receipt, checkpoint_manager)
+      lifecycle._event("on_epoch_end")
+      lifecycle._terminal_actions()
+      lifecycle._event("on_train_end")
     prof.deactivate()
     max_logging.log(f"Training stopped: {str(error)}")
     job_completed_gracefully = True

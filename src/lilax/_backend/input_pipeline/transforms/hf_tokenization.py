@@ -1,5 +1,7 @@
 """Hugging Face tokenizer invocation and token-id extraction."""
 
+from lilax._backend.input_pipeline.grain_tokenizer import TokenizeAndChunk
+
 INPUT_TOKENS_KEY = "input_ids"
 
 
@@ -32,13 +34,21 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
-def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
+def tokenization(example, hf_tokenizer, truncation, max_length, column_names, add_special_tokens=True):
   """Tokenize a HuggingFace dataset"""
   for column_name in column_names:
     if isinstance(example[column_name], list):
       example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+          hf_tokenizer(x, truncation=truncation, max_length=max_length,
+                       add_special_tokens=add_special_tokens)["input_ids"] for x in example[column_name]
       ]
     elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length,
+                                         add_special_tokens=add_special_tokens)["input_ids"]
   return example
+
+
+def chunk_tokenization(batch, hf_tokenizer, max_length, column_name):
+  transform = TokenizeAndChunk(column_name, max_length, hf_tokenizer)
+  return {column_name: [record[column_name] for text in batch[column_name]
+                       for record in transform.flat_map({column_name: text})]}

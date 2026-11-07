@@ -6,7 +6,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 
 from lilax._backend.trainers.diloco import diloco
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.distributed import sharding
 

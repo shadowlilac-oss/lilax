@@ -4,7 +4,7 @@ import collections
 
 import jax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def setup_configs_and_devices(config, *, resolve_config, devices=None):

@@ -5,7 +5,7 @@ from jax.experimental import multihost_utils
 import numpy as np
 
 from lilax._backend.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
-from lilax.generation import sampling
+from lilax._backend.inference.inference_utils import sampling
 
 
 def decode_next_token(model, tokenizer, prompt):
@@ -26,7 +26,7 @@ def decode_next_token(model, tokenizer, prompt):
   decoder_positions = np.stack([np.arange(config.max_target_length, dtype=np.int32) for _ in range(batch_size)])
 
   with model.runtime.context():
-    logits = model(ids, decoder_positions, decoder_segment_ids, enable_dropout=False)
+    logits = model(ids, position_ids=decoder_positions, segment_ids=decoder_segment_ids, enable_dropout=False)
   logits = multihost_utils.process_allgather(logits)
   selected_logits = jax.lax.dynamic_slice(
       logits, (0, 0, logits.shape[2] - 2, 0), (1, 1, 1, logits.shape[3])

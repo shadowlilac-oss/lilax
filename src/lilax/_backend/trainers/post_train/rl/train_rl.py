@@ -12,8 +12,8 @@ import jax
 from absl import logging as absl_logging
 from etils import epath
 from flax import nnx
+import optax
 from jax.sharding import Mesh
-from orbax import checkpoint as ocp
 from transformers import AutoTokenizer
 from tunix.perf import export as perf_export, metrics as perf_metrics
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -36,10 +36,18 @@ from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.integration.vllm import maxtext_vllm_adapter
 from lilax._backend.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
+from lilax._backend.trainers.post_train.checkpoint_selection import TrainingCheckpointManager, training_checkpoint_options
+from lilax._backend.optimizers import optimizers
+from lilax._backend.optimizers.schedules import create_learning_rate_schedule
+from lilax._backend.trainers.post_train.metrics_logging import tensorboard_logging_options
+from lilax._backend.trainers.post_train.scalar_listeners import release_metrics_logger
 from lilax._backend.trainers.post_train.rl import utils_rl
+from lilax._backend.trainers.post_train.rl.lifecycle import TrainerRLEngine
+from lilax._backend.trainers.post_train.lifecycle import begin_training, finish_training
+from lilax._backend.trainers.stop_training import StopTraining
 from lilax._backend.trainers.post_train.rl.evaluate_rl import evaluate
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.trainers.post_train.rl.setup.rollout_parallelism import get_rollout_kwargs_for_parallelism
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 from lilax.configuration.loading import load_config_values
@@ -234,6 +242,8 @@ def build_metrics_logging_options(trainer_config: Any, metric_backend=None, repo
     backends.append(lambda: metric_backend)
   if report_to is not None and not backends:
     return None
+  if not backends:
+    return tensorboard_logging_options(trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period)
   return metrics_logger.MetricsLoggerOptions(
       log_dir=trainer_config.tensorboard_dir, flush_every_n_steps=trainer_config.log_period,
       backend_kwargs={"custom_backend": backends},
@@ -262,12 +272,24 @@ def create_rl_components(
     trainer_config, sampler_config, sampler_devices, actor_model, actor_mesh, reference_model, reference_mesh,
     rollout_mesh, model_tokenizer, *, vllm_config, checkpoint_step=None, metric_backend=None, report_to=None,
     agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
+    resume=None, optimizer=None, learning_rate_schedule=None, lifecycle=None, eos_token_ids=None,
+    checkpoint_manager=None,
+    evaluation_only=False,
 ):
-  optimizer = utils_rl.get_optimizer(trainer_config)
+  if optimizer is None:
+    explicit = set() if lifecycle is None else lifecycle.args.model_fields_set
+    if learning_rate_schedule is None:
+      learning_rate_schedule = (create_learning_rate_schedule(trainer_config)
+                                if explicit & {"lr_scheduler_type", "lr_scheduler_config"}
+                                else utils_rl.get_learning_rate_schedule(trainer_config))
+    if explicit & {"optim", "optimizer_config", "adam_epsilon"}:
+      optimizer = optimizers.get_optimizer(trainer_config, learning_rate_schedule, actor_model, actor_mesh)
+      if trainer_config.gradient_clipping_threshold > 0:
+        optimizer = optax.chain(optax.clip_by_global_norm(trainer_config.gradient_clipping_threshold), optimizer)
+    else:
+      optimizer = utils_rl.get_optimizer(trainer_config, learning_rate_schedule)
   if trainer_config.enable_checkpointing:
-    checkpointing_options = ocp.CheckpointManagerOptions(
-        save_interval_steps=trainer_config.checkpoint_period, max_to_keep=trainer_config.max_num_checkpoints_to_keep
-    )
+    checkpointing_options = training_checkpoint_options(trainer_config)
     checkpoint_dir = trainer_config.checkpoint_dir
   else:
     checkpointing_options = None
@@ -287,12 +309,12 @@ def create_rl_components(
         rollout_additional_config = json.loads(trainer_config.vllm_additional_config)
       except json.JSONDecodeError as error:
         raise ValueError(f"Failed to parse additional_config JSON: {error}") from error
-  rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config)
+  rl_rollout_engine = functools.partial(MaxTextVllmRollout, maxtext_config=trainer_config, eos_token_ids=eos_token_ids)
   rollout_vllm_kwargs = {
       "hf_overrides": trainer_config.vllm_hf_overrides,
       "enable_expert_parallel": sampler_config.enable_expert_parallel,
       "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
-      "dtype": trainer_config.weight_dtype.value,
+      "dtype": str(getattr(trainer_config.weight_dtype, "value", trainer_config.weight_dtype)),
   }
   if trainer_config.vllm_block_size is not None:
     rollout_vllm_kwargs["block_size"] = trainer_config.vllm_block_size
@@ -312,11 +334,12 @@ def create_rl_components(
       rollout_engine=rl_rollout_engine, offload_to_cpu=False,
       gc_collect_after_weight_sync=trainer_config.gc_collect_after_weight_sync,
       training_config=rl_cluster_lib.RLTrainingConfig(
-          actor_optimizer=optimizer, eval_every_n_steps=trainer_config.eval_interval, max_steps=trainer_config.train_steps,
+          actor_optimizer=optimizer, eval_every_n_steps=trainer_config.eval_interval, max_steps=trainer_config.steps,
           mini_batch_size=trainer_config.batch_size, train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size, max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
           metrics_logging_options=metrics_logging_options, profiler_options=None, rl_profiler_config=rl_profiler_config,
-          checkpoint_root_directory=None if checkpoint_step is not None else checkpoint_dir,
+          checkpoint_root_directory=None if checkpoint_manager is not None or checkpoint_step is not None or resume is False
+          else checkpoint_dir,
           checkpointing_options=checkpointing_options,
       ),
       rollout_config=base_rollout.RolloutConfig(
@@ -353,70 +376,91 @@ def create_rl_components(
     perf_config = perf_metrics.PerfMetricsConfig()
     perf_config.custom_export_fn = perf_export.PerfMetricsExport.create_metrics_export_fn(cluster_config)
     rl_cluster_kwargs["perf_config"] = perf_config
-  rl_cluster = rl_cluster_lib.RLEngine(
+  engine_class = rl_cluster_lib.RLEngine if lifecycle is None else TrainerRLEngine
+  rl_cluster = engine_class(
       actor=actor_model, reference=reference_model, tokenizer=model_tokenizer, cluster_config=cluster_config,
       **rl_cluster_kwargs,
+      **({"lifecycle": lifecycle, "evaluation_only": evaluation_only} if lifecycle is not None else {}),
   )
-  if checkpoint_step is not None:
-    cluster_config.training_config.checkpoint_root_directory = checkpoint_dir
-    with jax.set_mesh(actor_mesh):
-      restore_trainer_step(rl_cluster.actor_trainer, os.path.join(checkpoint_dir, "actor"), checkpoint_step)
-    rl_cluster.sync_weights()
-    rl_cluster.global_steps = 0
-  reward_fns = (build_reward_fns(trainer_config, lambda fn: _RewardFn(fn, trainer_config))
-                if reward_funcs is None and environment_factory is None else [] if reward_funcs is None
-                else [reward_funcs] if callable(reward_funcs) else list(reward_funcs))
-  if trainer_config.rl.use_agentic_rollout:
-    grpo_config = agentic_grpo_learner.GRPOConfig(
-        num_generations=trainer_config.rl.num_generations, num_iterations=trainer_config.rl.num_iterations,
-        beta=trainer_config.rl.grpo_beta, epsilon=trainer_config.rl.grpo_epsilon, loss_algo=trainer_config.rl.loss_algo,
-        loss_agg_mode=trainer_config.rl.loss_agg_mode,
-        max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
-        max_concurrency=trainer_config.rl.max_concurrency, off_policy_steps=trainer_config.rl.off_policy_steps,
-        system_prompt=trainer_config.rl.system_prompt, epsilon_high=trainer_config.rl.epsilon_high,
-        use_rollout_logps=trainer_config.rl.use_rollout_logps, reward_num_workers=trainer_config.reward_num_workers,
-        reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
-    )
-    max_logging.log("GRPO config resolved:\n" + "\n".join(f"  {key} = {value!r}" for key, value in sorted(dataclasses.asdict(grpo_config).items())))
-    if environment_factory is None:
-      template_config = load_data_template_from_file(_template_path(trainer_config.data_template_path))
-      if template_config is None:
-        raise ValueError(f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}")
-      chat_parser = utils_rl.MaxTextChatParser(model_tokenizer, template_config, trainer_config)
+  try:
+    if checkpoint_step is not None or lifecycle is not None:
+      cluster_config.training_config.checkpoint_root_directory = checkpoint_dir
+      actor_directory = None if checkpoint_dir is None else os.path.join(checkpoint_dir, "actor")
+      manager = checkpoint_manager
+      if manager is None and lifecycle is not None:
+        manager = TrainingCheckpointManager(actor_directory, checkpointing_options)
+      if resume is True and checkpoint_step is None and manager is not None:
+        checkpoint_step = manager.latest_step()
+      if resume is True and checkpoint_step is None and (manager is None or manager.latest_step() is None):
+        raise ValueError("No training checkpoint is available to resume.")
+      with jax.set_mesh(actor_mesh):
+        restore_trainer_step(rl_cluster.actor_trainer, actor_directory, checkpoint_step, manager)
+      if checkpoint_step is not None:
+        rl_cluster.sync_weights()
+        rl_cluster.global_steps = 0
+    if lifecycle is not None:
+      lifecycle.rl_cluster = rl_cluster
+      lifecycle.native_trainer = rl_cluster.actor_trainer
+      lifecycle.reward_fns = None
+      lifecycle.callback_handler.optimizer = rl_cluster.actor_trainer.optimizer
+      lifecycle.callback_handler.lr_scheduler = learning_rate_schedule
+    reward_fns = (build_reward_fns(trainer_config, lambda fn: _RewardFn(fn, trainer_config))
+                  if reward_funcs is None and environment_factory is None else [] if reward_funcs is None
+                  else [reward_funcs] if callable(reward_funcs) else list(reward_funcs))
+    if trainer_config.rl.use_agentic_rollout:
+      grpo_config = agentic_grpo_learner.GRPOConfig(
+          num_generations=trainer_config.rl.num_generations, num_iterations=trainer_config.rl.num_iterations,
+          beta=trainer_config.rl.grpo_beta, epsilon=trainer_config.rl.grpo_epsilon, loss_algo=trainer_config.rl.loss_algo,
+          loss_agg_mode=trainer_config.rl.loss_agg_mode,
+          max_response_length=trainer_config.max_target_length - trainer_config.max_prefill_predict_length,
+          max_concurrency=trainer_config.rl.max_concurrency, off_policy_steps=trainer_config.rl.off_policy_steps,
+          system_prompt=trainer_config.rl.system_prompt, epsilon_high=trainer_config.rl.epsilon_high,
+          use_rollout_logps=trainer_config.rl.use_rollout_logps, reward_num_workers=trainer_config.reward_num_workers,
+          reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+      )
+      max_logging.log("GRPO config resolved:\n" + "\n".join(f"  {key} = {value!r}" for key, value in sorted(dataclasses.asdict(grpo_config).items())))
+      if environment_factory is None:
+        template_config = load_data_template_from_file(_template_path(trainer_config.data_template_path))
+        if template_config is None:
+          raise ValueError(f"Data template is required for AgenticGRPOLearner but failed to load from {trainer_config.data_template_path}")
+        chat_parser = utils_rl.MaxTextChatParser(model_tokenizer, template_config, trainer_config)
+      else:
+        with open(os.path.join(MAXTEXT_PKG_DIR, "assets/tokenizers/qwen3-tokenizer/tokenizer_config.json"),
+                  encoding="utf-8") as template_file:
+          expected_template = json.load(template_file)["chat_template"]
+        chat_parser = QwenFactoryParser(model_tokenizer, expected_template)
+        agent_class, env_class = FactoryAgent, FactoryEnvironment
+        env_kwargs = {"environment_factory": environment_factory, "has_reward_funcs": bool(reward_fns)}
+        if reward_fns:
+          if trainer_config.reward_num_workers not in (0, 1):
+            raise ValueError("environment_factory with reward_funcs requires reward_num_workers 0 or 1.")
+          environment_registry = EnvironmentRegistry()
+          env_kwargs["environment_registry"] = environment_registry
+      agentic_kwargs = {
+          key: value for key, value in {
+              "agent_class": agent_class, "agent_kwargs": agent_kwargs,
+              "env_class": env_class, "env_kwargs": env_kwargs,
+          }.items() if value is not None
+      }
+      learner_class = FactoryGRPOLearner if environment_factory is not None and reward_fns else agentic_grpo_learner.GRPOLearner
+      learner_kwargs = {"environment_registry": environment_registry} if learner_class is FactoryGRPOLearner else {}
+      rl_trainer = learner_class(
+          rl_engine=rl_cluster, reward_fns=reward_fns, algo_config=grpo_config, chat_parser=chat_parser,
+          metric_fns=[utils_rl.get_correctness_metrics] if environment_factory is None else None,
+          **agentic_kwargs, **learner_kwargs,
+      )
     else:
-      with open(os.path.join(MAXTEXT_PKG_DIR, "assets/tokenizers/qwen3-tokenizer/tokenizer_config.json"),
-                encoding="utf-8") as template_file:
-        expected_template = json.load(template_file)["chat_template"]
-      chat_parser = QwenFactoryParser(model_tokenizer, expected_template)
-      agent_class, env_class = FactoryAgent, FactoryEnvironment
-      env_kwargs = {"environment_factory": environment_factory, "has_reward_funcs": bool(reward_fns)}
-      if reward_fns:
-        if trainer_config.reward_num_workers not in (0, 1):
-          raise ValueError("environment_factory with reward_funcs requires reward_num_workers 0 or 1.")
-        environment_registry = EnvironmentRegistry()
-        env_kwargs["environment_registry"] = environment_registry
-    agentic_kwargs = {
-        key: value for key, value in {
-            "agent_class": agent_class, "agent_kwargs": agent_kwargs,
-            "env_class": env_class, "env_kwargs": env_kwargs,
-        }.items() if value is not None
-    }
-    learner_class = FactoryGRPOLearner if environment_factory is not None and reward_fns else agentic_grpo_learner.GRPOLearner
-    learner_kwargs = {"environment_registry": environment_registry} if learner_class is FactoryGRPOLearner else {}
-    rl_trainer = learner_class(
-        rl_engine=rl_cluster, reward_fns=reward_fns, algo_config=grpo_config, chat_parser=chat_parser,
-        metric_fns=[utils_rl.get_correctness_metrics] if environment_factory is None else None,
-        **agentic_kwargs, **learner_kwargs,
-    )
-  else:
-    grpo_config = grpo_learner.GRPOConfig(
-        num_generations=trainer_config.rl.num_generations, num_iterations=trainer_config.rl.num_iterations,
-        beta=trainer_config.rl.grpo_beta, epsilon=trainer_config.rl.grpo_epsilon, loss_algo=trainer_config.rl.loss_algo,
-        loss_agg_mode=trainer_config.rl.loss_agg_mode, reward_num_workers=trainer_config.reward_num_workers,
-        reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
-    )
-    max_logging.log("GRPO config resolved:\n" + "\n".join(f"  {key} = {value!r}" for key, value in sorted(dataclasses.asdict(grpo_config).items())))
-    rl_trainer = grpo_learner.GRPOLearner(rl_engine=rl_cluster, reward_fns=reward_fns, algo_config=grpo_config)
+      grpo_config = grpo_learner.GRPOConfig(
+          num_generations=trainer_config.rl.num_generations, num_iterations=trainer_config.rl.num_iterations,
+          beta=trainer_config.rl.grpo_beta, epsilon=trainer_config.rl.grpo_epsilon, loss_algo=trainer_config.rl.loss_algo,
+          loss_agg_mode=trainer_config.rl.loss_agg_mode, reward_num_workers=trainer_config.reward_num_workers,
+          reward_worker_timeout_seconds=trainer_config.reward_worker_timeout_seconds,
+      )
+      max_logging.log("GRPO config resolved:\n" + "\n".join(f"  {key} = {value!r}" for key, value in sorted(dataclasses.asdict(grpo_config).items())))
+      rl_trainer = grpo_learner.GRPOLearner(rl_engine=rl_cluster, reward_fns=reward_fns, algo_config=grpo_config)
+  except BaseException:
+    release_metrics_logger(rl_cluster.actor_trainer.metrics_logger, close_backends=True)
+    raise
   return rl_cluster, rl_trainer, optimizer, reward_fns
 
 
@@ -443,6 +487,8 @@ def _train(
     train_dataset=None, eval_dataset=None, train_iterator=None, eval_iterator=None, goodput_recorder=None,
     checkpoint_step=None, metric_backend=None, report_to=None,
     agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
+    resume=None, optimizer=None, learning_rate_schedule=None, lifecycle=None, eos_token_ids=None,
+    checkpoint_manager=None, evaluation_only=False,
 ):
   maxtext_vllm_adapter.register()
   if model_tokenizer is None:
@@ -500,37 +546,60 @@ def _train(
         metric_backend=metric_backend, report_to=report_to,
         agent_class=agent_class, agent_kwargs=agent_kwargs, env_class=env_class, env_kwargs=env_kwargs,
         reward_funcs=reward_funcs, environment_factory=environment_factory,
+        resume=resume, optimizer=optimizer, learning_rate_schedule=learning_rate_schedule, lifecycle=lifecycle,
+        eos_token_ids=eos_token_ids,
+        checkpoint_manager=checkpoint_manager,
+        evaluation_only=evaluation_only,
     )
-  if trainer_config.num_test_batches > 0:
-    rl_cluster.rollout.update_params(nnx.state(rl_cluster.actor_trainer.model, nnx.Param))
-    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
-        trainer_config, eval_iterator, rl_cluster=rl_cluster, num_passes=trainer_config.num_eval_passes,
-        corr_lst=trainer_config.eval_corr_lst, make_lst=trainer_config.eval_make_lst, reward_fns=reward_fns,
-    )
-    max_logging.warning(
-        f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
-        f" {format_accuracy=}%, {mean_reward=:.4f}"
-    )
-  if trainer_config.load_checkpoint_only_once:
-    ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
-  utils_rl.install_training_hooks(
-      rl_cluster, trainer_config, eval_iterator, reward_fns, goodput_recorder=goodput_recorder, evaluator=evaluate
-  )
-  rl_trainer.train(train_iterator)
-  if trainer_config.load_checkpoint_only_once:
-    ref_state_after = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
-    check = jax.tree_util.tree_map(jax.numpy.array_equal, ref_state_before, ref_state_after)
-    if not jax.tree_util.tree_all(check):
-      raise ValueError("Reference model parameters changed during training!")
-  if trainer_config.num_test_batches > 0:
-    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
-        trainer_config, eval_iterator, rl_cluster=rl_cluster, num_passes=trainer_config.num_eval_passes,
-        corr_lst=trainer_config.eval_corr_lst, make_lst=trainer_config.eval_make_lst, reward_fns=reward_fns,
-    )
-    max_logging.warning(
-        f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
-        f" {format_accuracy=}%, {mean_reward=:.4f}"
-    )
+  if evaluation_only:
+    return rl_cluster, rl_trainer, optimizer, reward_fns, eval_iterator
+  engine_closed = False
+  try:
+    if lifecycle is not None:
+      lifecycle.reward_fns = reward_fns
+      begin_training(rl_cluster.actor_trainer, lifecycle)
+    if trainer_config.num_test_batches > 0 and lifecycle is None:
+      rl_cluster.rollout.update_params(nnx.state(rl_cluster.actor_trainer.model, nnx.Param))
+      (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+          trainer_config, eval_iterator, rl_cluster=rl_cluster, num_passes=trainer_config.num_eval_passes,
+          corr_lst=trainer_config.eval_corr_lst, make_lst=trainer_config.eval_make_lst, reward_fns=reward_fns,
+      )
+      max_logging.warning(
+          f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
+          f" {format_accuracy=}%, {mean_reward=:.4f}"
+      )
+    if trainer_config.load_checkpoint_only_once:
+      ref_state_before = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+    if lifecycle is None:
+      utils_rl.install_training_hooks(
+          rl_cluster, trainer_config, eval_iterator, reward_fns, goodput_recorder=goodput_recorder, evaluator=evaluate
+      )
+    try:
+      if lifecycle is not None and lifecycle.control.should_training_stop:
+        rl_cluster.close()
+      else:
+        rl_trainer.train(train_iterator)
+    except StopTraining:
+      if lifecycle is None:
+        raise
+    # Tunix RL learners close the engine, including its metrics backends, on every normal return from train.
+    engine_closed = True
+    if trainer_config.load_checkpoint_only_once:
+      ref_state_after = nnx.to_pure_dict(nnx.state(reference_model.base, nnx.Param))
+      check = jax.tree_util.tree_map(jax.numpy.array_equal, ref_state_before, ref_state_after)
+      if not jax.tree_util.tree_all(check):
+        raise ValueError("Reference model parameters changed during training!")
+    if trainer_config.num_test_batches > 0 and lifecycle is None:
+      (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+          trainer_config, eval_iterator, rl_cluster=rl_cluster, num_passes=trainer_config.num_eval_passes,
+          corr_lst=trainer_config.eval_corr_lst, make_lst=trainer_config.eval_make_lst, reward_fns=reward_fns,
+      )
+      max_logging.warning(
+          f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
+          f" {format_accuracy=}%, {mean_reward=:.4f}"
+      )
+  finally:
+    release_metrics_logger(rl_cluster.actor_trainer.metrics_logger, close_backends=not engine_closed)
   return rl_cluster, rl_trainer, optimizer, reward_fns, eval_iterator
 
 
@@ -540,6 +609,8 @@ def train(
     train_dataset=None, eval_dataset=None, train_iterator=None, eval_iterator=None, goodput_recorder=None,
     checkpoint_step=None, metric_backend=None, report_to=None,
     agent_class=None, agent_kwargs=None, env_class=None, env_kwargs=None, reward_funcs=None, environment_factory=None,
+    resume=None, optimizer=None, learning_rate_schedule=None, lifecycle=None, eos_token_ids=None,
+    checkpoint_manager=None,
 ):
   if environment_factory is not None:
     if not trainer_config.rl.use_agentic_rollout:
@@ -579,6 +650,9 @@ def train(
         report_to=report_to,
         agent_class=agent_class, agent_kwargs=agent_kwargs, env_class=env_class, env_kwargs=env_kwargs,
         reward_funcs=reward_funcs, environment_factory=environment_factory,
+        resume=resume, optimizer=optimizer, learning_rate_schedule=learning_rate_schedule, lifecycle=lifecycle,
+        eos_token_ids=eos_token_ids,
+        checkpoint_manager=checkpoint_manager,
     )
   record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return result

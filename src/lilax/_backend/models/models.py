@@ -19,7 +19,7 @@ from lilax._backend.layers.encoders import AudioEncoder, VisionEncoder
 from lilax._backend.layers.multi_token_prediction import MultiTokenPredictionBlock
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.multimodal import processor as mm_processor
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed import sharding
 
 

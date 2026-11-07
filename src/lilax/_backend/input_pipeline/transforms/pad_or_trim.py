@@ -9,6 +9,19 @@ from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.multimodal import utils as mm_utils
 
 
+class PadBatchToSize(grain.MapTransform):
+  """Retain the final evaluation records in a full, zero-weight batch."""
+
+  def __init__(self, batch_size, pad_id):
+    self.batch_size = batch_size
+    self.pad_id = pad_id
+
+  def map(self, batch):
+    return {name: np.pad(value, [(0, self.batch_size - value.shape[0]), *[(0, 0)] * (value.ndim - 1)],
+                         constant_values=self.pad_id if name in ("inputs", "targets") or name.endswith("_ids") else 0)
+            for name, value in batch.items()}
+
+
 @dataclasses.dataclass
 class PadOrTrimToMaxLength(grain.MapTransform):
   """Pads or trims each input to the specified length.
@@ -152,7 +165,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         if self.config.model_name is None:
           raise ValueError("model_name must be provided when padding images")
         element["images"] = self._pad_image_and_mask(element["images"])
-      elif key == "completion_mask" or (preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position"))):
+      elif key == "completion_mask" or key.endswith(("_segmentation", "_position")):
         element[key] = self._pad_text(element[key], self.max_length, 0)
       elif "true_length" not in key:
         element[key] = self._pad_text(element[key], self.max_length, self.pad_id)

@@ -46,8 +46,8 @@ from lilax._backend.input_pipeline import grain_tokenizer
 from lilax._backend.input_pipeline import dpo_utils
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.input_pipeline.mmap._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
-from lilax._backend.utils import gcs_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 
 
 def construct_hf_dataset_path(hf_path: str, hf_train_files: str | None = None, split: str = "train") -> str:
@@ -90,7 +90,7 @@ def construct_tfds_tfrecord_path(dataset_path: str, dataset_name: str, split: st
 def find_data_files(data_file_pattern, hf_access_token=None):
   """Find data files matching the pattern."""
   if data_file_pattern.startswith("gs://"):
-    data_files = gcs_utils.gcs_glob_pattern(data_file_pattern)
+    data_files = gcs.gcs_glob_pattern(data_file_pattern)
   elif data_file_pattern.startswith("hf://"):
     fs = HfFileSystem(token=hf_access_token)
     stripped_pattern = data_file_pattern[len("hf://") :]
@@ -433,6 +433,7 @@ def pretrain_preprocessing_pipeline(
     tokenize,
     grain_worker_count,
     grain_per_worker_buffer_size,
+    *, processing_class=None,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   if config.grain_file_type in ("mmap", "mmap_npy"):
@@ -453,7 +454,7 @@ def pretrain_preprocessing_pipeline(
   assert len(data_columns) == 1
   text_column = data_columns[0]
 
-  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
+  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config, processing_class=processing_class)
 
   if tokenize:
     if config.use_truncation:
@@ -725,8 +726,6 @@ def vision_sft_preprocessing_pipeline(
   dataset = dataset.map(batch_transforms.ExtractImagesAndMasks())
 
   batch_size = data_processing_utils.get_local_batch_size(config)
-  if config.use_tunix_gradient_accumulation:
-    batch_size = batch_size // config.gradient_accumulation_steps
 
   dataset = dataset.batch(batch_size, drop_remainder=True)
   dataset = dataset.map(batch_transforms.FoldImagesIntoBatch(model_name=config.model_name))
@@ -788,6 +787,7 @@ def make_grain_train_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    *, processing_class=None,
 ):
   """Load, preprocess dataset and return iterators"""
   assert (
@@ -795,6 +795,8 @@ def make_grain_train_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  if pipeline_fn is pretrain_preprocessing_pipeline:
+    pipeline_fn = functools.partial(pipeline_fn, processing_class=processing_class)
   mmap_npy_num_samples = (
       config.steps * config.global_batch_size_to_load
       if config.grain_file_type == "mmap_npy" and getattr(config, "steps", 0) > 0
@@ -937,6 +939,7 @@ def make_grain_eval_iterator(
     config: ml_collections.ConfigDict,
     global_mesh,
     process_indices,
+    *, processing_class=None,
 ):
   """Load, preprocess dataset and return iterators"""
   assert (
@@ -944,6 +947,8 @@ def make_grain_eval_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  if pipeline_fn is pretrain_preprocessing_pipeline:
+    pipeline_fn = functools.partial(pipeline_fn, processing_class=processing_class)
   mmap_npy_eval_num_samples = None
   if config.grain_file_type == "mmap_npy" and hasattr(config, "eval_steps") and config.eval_steps > 0:
     eval_interval = getattr(config, "eval_interval", 0)

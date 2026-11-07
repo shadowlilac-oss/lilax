@@ -1,6 +1,6 @@
 """Remapping of tokenizer pad tokens that collide with EOS."""
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 _DEEPSEEK_PAD_TOKEN = "<｜▁pad▁｜>"
 

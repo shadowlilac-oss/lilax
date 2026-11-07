@@ -8,8 +8,8 @@ import numpy as np
 import decord
 
 from lilax._backend.multimodal.qwen3_omni.video.sampling import calculate_video_frame_range, smart_nframes
-from lilax._backend.utils import gcs_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.observability import max_logging
 
 
 def _read_video_decord(video_path, video_start=0.0, video_end=None) -> tuple[np.ndarray, float]:

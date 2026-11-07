@@ -25,11 +25,11 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
     print_peak_memory,
     save_adapter_files,
 )
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import system_info
 from lilax._backend.utils.globals import HF_IDS
 from lilax._backend.utils.lora_utils import sync_lora_metadata
-from lilax._backend.utils.model_creation.scan_layers_sync import verify_and_sync_scan_layers
+from lilax._backend.models.creation.scan_layers_sync import verify_and_sync_scan_layers
 
 
 def _get_lora_delta(key, lora_state_dict, lora_scaling):

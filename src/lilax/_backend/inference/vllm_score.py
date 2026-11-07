@@ -13,7 +13,7 @@ from vllm.sampling_params import SamplingParams
 
 from lilax._backend.inference import vllm_decode
 import lilax._backend.integration.vllm.maxtext_vllm_adapter as adapter
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 DEFAULT_TOP_K = 20
 TokenIds = Sequence[int]

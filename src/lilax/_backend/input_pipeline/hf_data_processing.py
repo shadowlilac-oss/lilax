@@ -17,6 +17,8 @@ from lilax._backend.input_pipeline.conversation import conversational_columns
 from lilax._backend.input_pipeline.transforms import hf_tokenization
 from lilax._backend.input_pipeline.sft import pad_token_remap
 from lilax._backend.input_pipeline.sft import sft_masking
+from lilax._backend.input_pipeline.sft import formatting
+from lilax._backend.input_pipeline.transforms.collation import BatchCollator, PreferenceBatchCollator
 from lilax._backend.input_pipeline.multimodal import sft_preprocessing
 from lilax._backend.input_pipeline.multimodal import batch_transforms
 from lilax._backend.input_pipeline.multimodal import qwen3_omni_position_transform
@@ -26,7 +28,7 @@ from lilax._backend.input_pipeline.transforms import target_shift
 from lilax._backend.input_pipeline.packing import reformat_packing
 from lilax._backend.input_pipeline import instruction_data_processing
 from lilax._backend.input_pipeline import multihost_dataloading
-from lilax._backend.utils import elastic_utils
+from lilax._backend.utils import elastic_utils as elastic
 
 
 def _get_pad_id(tokenizer):
@@ -39,18 +41,39 @@ def _get_pad_id(tokenizer):
   return pad_id
 
 
-def _sft_data_columns(dataset, config, column_name):
+def _dataset_columns(dataset):
+  features = dataset.features or dataset.column_names
+  return next(iter(dataset), {}) if features is None else features
+
+
+def _language_model_columns(dataset, columns, tokenize, text_field):
+  features = _dataset_columns(dataset)
+  if set(columns).issubset(features):
+    return columns
+  return [text_field if tokenize else "input_ids"]
+
+
+def _sft_data_columns(dataset, config, column_name, text_field="text"):
   columns = getattr(config, column_name)
   if column_name in config._pydantic_config.model_fields_set:
     return columns
-  features = dataset.features or dataset.column_names
-  if features is None:
-    raise ValueError(f"Dataset features are unavailable; configure {column_name} explicitly.")
-  supported = (["messages"], ["prompt", "completion"], ["question", "answer"])
+  features = _dataset_columns(dataset)
+  supported = (["messages"], ["prompt", "completion"], ["question", "answer"], [text_field])
   matches = [candidate for candidate in supported if set(candidate).issubset(features)]
   if len(matches) != 1:
-    raise ValueError(f"Expected one supported SFT column layout, found {matches}; configure {column_name} explicitly.")
+    raise ValueError(f"Select one SFT column layout on the dataset or provide formatting_func; found {matches}.")
   return matches[0]
+
+
+def _dpo_data_columns(dataset, config, column_name):
+  if column_name in config._pydantic_config.model_fields_set:
+    return getattr(config, column_name)
+  features = _dataset_columns(dataset)
+  if all(name in features for name in ("prompt", "chosen", "rejected")):
+    return ["prompt", "chosen", "rejected"]
+  if all(name in features for name in ("chosen", "rejected")):
+    return ["chosen", "rejected"]
+  raise ValueError("DPO requires chosen/rejected columns and an optional prompt column.")
 
 
 def _get_training_objective_transform(
@@ -87,13 +110,16 @@ def _get_training_objective_transform(
   return None
 
 
-def add_default_prompt_if_missing(dataset, text_columns, config):
-  """Inject default prompt if prompt column is missing in dataset (e.g. COCO captioning)."""
-  prompt_col = text_columns[0]
-  features = getattr(dataset, "features", None) or getattr(dataset, "column_names", None)
-  if features is None or prompt_col not in features:
-    dataset = dataset.map(lambda ex: {**ex, prompt_col: config.default_prompt})
-  return dataset
+def _vision_sft_columns(dataset, text_columns):
+  features = _dataset_columns(dataset)
+  if len(text_columns) == 2 and set(text_columns).issubset(features):
+    return text_columns
+  matches = [columns for columns in (["prompt", "completion"], ["query", "response"], ["question", "answer"])
+             if set(columns).issubset(features)]
+  if len(matches) != 1:
+    raise ValueError("Multimodal SFT requires prompt/completion, query/response or question/answer columns. "
+                     "Rename or transform your dataset to supply the prompt and response explicitly.")
+  return matches[0]
 
 
 def format_sharegpt(example):
@@ -126,19 +152,22 @@ def vision_sft_preprocessing_pipeline(
     image_column,
     global_batch_size,
     processing_class=None,
+    data_collator=None,
+    is_training=True,
+    tokenize=True,
 ):
   """Pipeline for multimodal SFT with HF dataset."""
   if (
       image_column == "video"
-      and "conversations" in dataset.features
+      and "conversations" in _dataset_columns(dataset)
       and len(text_columns) == 2
-      and text_columns[0] not in dataset.features
+      and text_columns[0] not in _dataset_columns(dataset)
   ):
     dataset = dataset.map(format_sharegpt)
 
-  assert len(text_columns) == 2, f"Need two text_columns for query and response, received {text_columns=}"
+  text_columns = _vision_sft_columns(dataset, text_columns)
   if config.elastic_enabled:
-    local_batch_size = elastic_utils.get_local_batch_size(config)
+    local_batch_size = elastic.get_local_batch_size(config)
   else:
     local_batch_size = global_batch_size // jax.process_count()
   if config.use_tunix_gradient_accumulation:
@@ -146,12 +175,12 @@ def vision_sft_preprocessing_pipeline(
   else:
     batch_size = local_batch_size
 
-  if config.enable_data_shuffling and config.num_epoch > 1:
+  if is_training and config.enable_data_shuffling and config.num_epoch > 1:
     epoch_datasets = [dataset.shuffle(seed=config.data_shuffle_seed + i) for i in range(config.num_epoch)]
     dataset = datasets.concatenate_datasets(epoch_datasets)
-  elif config.enable_data_shuffling:
+  elif is_training and config.enable_data_shuffling:
     dataset = dataset.shuffle(seed=config.data_shuffle_seed)
-  elif config.num_epoch > 1:
+  elif is_training and config.num_epoch > 1:
     dataset = (
         datasets.concatenate_datasets([dataset] * config.num_epoch)
         if isinstance(dataset, datasets.Dataset)
@@ -169,28 +198,22 @@ def vision_sft_preprocessing_pipeline(
     )
     image_column = "images"
 
-  dataset = add_default_prompt_if_missing(dataset, text_columns, config)
   dataset = dataset.select_columns(text_columns + [image_column])
   if image_column != "images":
     dataset = dataset.rename_column(image_column, "images")
 
-  dataset = dataset.map(
-      sft_preprocessing.reformat_prompt,
-      fn_kwargs={
-          "column": text_columns[0],
-          "image_placeholder": config.image_placeholder,
-          "model_name": config.model_name,
-          "video_placeholder": getattr(config, "video_placeholder", "<|video|>"),
-      },
-  )
-  dataset = dataset.map(
-      sft_preprocessing.reformat_response,
-      fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
-  )
-  dataset = dataset.map(
-      sft_preprocessing.pre_process_image_sft,
-      fn_kwargs={"image_column": "images", "config": config},
-  )
+  if tokenize:
+    dataset = dataset.map(
+        sft_preprocessing.reformat_prompt,
+        fn_kwargs={
+            "column": text_columns[0], "image_placeholder": config.image_placeholder,
+            "model_name": config.model_name, "video_placeholder": getattr(config, "video_placeholder", "<|video|>"),
+        },
+    )
+    dataset = dataset.map(
+        sft_preprocessing.reformat_response,
+        fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
+    )
   if processing_class is None:
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.tokenizer_path,
@@ -203,21 +226,12 @@ def vision_sft_preprocessing_pipeline(
   else:
     tokenizer = processing_class.tokenizer if isinstance(processing_class, transformers.ProcessorMixin) else processing_class
   pad_id = _get_pad_id(tokenizer)
-  dataset = dataset.map(
-      hf_tokenization.tokenization,
-      batched=True,
-      batch_size=global_batch_size,
-      fn_kwargs={
-          "hf_tokenizer": tokenizer,
-          "truncation": False,
-          "max_length": config.max_target_length,
-          "column_names": text_columns,
-      },
-  )
-  dataset = dataset.map(
-      sft_preprocessing.prepare_text_for_image_fusion,
-      fn_kwargs={"column_name": text_columns[0], "config": config},
-  )
+  if tokenize:
+    dataset = dataset.map(
+        hf_tokenization.tokenization, batched=True, batch_size=global_batch_size,
+        fn_kwargs={"hf_tokenizer": tokenizer, "truncation": False, "max_length": config.max_target_length,
+                   "column_names": text_columns, "add_special_tokens": False},
+    )
   dataset = hf_data_source.HFDataSource(
       dataset=dataset,
       dataloading_host_index=dataloading_host_index,
@@ -226,13 +240,14 @@ def vision_sft_preprocessing_pipeline(
       max_target_length=config.max_target_length,
       data_column_names=text_columns,
   )
-  operations = []
+  operations = [sft_preprocessing.PrepareImageFusion(text_columns[0], config)]
   operations.append(
       sft_masking.SFTPromptMaskingVision(
           query_column=text_columns[0],
           response_column=text_columns[1],
           max_target_length=config.max_target_length,
           pad_id=pad_id,
+          completion_only=config.sft_train_on_completion_only,
       )
   )
   operations.append(
@@ -244,7 +259,9 @@ def vision_sft_preprocessing_pipeline(
       )
   )
   operations.append(batch_transforms.ExtractImagesAndMasks())
-  operations.append(grain.Batch(batch_size=batch_size, drop_remainder=True))
+  operations.append(grain.Batch(batch_size=batch_size, drop_remainder=is_training))
+  if not is_training:
+    operations.append(pad_or_trim.PadBatchToSize(batch_size, pad_id))
   operations.append(batch_transforms.FoldImagesIntoBatch(model_name=config.model_name))
   if config.use_mrope:
     operations.append(
@@ -257,7 +274,8 @@ def vision_sft_preprocessing_pipeline(
             keep_aux_fields=False,
         )
     )
-  operations.append(target_shift.ShiftData(ignored_ids=[pad_id], axis=1))
+  operations.append(target_shift.ShiftData(ignored_ids=[pad_id], axis=1) if data_collator is None
+                    else BatchCollator(data_collator, [pad_id]))
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
       num_epochs=1,
@@ -313,11 +331,12 @@ def preprocessing_pipeline(
     formatting_func_path: Optional[str] = None,
     formatting_func_kwargs: Optional[dict] = None,
     processing_class=None,
+    data_collator=None,
 ):
   """Pipeline for preprocessing HF dataset."""
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
   if config.elastic_enabled:
-    local_batch_size = elastic_utils.get_local_batch_size(config)
+    local_batch_size = elastic.get_local_batch_size(config)
   else:
     local_batch_size = global_batch_size // jax.process_count()
   if use_tunix_gradient_accumulation:
@@ -354,6 +373,18 @@ def preprocessing_pipeline(
   dataset = dataset.select_columns(data_column_names)
   if use_sft and not is_offline:
     pad_token_remap.fix_pad_token_if_needed(tokenizer)
+  plain_text = use_sft and len(data_column_names) == 1 and data_column_names[0] not in ("messages", "conversations")
+  plain_pairs = (use_sft and data_column_names == ["prompt", "completion"]
+                 and not conversational_columns.is_conversational(_dataset_columns(dataset), data_column_names))
+  if plain_text and not is_offline:
+    dataset = dataset.map(formatting.text_segments, fn_kwargs={"text_field": data_column_names[0]})
+  elif plain_pairs and not is_offline:
+    dataset = dataset.map(formatting.paired_segments,
+                          fn_kwargs={"prompt_field": data_column_names[0], "completion_field": data_column_names[1],
+                                     "tokenizer": tokenizer if tokenize else None},
+                          remove_columns=[data_column_names[1]])
+    data_column_names = [data_column_names[0]]
+  elif use_sft and not is_offline:
     if not chat_template:
       chat_template = instruction_data_processing.load_chat_template_from_file(chat_template_path)
     data_processing_utils.validate_and_configure_sft_columns(data_column_names, tokenizer, chat_template)
@@ -364,7 +395,7 @@ def preprocessing_pipeline(
         formatting_func_kwargs=formatting_func_kwargs,
     )
     assert conversational_columns.is_conversational(
-        dataset.features, data_column_names
+        _dataset_columns(dataset), data_column_names
     ), "Dataset is not in conversational format."
     if len(data_column_names) > 1:
       combined_column_name = "messages"
@@ -377,7 +408,7 @@ def preprocessing_pipeline(
           remove_columns=data_column_names,
           features=dataset_features,
       )
-    data_column_names = list(dataset.features.keys())
+      data_column_names = [combined_column_name]
     dataset = dataset.map(
         chat_template_formatting.apply_chat_template,
         fn_kwargs={
@@ -390,15 +421,22 @@ def preprocessing_pipeline(
   pad_id = _get_pad_id(tokenizer)
   if is_offline and pad_id == -1:
     pad_id = 0
-  if tokenize and not is_offline:
+  if tokenize and not is_offline and not use_sft and not use_dpo and not config.use_truncation:
+    if len(data_column_names) != 1:
+      raise ValueError("Tokenize-and-chunk preprocessing requires one text column.")
+    dataset = dataset.map(hf_tokenization.chunk_tokenization, batched=True,
+                          fn_kwargs={"hf_tokenizer": tokenizer, "max_length": max_target_length,
+                                     "column_name": data_column_names[0]})
+  elif tokenize and not is_offline and not plain_pairs:
     dataset = dataset.map(
         hf_tokenization.tokenization,
         batched=True,
         fn_kwargs={
             "hf_tokenizer": tokenizer,
-            "truncation": not use_sft,
+            "truncation": config.use_truncation and not use_sft,
             "max_length": max_target_length,
             "column_names": data_column_names,
+            "add_special_tokens": not use_sft or plain_text,
         },
     )
   if is_offline and isinstance(dataset, datasets.IterableDataset):
@@ -452,6 +490,8 @@ def preprocessing_pipeline(
     else:
       operations.append(pad_or_trim.PadOrTrimToMaxLength(max_target_length, pad_id, config=config))
     operations.append(grain.Batch(batch_size=batch_size, drop_remainder=drop_remainder))
+    if not drop_remainder:
+      operations.append(pad_or_trim.PadBatchToSize(batch_size, pad_id))
 
   if is_offline:
     target_transform = target_shift.ShiftData(ignored_ids=[pad_id], axis=1) if shift else None
@@ -465,7 +505,15 @@ def preprocessing_pipeline(
         pad_id=pad_id,
         bos_token_id=tokenizer.bos_token_id,
     )
-  if target_transform is not None:
+  if data_collator is not None:
+    if use_dpo:
+      operations.append(PreferenceBatchCollator(data_collator, pad_id, max_target_length, config.dpo.max_prompt_length))
+    elif getattr(config, "training_objective", "causal_lm") == "block_diffusion":
+      operations.append(BatchCollator(data_collator, [None], shift=False))
+      operations.append(target_transform)
+    else:
+      operations.append(BatchCollator(data_collator, [pad_id] if is_offline else [pad_id, tokenizer.bos_token_id]))
+  elif target_transform is not None:
     operations.append(target_transform)
   dummy_index_sampler = grain.IndexSampler(
       num_records=len(dataset),
@@ -495,6 +543,9 @@ def make_hf_train_iterator(
     *,
     dataset=None,
     processing_class=None,
+    formatting_func=None,
+    dataset_text_field="text",
+    data_collator=None,
 ):
   """Load, preprocess dataset and return iterators."""
   if dataset is None:
@@ -509,10 +560,17 @@ def make_hf_train_iterator(
     )
   else:
     train_ds = dataset
+  if formatting_func is not None:
+    train_ds = formatting.format_dataset(train_ds, formatting_func, dataset_text_field)
+    dataset = train_ds
   is_offline = getattr(config, "is_offline_distillation", False)
   data_columns = config.train_data_columns
+  if dataset is not None and not (config.use_sft or config.use_dpo or is_offline):
+    data_columns = _language_model_columns(dataset, data_columns, config.tokenize_train_data, dataset_text_field)
+  if dataset is not None and config.use_dpo:
+    data_columns = _dpo_data_columns(dataset, config, "train_data_columns")
   if dataset is not None and config.use_sft and not config.use_multimodal and not is_offline:
-    data_columns = _sft_data_columns(dataset, config, "train_data_columns")
+    data_columns = _sft_data_columns(dataset, config, "train_data_columns", dataset_text_field)
   if config.use_sft and config.use_multimodal and not is_offline:
     train_iter = vision_sft_preprocessing_pipeline(
         dataset=train_ds,
@@ -523,7 +581,9 @@ def make_hf_train_iterator(
         text_columns=config.train_data_columns,
         image_column=config.train_image_column,
         global_batch_size=config.global_batch_size_to_load,
+        tokenize=config.tokenize_train_data,
         processing_class=processing_class,
+        data_collator=data_collator,
     )
   else:
     train_iter = preprocessing_pipeline(
@@ -557,6 +617,7 @@ def make_hf_train_iterator(
         formatting_func_kwargs=config.formatting_func_kwargs,
         grain_worker_count=config.grain_worker_count,
         processing_class=processing_class,
+        data_collator=data_collator,
     )
   return train_iter
 
@@ -568,6 +629,9 @@ def make_hf_eval_iterator(
     *,
     dataset=None,
     processing_class=None,
+    formatting_func=None,
+    dataset_text_field="text",
+    data_collator=None,
 ):
   """Make Hugging Face evaluation iterator. Load and preprocess eval dataset: and return iterator."""
   if dataset is None:
@@ -582,10 +646,17 @@ def make_hf_eval_iterator(
     )
   else:
     eval_ds = dataset
+  if formatting_func is not None:
+    eval_ds = formatting.format_dataset(eval_ds, formatting_func, dataset_text_field)
+    dataset = eval_ds
   is_offline = getattr(config, "is_offline_distillation", False)
   data_columns = config.eval_data_columns
+  if dataset is not None and not (config.use_sft or config.use_dpo or is_offline):
+    data_columns = _language_model_columns(dataset, data_columns, config.tokenize_eval_data, dataset_text_field)
+  if dataset is not None and config.use_dpo:
+    data_columns = _dpo_data_columns(dataset, config, "eval_data_columns")
   if dataset is not None and config.use_sft and not config.use_multimodal and not is_offline:
-    data_columns = _sft_data_columns(dataset, config, "eval_data_columns")
+    data_columns = _sft_data_columns(dataset, config, "eval_data_columns", dataset_text_field)
   if config.use_sft and config.use_multimodal and not is_offline:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
@@ -596,7 +667,10 @@ def make_hf_eval_iterator(
         text_columns=config.eval_data_columns,
         image_column=config.eval_image_column,
         global_batch_size=config.global_batch_size_to_load_eval,
+        tokenize=config.tokenize_eval_data,
         processing_class=processing_class,
+        data_collator=data_collator,
+        is_training=False,
     )
   else:
     eval_iter = preprocessing_pipeline(
@@ -612,6 +686,7 @@ def make_hf_eval_iterator(
         global_batch_size=config.global_batch_size_to_load_eval,
         max_target_length=config.max_target_length,
         shuffle=False,
+        drop_remainder=False,
         data_shuffle_seed=config.data_shuffle_seed,
         add_bos=config.add_bos,
         add_eos=config.add_eos,
@@ -628,5 +703,6 @@ def make_hf_eval_iterator(
         formatting_func_kwargs=config.formatting_func_kwargs,
         grain_worker_count=config.grain_worker_count,
         processing_class=processing_class,
+        data_collator=data_collator,
     )
   return eval_iter

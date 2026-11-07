@@ -36,8 +36,8 @@ def build_training_command(workload: WorkloadConfig) -> str:
     settings.update(use_vertex_tensorboard=False, vertex_tensorboard_project="", vertex_tensorboard_region="")
   payload = json.dumps(settings)
   python = (
-      "import json; from lilax import MaxTextConfig; "
-      "from lilax.trainers.pretraining.trainer import train_pretraining; "
+      "import json; from lilax._backend.configs.inert import MaxTextConfig; "
+      "from lilax._backend.trainers.pre_train.entrypoint import train_pretraining; "
       f"train_pretraining(MaxTextConfig(**json.loads({payload!r})))"
   )
   commands = []

@@ -4,7 +4,8 @@ import os
 
 import jax
 
-from lilax._backend.utils import gcs_utils, max_logging
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.observability import max_logging
 
 
 def maybe_dump_jaxpr(config, p_train_step, train_step_inputs):

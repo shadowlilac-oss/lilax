@@ -7,7 +7,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def make_synthetic_batch(config, shaped_batch, seed=0):

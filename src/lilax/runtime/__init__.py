@@ -8,9 +8,10 @@ from flax.core.spmd import logical_axis_rules
 
 from lilax._backend.configs.runtime import resolve_initialized_config, resolve_runtime_config
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import elastic_utils
+from lilax._backend.utils import elastic_utils as elastic
 from lilax._backend.trainers.post_train.rl.setup import device_allocation
-from lilax.configuration.schema import RLConfig
+from lilax._backend.configs.inert import RLConfig
+from lilax.launch._profile import active_profile
 
 
 class Runtime:
@@ -21,28 +22,35 @@ class Runtime:
     self.config = config
     self.devices = devices
     self.mesh = None
-    self._overrides = {}
+    profile = active_profile()
+    self._profile = profile
+    self._overrides = {} if profile is None else {
+        name: value for name, value in profile.source_values(rl=isinstance(config, RLConfig)).items()
+        if name not in config._explicit_keys or name == "hardware"
+    }
 
   @classmethod
   def for_rl(cls, config, *, devices=None):
     """Partition RL devices before initializing the trainer runtime."""
     if not isinstance(config, RLConfig):
       raise TypeError("RL runtime configuration must be an inert RLConfig.")
-    native_config = resolve_runtime_config(config)
+    runtime = cls(config)
+    native_config = resolve_runtime_config(config, overrides=runtime._overrides)
     trainer_config, sampler_config, trainer_devices, sampler_devices = (
         device_allocation.setup_configs_and_devices_from_config(
-            native_config, resolve_config=lambda overrides: resolve_runtime_config(config, overrides=overrides),
+            native_config,
+            resolve_config=lambda overrides: resolve_runtime_config(config, overrides=runtime._overrides | overrides),
             devices=devices,
         )
     )
-    runtime = cls(config, devices=trainer_devices)
+    runtime.devices = trainer_devices
     runtime.config = trainer_config
     return runtime.initialize(), sampler_config, sampler_devices
 
   def resolve_config(self) -> "Runtime":
     """Resolve native configuration without creating the training mesh."""
     if self.config is self.public_config:
-      self.config = resolve_runtime_config(self.public_config)
+      self.config = resolve_runtime_config(self.public_config, overrides=self._overrides)
     return self
 
   def initialize(
@@ -74,7 +82,7 @@ class Runtime:
     self.config = config
     self._overrides = combined_overrides
     if self.mesh is None:
-      self.mesh = elastic_utils.get_or_build(
+      self.mesh = elastic.get_or_build(
           elastic_retry_cache, "mesh", partial(device_mesh.get_mesh_from_config, self.config, self.devices)
       )
     return self

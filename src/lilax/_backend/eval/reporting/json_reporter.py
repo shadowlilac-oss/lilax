@@ -6,7 +6,7 @@ import logging
 import os
 import tempfile
 
-from lilax._backend.utils.gcs_utils import upload_blob
+from lilax._backend.storage.gcs import upload_blob
 
 logger = logging.getLogger(__name__)
 

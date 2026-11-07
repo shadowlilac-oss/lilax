@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.configs import pyconfig
-from lilax._backend.utils.diloco_sharding import reshape_first_axis_with_diloco
+from lilax._backend.trainers.diloco.diloco_sharding import reshape_first_axis_with_diloco
 from lilax._backend.distributed import sharding
 
 

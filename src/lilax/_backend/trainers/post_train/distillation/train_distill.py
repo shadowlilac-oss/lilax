@@ -11,7 +11,6 @@ from flax.core.spmd import logical_axis_rules
 import jax
 import jax.numpy as jnp
 import optax
-from orbax import checkpoint
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from lilax._backend.common.goodput import (
@@ -23,9 +22,14 @@ from lilax._backend.layers.learn_to_init_layer import apply_lti_model_update
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.distillation import distillation_utils, lti_utils
 from lilax._backend.trainers.post_train.hooks import GoodputTrainingHooks
+from lilax._backend.trainers.post_train.metrics_logging import tensorboard_logging_options
+from lilax._backend.trainers.post_train.scalar_listeners import release_metrics_logger
+from lilax._backend.trainers.post_train.lifecycle import TrainerIterator, begin_training, finish_step, finish_training
+from lilax._backend.trainers.post_train.checkpoint_selection import training_checkpoint_options
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging, maxtext_utils
-from lilax._backend.utils.model_creation import pretrained
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils
+from lilax._backend.models.creation import pretrained
 
 
 class ReportingMetricsLogger(metrics_logger.MetricsLogger):
@@ -45,11 +49,11 @@ class ReportingMetricsLogger(metrics_logger.MetricsLogger):
       self.pending = {}
 
 
-def get_distillation_optimizer(config, max_train_steps):
+def get_distillation_optimizer(config, max_train_steps, learning_rate_schedule=None):
   """Create the MaxText optimizer with an injectable learning rate."""
   if config.opt_type == "muon":
     raise ValueError("Muon optimizer is not currently supported in distillation mode.")
-  schedule = optax.schedules.warmup_cosine_decay_schedule(
+  schedule = learning_rate_schedule if learning_rate_schedule is not None else optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0, peak_value=config.learning_rate,
       warmup_steps=int(config.warmup_steps_fraction * max_train_steps), decay_steps=max_train_steps,
       end_value=config.learning_rate_final_fraction * config.learning_rate,
@@ -323,13 +327,18 @@ def get_maxtext_model(config, mesh: jax.sharding.Mesh) -> nnx.Module:
   return pretrained.from_pretrained(config, mesh=mesh)
 
 
-def build_training_components(student_config, teacher_config, is_offline: bool = False, offline_data_dir: str | None = None):
+def build_training_components(student_config, teacher_config, is_offline: bool = False, offline_data_dir: str | None = None,
+                              *, optimizer=None, learning_rate_schedule=None, processing_class=None):
   """Build the distillation strategy, optimizer, and Tunix training config."""
-  tok = tokenizer.build_tokenizer(
-      tokenizer_path=student_config.tokenizer_path, tokenizer_type=student_config.tokenizer_type,
-      add_bos=student_config.add_bos, add_eos=student_config.add_eos, hf_access_token=student_config.hf_access_token,
-  )
-  pad_id = tok.pad_id if tok.pad_id is not None else 0
+  if processing_class is None:
+    tok = tokenizer.build_tokenizer(
+        tokenizer_path=student_config.tokenizer_path, tokenizer_type=student_config.tokenizer_type,
+        add_bos=student_config.add_bos, add_eos=student_config.add_eos, hf_access_token=student_config.hf_access_token,
+    )
+    pad_id = tok.pad_id if tok.pad_id is not None else 0
+  else:
+    tok = getattr(processing_class, "tokenizer", processing_class)
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else 0
   student_forward_fn = create_forward_fn(student_config)
   teacher_forward_fn = create_forward_fn(teacher_config)
   strategy = distillation_utils.CombinedDistillationStrategy(
@@ -342,11 +351,9 @@ def build_training_components(student_config, teacher_config, is_offline: bool =
       temperature_schedule=student_config.distill_temperature_schedule, beta_end=student_config.distill_beta_end,
       beta_schedule=student_config.distill_beta_schedule, max_steps=student_config.steps,
   )
-  optimizer = get_distillation_optimizer(student_config, student_config.steps)
-  checkpointing_options = checkpoint.CheckpointManagerOptions(
-      save_interval_steps=student_config.checkpoint_period, max_to_keep=student_config.max_num_checkpoints_to_keep,
-      enable_async_checkpointing=student_config.async_checkpointing, create=True,
-  )
+  if optimizer is None:
+    optimizer = get_distillation_optimizer(student_config, student_config.steps, learning_rate_schedule)
+  checkpointing_options = training_checkpoint_options(student_config)
   profiler_options = None
   if student_config.profiler == "xplane":
     profiler_options = profiler.ProfilerOptions(
@@ -354,8 +361,8 @@ def build_training_components(student_config, teacher_config, is_offline: bool =
         profiler_steps=student_config.profiler_steps, set_profile_options=False,
         enable_continuous_profiling=student_config.enable_continuous_profiling,
     )
-  metrics_logging_options = metrics_logger.MetricsLoggerOptions(
-      log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
+  metrics_logging_options = tensorboard_logging_options(
+      student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
   )
   train_config = peft_trainer.TrainingConfig(
       max_steps=student_config.steps, eval_every_n_steps=student_config.eval_interval,
@@ -372,7 +379,7 @@ def train_distill(
     student_model: nnx.Module | None = None, teacher_model: nnx.Module | None = None,
     mesh: jax.sharding.Mesh | None = None, train_iterator: Any = None, eval_iterator: Any = None,
     return_trainer: bool = False, checkpoint_step: int | None = None, report_to=None, reporter_factory=None,
-    checkpoint_manager=None,
+    checkpoint_manager=None, optimizer=None, learning_rate_schedule=None, processing_class=None, lifecycle=None,
 ):
   """Run online or offline teacher-student distillation."""
   if student_config.vocab_size != teacher_config.vocab_size:
@@ -400,7 +407,8 @@ def train_distill(
           student_model=student_model, teacher_model=teacher_model, mesh=mesh,
           train_iterator=train_iterator, eval_iterator=eval_iterator, checkpoint_step=checkpoint_step,
           report_to=report_to, reporter_factory=reporter_factory,
-          checkpoint_manager=checkpoint_manager,
+          checkpoint_manager=checkpoint_manager, optimizer=optimizer, learning_rate_schedule=learning_rate_schedule,
+          processing_class=processing_class, lifecycle=lifecycle,
       )
       job_completed_gracefully = True
   finally:
@@ -415,7 +423,8 @@ def _train_distill_impl(
     goodput_recorder: Any = None, *, student_model: nnx.Module | None = None,
     teacher_model: nnx.Module | None = None, mesh: jax.sharding.Mesh | None = None,
     train_iterator: Any = None, eval_iterator: Any = None, checkpoint_step: int | None = None,
-    report_to=None, reporter_factory=None, checkpoint_manager=None,
+    report_to=None, reporter_factory=None, checkpoint_manager=None, optimizer=None, learning_rate_schedule=None,
+    processing_class=None, lifecycle=None, evaluation_only=False,
 ):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     if mesh is None:
@@ -445,106 +454,128 @@ def _train_distill_impl(
         path_str = "/".join(str(part) for part in path)
         return not any(regex.search(path_str) for regex in student_param_update_templates)
 
-      if teacher_model:
+      if teacher_model and not evaluation_only:
         lti_utils.prepare_student_weights(
             student_model, teacher_model,
             teacher_weights_copy_map=getattr(student_config, "distill_weights_copy_map", {}),
             student_weights_share_map=getattr(student_config, "distill_student_weights_share_map", {}),
         )
-      student_model.train()
+      if not evaluation_only:
+        student_model.train()
       model_bundle = ModelBundle(teacher_model, student_model)
 
-  with jax.set_mesh(mesh), logical_axis_rules(student_config.logical_axis_rules):
-    with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
-      strategy, optimizer, train_config = build_training_components(
-          student_config, teacher_config, is_offline, offline_data_dir
-      )
-      trainer = MaxTextDistillationTrainer(
-          model=model_bundle, strategy=strategy, optimizer=optimizer, training_config=train_config,
-          student_config=student_config, teacher_config=teacher_config, is_offline=is_offline,
-          student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
-          metrics_logger=ReportingMetricsLogger() if report_to is not None else None,
-      )
-      trainer.is_managed_externally = True
-      trainer._has_aux = True
-      if is_offline:
-        max_logging.log("Initializing Data Iterators via MaxText pipeline...")
-        student_config.get_keys()["grain_train_files"] = offline_data_dir
-        student_config.get_keys()["eval_interval"] = 0
-        student_config.get_keys()["is_offline_distillation"] = True
-        student_config.get_keys()["dataset_shuffle_buffer_size"] = 0
-        student_config.get_keys()["dataset_shuffle_seed"] = 0
-      if train_iterator is None:
-        raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
-      else:
-        raw_train_iter, raw_eval_iter = train_iterator, None
-      if eval_iterator is not None:
-        raw_eval_iter = eval_iterator
-      raw_train_iter = trainer.setup_checkpoint_manager_and_restore(
-          raw_train_iter, student_config, checkpoint_step, checkpoint_manager,
-      )
-      model_bundle.training_step.set_value(jnp.array(trainer._train_steps, dtype=jnp.int32))
+  trainer = None
+  closed = False
+  try:
+    with jax.set_mesh(mesh), logical_axis_rules(student_config.logical_axis_rules):
+      with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
+        strategy, optimizer, train_config = build_training_components(
+            student_config, teacher_config, is_offline, offline_data_dir,
+            optimizer=optimizer, learning_rate_schedule=learning_rate_schedule, processing_class=processing_class,
+        )
+        trainer = MaxTextDistillationTrainer(
+            model=model_bundle, strategy=strategy, optimizer=optimizer, training_config=train_config,
+            student_config=student_config, teacher_config=teacher_config, is_offline=is_offline,
+            student_freeze_param_filter=student_freeze_param_fn if student_params_to_update else None,
+            metrics_logger=ReportingMetricsLogger() if report_to is not None else None,
+        )
+        trainer.is_managed_externally = True
+        trainer._has_aux = True
+        if is_offline:
+          max_logging.log("Initializing Data Iterators via MaxText pipeline...")
+          student_config.get_keys()["grain_train_files"] = offline_data_dir
+          student_config.get_keys()["eval_interval"] = 0
+          student_config.get_keys()["is_offline_distillation"] = True
+          student_config.get_keys()["dataset_shuffle_buffer_size"] = 0
+          student_config.get_keys()["dataset_shuffle_seed"] = 0
+        if train_iterator is None:
+          raw_train_iter, raw_eval_iter = input_pipeline_interface.create_data_iterator(student_config, mesh)
+        else:
+          raw_train_iter, raw_eval_iter = train_iterator, None
+        if eval_iterator is not None:
+          raw_eval_iter = eval_iterator
+        if not evaluation_only:
+          raw_train_iter = trainer.setup_checkpoint_manager_and_restore(
+              raw_train_iter, student_config, checkpoint_step, checkpoint_manager,
+          )
+        model_bundle.training_step.set_value(jnp.array(trainer._train_steps, dtype=jnp.int32))
 
-      def custom_gen_model_input_fn(batch):
-        inputs_dict = {
-            "input_tokens": batch.input_tokens, "positions": batch.positions, "attention_mask": batch.input_mask,
-            "decoder_segment_ids": batch.decoder_segment_ids, "targets": batch.targets,
-            "targets_position": batch.targets_position, "targets_segmentation": batch.targets_segmentation,
-            "cache": None,
-        }
-        if getattr(batch, "top_k_logits", None) is None:
+        def custom_gen_model_input_fn(batch):
+          inputs_dict = {
+              "input_tokens": batch.input_tokens, "positions": batch.positions, "attention_mask": batch.input_mask,
+              "decoder_segment_ids": batch.decoder_segment_ids, "targets": batch.targets,
+              "targets_position": batch.targets_position, "targets_segmentation": batch.targets_segmentation,
+              "cache": None,
+          }
+          if getattr(batch, "top_k_logits", None) is None:
+            return inputs_dict
+          inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
+              logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
+          )
           return inputs_dict
-        inputs_dict["teacher_output"] = distillation_utils.DistillationForwardOutput(
-            logits=batch.top_k_logits, out_projection_activations=None, top_k_indices=batch.top_k_indices
-        )
-        return inputs_dict
 
-      trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
-      trainer.with_training_hooks(GoodputTrainingHooks(student_config, goodput_recorder))
-      train_iter: Any = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
-      if isinstance(student_config.steps, int) and isinstance(trainer._train_steps, int):
-        grad_accum = student_config.gradient_accumulation_steps if isinstance(
-            student_config.gradient_accumulation_steps, int
-        ) else 1
-        remaining_microsteps = max(0, (student_config.steps - trainer._train_steps) * grad_accum)
-        train_iter = itertools.islice(train_iter, remaining_microsteps)
-      eval_iter = None
-      if raw_eval_iter is not None:
-        max_logging.log("Evaluation iterator successfully initialized.")
-        eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
-      elif student_config.eval_interval > 0:
-        max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
-    max_logging.log("Starting Distillation Training...")
-    reporter = None
-    try:
-      if report_to:
-        reporter = reporter_factory(student_config, report_to, tensorboard=True)
-        trainer.metrics_logger.reporter = reporter
-      trainer.train(train_iter, eval_iter)
-    finally:
-      if reporter is not None:
-        reporter.close()
-
-  if student_config.learn_to_init_mode:
-    max_logging.log("Learn-to-init mode enabled. Finalizing student model...")
-    apply_lti_model_update(trainer.model.student_model, student_config)
-  if student_config.save_checkpoint_on_completion:
-    should_save = student_config.steps % student_config.checkpoint_period
-    if should_save:
-      max_logging.log(f"Saving final checkpoint to {student_config.checkpoint_dir}...")
+        trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
+        trainer.with_training_hooks(GoodputTrainingHooks(student_config, goodput_recorder))
+        if evaluation_only:
+          return trainer, raw_eval_iter
+        train_iter: Any = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+        if isinstance(student_config.steps, int) and isinstance(trainer._train_steps, int):
+          grad_accum = student_config.gradient_accumulation_steps if isinstance(
+              student_config.gradient_accumulation_steps, int
+          ) else 1
+          remaining_microsteps = max(0, (student_config.steps - trainer._train_steps) * grad_accum)
+          train_iter = itertools.islice(train_iter, remaining_microsteps)
+        eval_iter = None
+        if raw_eval_iter is not None:
+          max_logging.log("Evaluation iterator successfully initialized.")
+          eval_iter = distillation_utils.MaxTextToTunixIterator(raw_eval_iter)
+        elif student_config.eval_interval > 0:
+          max_logging.log("Warning: eval_interval > 0 but create_data_iterator returned None for eval_iter.")
+      max_logging.log("Starting Distillation Training...")
+      reporter = None
       try:
-        saved = trainer.checkpoint_manager.save(
-            trainer.train_steps + (1 if student_config.learn_to_init_mode else 0), trainer.model,
-            optimizer=trainer.optimizer, save_only_lora_params=getattr(trainer, "_lora_enabled", False), force=True,
-        )
-        if saved:
-          trainer.checkpoint_manager.wait_until_finished()
-          max_logging.log("Final checkpoint saved.")
-      except Exception as error:
-        max_logging.log(f"Warning: Failed to save final checkpoint: {error}")
-    else:
-      max_logging.log("Waiting for automatic periodic checkpoint to finish...")
-      trainer.checkpoint_manager.wait_until_finished()
-  trainer.close()
+        if report_to:
+          reporter = reporter_factory(student_config, report_to, tensorboard=True)
+          trainer.metrics_logger.reporter = reporter
+        if lifecycle is not None:
+          lifecycle._eval_iterator = raw_eval_iter
+          begin_training(trainer, lifecycle)
+          train_iter = TrainerIterator(train_iter, trainer, lifecycle)
+        trainer.train(train_iter, eval_iter if lifecycle is None else None)
+        if lifecycle is not None:
+          finish_step(trainer, lifecycle)
+      finally:
+        if reporter is not None:
+          reporter.close()
+
+    if student_config.learn_to_init_mode:
+      max_logging.log("Learn-to-init mode enabled. Finalizing student model...")
+      apply_lti_model_update(trainer.model.student_model, student_config)
+    if student_config.save_checkpoint_on_completion:
+      should_save = student_config.learn_to_init_mode or student_config.steps % student_config.checkpoint_period
+      if should_save:
+        max_logging.log(f"Saving final checkpoint to {student_config.checkpoint_dir}...")
+        try:
+          saved = trainer.checkpoint_manager.save(
+              trainer.train_steps + (1 if student_config.learn_to_init_mode else 0), trainer.model,
+              optimizer=trainer.optimizer, save_only_lora_params=getattr(trainer, "_lora_enabled", False), force=True,
+          )
+          if saved:
+            trainer.checkpoint_manager.wait_until_finished()
+            max_logging.log("Final checkpoint saved.")
+        except Exception as error:
+          if lifecycle is not None:
+            raise
+          max_logging.log(f"Warning: Failed to save final checkpoint: {error}")
+      else:
+        max_logging.log("Waiting for automatic periodic checkpoint to finish...")
+        trainer.checkpoint_manager.wait_until_finished()
+    if lifecycle is not None:
+      finish_training(trainer, lifecycle)
+    trainer.close()
+    closed = True
+  finally:
+    if trainer is not None:
+      release_metrics_logger(trainer.metrics_logger, close_backends=not closed)
   max_logging.log("Distillation Complete.")
   return trainer, raw_eval_iter

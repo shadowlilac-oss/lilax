@@ -9,7 +9,7 @@ import jax
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from lilax._backend.inference.maxengine import maxengine
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import system_info
 
 

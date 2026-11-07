@@ -24,9 +24,10 @@ from lilax._backend.integration.vllm.hybrid_cache_utils import (
     resolve_layer_kv_cache_indices,
     scatter_layer_kv_caches,
 )
-from lilax._backend.utils import lora_utils, max_logging
+from lilax._backend.utils import lora_utils
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
-from lilax._backend.utils.model_creation import pretrained
+from lilax._backend.models.creation import pretrained
 from .multimodal import get_multimodal_handler
 
 

@@ -20,7 +20,7 @@ import jax
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from lilax._backend.layers import fsdp_prefetch
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def _index_at(tree, idx):

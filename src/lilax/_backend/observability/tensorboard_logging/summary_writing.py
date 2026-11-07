@@ -6,7 +6,7 @@ import jax
 from tensorboardX import writer
 
 from lilax._backend.common.cloud import is_decoupled
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def initialize_summary_writer(tensorboard_dir, run_name, enable_tensorboard=True):

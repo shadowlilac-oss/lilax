@@ -18,6 +18,7 @@ from lilax._backend.checkpoint_conversion.projection_layout import (
 )
 from lilax._backend.integration.vllm.convert_utils import _partition_size
 from lilax.configuration import QwixQATConfig
+from lilax.configuration.model_mapping import model_config_from_effective
 from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 
 
@@ -25,6 +26,10 @@ def checkpoint_qat_config(path):
   checkpoint_dir = epath.Path(path)
   metadata_path = checkpoint_dir / "maxtext_easy_config_metadata.json"
   config_path = checkpoint_dir / "config.json"
+  if config_path.exists():
+    saved_recipe = json.loads(config_path.read_text(encoding="utf-8")).get("quantization_config")
+    if isinstance(saved_recipe, dict) and saved_recipe.get("quant_method") == "QwixQATConfig":
+      return QwixQATConfig.model_validate({name: value for name, value in saved_recipe.items() if name != "quant_method"})
   if metadata_path.exists() and config_path.exists():
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     if "qwix_qat_config" in metadata["explicit_keys"]:
@@ -102,7 +107,7 @@ def save_pretrained(
   if format != "maxtext":
     raise ValueError(f"Unsupported checkpoint format: {format!r}")
   public_config = model.runtime.public_config
-  updates = public_config.get_source_values()
+  updates = {}
   updates["scan_layers"] = model.construction_config.scan_layers
   updates["hardware"] = model.runtime.config.hardware
   updates["qwix_qat_config"] = model.existing_graph_qat_config
@@ -165,8 +170,10 @@ def save_pretrained(
     else:
       state = layout_adapter.convert_native_state(state, config, fused_qkv=False, fused_mlp=target_mlp)
     updates.update({"fused_qkv": False, "fused_mlp": target_mlp})
-  saved_config = public_config.model_copy(update=updates)
-  config_json = saved_config.model_dump_json(exclude={"hf_access_token"}, indent=2)
+  saved_config = model_config_from_effective(
+      public_config, model.construction_config, updates=updates, metadata_config=model.config,
+  )
+  config_json = saved_config.to_json_string(use_diff=False)
 
   def wrap_value(node):
     if isinstance(node, dict):
@@ -186,7 +193,10 @@ def save_pretrained(
     explicit_keys |= {"fused_qkv", "fused_mlp"}
   if model.existing_graph_qat_config is not None:
     explicit_keys |= {"qwix_qat_config"}
-  metadata = {"explicit_keys": sorted(explicit_keys - {"hf_access_token"})}
+  metadata = {
+      "explicit_keys": sorted(explicit_keys - {"hf_access_token"}),
+      "checkpoint_layout": {"scan_layers": config.scan_layers, "param_scan_axis": config.param_scan_axis},
+  }
   (epath.Path(save_directory) / "maxtext_easy_config_metadata.json").write_text(
       json.dumps(metadata), encoding="utf-8"
   )

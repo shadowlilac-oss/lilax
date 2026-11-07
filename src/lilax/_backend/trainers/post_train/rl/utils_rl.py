@@ -16,7 +16,7 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as agentic_chat_
 
 from lilax._backend.trainers.post_train.rl.hooks import RLTrainingHooks
 from lilax._backend.trainers.post_train.rl.math_verify_pool import math_verify_pool, verify_math_worker
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 EPSILON = 1e-6
@@ -271,17 +271,21 @@ def check_correctness(extracted_response: str, acceptable_answers: list[str], tm
   return False, is_partially_correct
 
 
-def get_optimizer(tmvp_config: Any) -> optax.GradientTransformation:
+def get_learning_rate_schedule(tmvp_config: Any):
   lr_schedule_steps = getattr(tmvp_config, "learning_rate_schedule_steps", -1)
   config_steps = getattr(tmvp_config, "steps", -1)
   if lr_schedule_steps is not None and lr_schedule_steps > 0 and lr_schedule_steps != config_steps:
     schedule_steps = lr_schedule_steps
   else:
-    schedule_steps = tmvp_config.train_steps
-  schedule = optax.schedules.warmup_cosine_decay_schedule(
+    schedule_steps = tmvp_config.steps
+  return optax.schedules.warmup_cosine_decay_schedule(
       init_value=0.0, peak_value=tmvp_config.learning_rate,
       warmup_steps=int(tmvp_config.warmup_steps_fraction * schedule_steps), decay_steps=schedule_steps, end_value=0.0,
   )
+
+
+def get_optimizer(tmvp_config: Any, learning_rate_schedule=None) -> optax.GradientTransformation:
+  schedule = get_learning_rate_schedule(tmvp_config) if learning_rate_schedule is None else learning_rate_schedule
 
   def make_optimizer(learning_rate):
     transforms = []

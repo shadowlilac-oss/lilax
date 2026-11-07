@@ -7,6 +7,11 @@ def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
   combined = []
+  if len(columns) == 2:
+    prompt, completion = (example[column] for column in columns)
+    if len(prompt) != len(completion) or any(message["role"] != "user" for message in prompt):
+      example[data_column] = prompt + completion
+      return example
   for i in range(len(example[columns[0]])):
     for c in columns:
       combined.append(example[c][i])
@@ -29,6 +34,9 @@ def is_conversational(features, data_columns):
   """
   for column in data_columns:
     messages = features[column]
+    if isinstance(messages, list):
+      if messages and isinstance(messages[0], dict) and {"role", "content"}.issubset(messages[0]):
+        return True
     if isinstance(messages, datasets.Sequence):
       if isinstance(messages.feature, dict) and "role" in messages.feature and "content" in messages.feature:
         return True

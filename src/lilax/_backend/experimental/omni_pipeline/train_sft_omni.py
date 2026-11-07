@@ -13,7 +13,8 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils import elastic_utils
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.gpu_collective_overlap_pass.registration import (
     register as register_gpu_collective_overlap_pass,
 )
@@ -21,7 +22,7 @@ from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.utils import train_utils
 from lilax._backend.observability.diagnostics import system_info
 from lilax._backend.integration.transformer_engine import cgemm, mesh_context
-from lilax.configuration import MaxTextConfig
+from lilax._backend.configs.inert import MaxTextConfig
 from lilax.runtime import Runtime
 import tensorflow as tf
 

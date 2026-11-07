@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import load_hf_dict_from_transformers, print_ram_usage
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import HF_IDS
 
 

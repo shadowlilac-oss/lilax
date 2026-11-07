@@ -23,7 +23,7 @@ from lilax._backend.input_pipeline.sources import example_parsing
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.input_pipeline.sources import record_file_datasets
 from lilax._backend.input_pipeline.transforms import feature_transforms
-from lilax._backend.utils import gcs_utils
+from lilax._backend.storage import gcs as gcs_utils
 
 
 def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys: tuple[str, ...] = ("text",)) -> Iterator:

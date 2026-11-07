@@ -23,7 +23,7 @@ import jax
 from google.cloud import storage
 from mlperf_logging import mllog
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 mllogger = mllog.get_mllogger()
 

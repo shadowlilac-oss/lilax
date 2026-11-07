@@ -7,7 +7,8 @@ import numpy as np
 
 from lilax._backend.common.common_types import ShardMode
 from lilax._backend.experimental.lineage import lineage_adapter
-from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils import elastic_utils
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed.mesh_topology import custom_mesh, mesh_axes, tpu_v6e
 
 

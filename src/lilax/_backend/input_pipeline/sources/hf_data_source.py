@@ -6,7 +6,7 @@ from threading import current_thread
 import datasets
 import grain.python as grain
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 class HFDataSource(grain.RandomAccessDataSource):

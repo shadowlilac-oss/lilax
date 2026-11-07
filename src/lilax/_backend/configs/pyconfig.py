@@ -16,7 +16,7 @@ from lilax._backend.common.common_types import DecoderBlockType, ShardMode
 from lilax._backend.configs import types
 from lilax._backend.configs.multimodal_fields import Multimodal
 from lilax._backend.inference.inference_utils import str2bool
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed.jax_distributed import initialization
 from lilax._backend.utils.globals import HF_IDS, MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
 

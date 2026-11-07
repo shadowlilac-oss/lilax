@@ -2,7 +2,7 @@
 
 from lilax._backend.input_pipeline.conversation import dsv4_chat_format
 from lilax._backend.input_pipeline.transforms import hf_tokenization
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):

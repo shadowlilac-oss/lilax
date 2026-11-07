@@ -29,7 +29,7 @@ from lilax._backend.input_pipeline.protos import example_pb2
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.input_pipeline.conversation import conversational_columns
 from lilax._backend.input_pipeline.transforms import hf_tokenization
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 @dataclass

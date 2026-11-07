@@ -1,7 +1,10 @@
-"""Native inference sampling and log-probability functions."""
+"""Generation preferences and completion records."""
 
-from lilax._backend.inference.inference_utils import log_prob_of_chosen_token
-from lilax._backend.inference.inference_utils import prompt_logprobs_from_packed_prefill
-from lilax._backend.inference.inference_utils import prompt_logprobs_from_prefill
-from lilax._backend.inference.inference_utils import sampling
-from lilax.generation.engine import ExistingPrefix, MaxEngine, MaxEngineConfig
+from .configuration import ContinuousBatchingConfig, GenerationConfig
+from lilax._backend.inference.offline_engine import CompletionOutput
+from lilax._backend.inference.inference_utils import (
+    log_prob_of_chosen_token, prompt_logprobs_from_packed_prefill, prompt_logprobs_from_prefill, sampling,
+)
+
+__all__ = ["ContinuousBatchingConfig", "GenerationConfig", "CompletionOutput", "log_prob_of_chosen_token",
+           "prompt_logprobs_from_packed_prefill", "prompt_logprobs_from_prefill", "sampling"]

@@ -8,7 +8,8 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.checkpoints import full_state_restore
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
-from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils import elastic_utils
+from lilax._backend.observability import max_logging
 from orbax.checkpoint import v1 as ocp
 
 Snapshotter = ocp.training.pathways.Snapshotter

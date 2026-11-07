@@ -1,6 +1,6 @@
 """Serialize inert configuration and its explicit-key provenance."""
 
-from lilax.configuration.schema import MaxTextConfig, RLConfig
+from lilax._backend.configs.inert import MaxTextConfig, RLConfig
 
 
 def serialize_config(config: MaxTextConfig | RLConfig) -> dict:

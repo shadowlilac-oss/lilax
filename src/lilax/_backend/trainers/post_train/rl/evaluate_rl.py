@@ -7,7 +7,7 @@ from tqdm.auto import tqdm
 from tunix.rl.rollout.base_rollout import RolloutConfig
 
 from lilax._backend.trainers.post_train.rl import utils_rl
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def generate_responses(tmvp_config, prompts, rl_cluster, num_passes=1):

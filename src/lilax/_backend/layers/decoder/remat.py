@@ -4,7 +4,7 @@ import warnings
 
 import jax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def minimal_policy(with_context=False, with_quantization=False):

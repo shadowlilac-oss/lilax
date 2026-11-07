@@ -5,12 +5,17 @@ from lilax.configuration import QwixQATConfig
 from lilax.peft import PeftModel
 
 
-def prepare_training_checkpoint(checkpoint_step, manager, args, config, model):
-  manager.save_only_lora_params = getattr(args, "save_only_lora_params", None)
-  manager.restore_only_lora_params = getattr(args, "restore_only_lora_params", None)
-  manager, checkpoint_step, marker = select_training_checkpoint(
-      config.checkpoint_dir, None, step=checkpoint_step, manager=manager,
-  )
+def prepare_training_checkpoint(checkpoint_step, manager, args, config, model, *, resume=True):
+  policy = args.checkpoint_config
+  manager.save_only_lora_params = None if policy is None else policy.save_only_lora_params
+  manager.restore_only_lora_params = None if policy is None else policy.restore_only_lora_params
+  marker = None
+  if resume:
+    manager, checkpoint_step, marker = select_training_checkpoint(
+        config.checkpoint_dir, None, step=checkpoint_step, manager=manager,
+    )
+    if checkpoint_step is None:
+      raise ValueError("No training checkpoint is available to resume.")
   if marker is not None:
     if (not isinstance(marker, dict) or set(marker) != {"version", "kind", "qat_config"}
         or type(marker["version"]) is not int or marker["version"] != 1
@@ -30,8 +35,10 @@ def prepare_training_checkpoint(checkpoint_step, manager, args, config, model):
     raise ValueError("Cannot restore QAT full state without training graph metadata.")
   if (model.pending_qat_config is not None
       and (isinstance(model, PeftModel) or config.lora.enable_lora or config.lora.lora_restore_path)):
-    if manager.save_only_lora_params is not False or manager.restore_only_lora_params is not False:
-      raise NotImplementedError("QAT with LoRA requires full-model save and restore to preserve QAT statistics.")
+    if manager.save_only_lora_params is True or manager.restore_only_lora_params is True:
+      raise NotImplementedError("QAT with LoRA requires full-model checkpointing; adapter-only selection omits QAT state.")
+    manager.save_only_lora_params = False
+    manager.restore_only_lora_params = False
     if config.lora.lora_restore_path or getattr(config, "learn_to_init_mode", False):
       raise NotImplementedError("QAT with LoRA requires full-model checkpointing with optimizer state.")
   return manager, checkpoint_step

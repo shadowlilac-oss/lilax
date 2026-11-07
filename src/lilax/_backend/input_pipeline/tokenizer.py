@@ -8,8 +8,8 @@ import transformers
 from sentencepiece import SentencePieceProcessor
 from tiktoken.load import load_tiktoken_bpe
 
-from lilax._backend.utils import max_logging
-from lilax._backend.utils.gcs_utils import read_bytes_from_gcs
+from lilax._backend.observability import max_logging
+from lilax._backend.storage.gcs import read_bytes_from_gcs
 
 
 class TikTokenTokenizer:
@@ -121,14 +121,17 @@ class SentencePieceTokenizer:
 class HFTokenizer:
   """Tokenizing using a Hugging Face tokenizer."""
 
-  def __init__(self, model_path: str, add_bos: bool, add_eos: bool, hf_access_token: str):
+  def __init__(self, model_path: str, add_bos: bool, add_eos: bool, hf_access_token: str, *, processing_class=None):
     max_logging.log(f"Loading HF tokenizer: {model_path}")
-    try:
-      self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-          model_path, add_bos_token=add_bos, add_eos_token=add_eos, token=hf_access_token,
-      )
-    except Exception as e:
-      raise ValueError(f"Failed to load Hugging Face tokenizer from {model_path}: {e}") from e
+    if processing_class is not None:
+      self.tokenizer = getattr(processing_class, "tokenizer", processing_class)
+    else:
+      try:
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            model_path, add_bos_token=add_bos, add_eos_token=add_eos, token=hf_access_token,
+        )
+      except Exception as e:
+        raise ValueError(f"Failed to load Hugging Face tokenizer from {model_path}: {e}") from e
     self.pad_id = self.tokenizer.pad_token_id
     self.unk_id = self.tokenizer.unk_token_id
     self.bos_id = self.tokenizer.bos_token_id

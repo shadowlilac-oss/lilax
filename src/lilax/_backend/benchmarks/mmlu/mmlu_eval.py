@@ -7,7 +7,7 @@ import datasets
 from tqdm import tqdm
 
 from lilax._backend.benchmarks.mmlu.mmlu_categories import categories, subcategories
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 DEFAULT_PROMPT_TEMPLATE = """The following are multiple choice questions (with answers) about {subject}.
 
@@ -30,15 +30,16 @@ def validate_config(config):
   assert not config.load_full_state_path, "Decode doesn't operate on full states! Convert to parameter checkpoint first."
 
 
-def evaluate(engine, params, config, prompt_template=DEFAULT_PROMPT_TEMPLATE):
+def evaluate(engine, params, config, prompt_template=DEFAULT_PROMPT_TEMPLATE, *, eval_dataset=None, tokenizer=None):
   validate_config(config)
-  tokenizer = engine.build_tokenizer(engine.get_tokenizer())
+  if tokenizer is None:
+    tokenizer = engine.build_tokenizer(engine.get_tokenizer())
   prefill_length = getattr(config, "max_prefill_predict_length", 1024)
   target_length = getattr(config, "max_target_length", 2048)
   correct_count = total_count = 0
   subject_correct, subject_total = collections.defaultdict(int), collections.defaultdict(int)
   subcat_correct, subcat_total = collections.defaultdict(int), collections.defaultdict(int)
-  dataset = datasets.load_dataset("lighteval/mmlu", "all", split="test")
+  dataset = datasets.load_dataset("lighteval/mmlu", "all", split="test") if eval_dataset is None else eval_dataset
 
   for idx, example in enumerate(tqdm(dataset, desc="Evaluating MMLU dataset")):
     subject, choices = example["subject"], example["choices"]
@@ -75,7 +76,7 @@ def evaluate(engine, params, config, prompt_template=DEFAULT_PROMPT_TEMPLATE):
     total_count += 1
     subject_total[subject] += 1
     if idx % 50 == 0:
-      max_logging.log(f" Accuracy: {correct_count / total_count:.4f} | Processed: {total_count}/{len(dataset)}")
+      max_logging.log(f" Accuracy: {correct_count / total_count:.4f} | Processed: {total_count}")
 
   if total_count:
     max_logging.log(f"\nFinal accuracy on MMLU dataset: {correct_count / total_count:.4f}")

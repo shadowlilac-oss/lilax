@@ -62,6 +62,8 @@ GoodputRecorder = _goodput_module.GoodputRecorder
 from lilax._backend.utils.globals import EPS
 from lilax._backend.trainers.pre_train.start_step import get_first_step
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints import restore_source
+from lilax._backend.common.checkpoints.restore_source_types import RestoreSource
 from lilax._backend.common import profiler
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import (
@@ -78,18 +80,19 @@ from lilax._backend.experimental.rl import grpo_utils
 from lilax._backend.common.metric_logger import MetricLogger
 from lilax._backend.inference import offline_engine
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import exceptions
-from lilax._backend.utils import gcs_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.trainers import stop_training as exceptions
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.distributed import sharding
-from lilax._backend.utils import state_abstraction
+from lilax._backend.distributed import state_abstraction
 from lilax._backend.observability.diagnostics import pytree
-from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
-from lilax._backend.utils.training import state_setup
+from lilax._backend.models.creation import model_factory, nnx_abstract_model
+from lilax._backend.trainers.setup import state_setup
 from lilax._backend.pytree import numerics
 from lilax._backend.utils import train_utils
+from lilax._backend.optimizers import optimizers
 
 # pylint: disable=too-many-positional-arguments
 
@@ -154,9 +157,9 @@ def grpo_loss_fn_nnx(policy_model, config, data, dropout_rng, params, reference_
   """
   del dropout_rng, params  # The policy `nnx.Module` carries these.
 
-  prompt_with_completions = data[f"{config.train_data_columns}_completions"]
-  prompt_completions_position = data[f"{config.train_data_columns}_completions_position"]
-  prompt_completions_segmentation = data[f"{config.train_data_columns}_completions_segmentation"]
+  prompt_with_completions = data[f"{config.train_data_columns[0]}_completions"]
+  prompt_completions_position = data[f"{config.train_data_columns[0]}_completions_position"]
+  prompt_completions_segmentation = data[f"{config.train_data_columns[0]}_completions_segmentation"]
   completions_segmentation = data["ar_completions_segmentation"]
 
   token_logps_policy, intermediate_outputs = grpo_utils.compute_log_probs_nnx(
@@ -432,6 +435,9 @@ def setup_train_loop(
     config,
     config_inference,
     recorder: GoodputRecorder,
+    *, actor_model=None, reference_model=None, mesh=None, data_iterator=None, processing_class=None,
+    optimizer=None, learning_rate_schedule=None, checkpoint_step=-1, selected_source=None, resume=None,
+    train_dataset=None,
 ) -> tuple[
     jax.Array,
     checkpointing.CheckpointManager,
@@ -475,13 +481,16 @@ def setup_train_loop(
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     max_logging.log("Training mesh used for the workload")
     num_inference_devices = config.inference_devices_per_replica * config.inference_replicas
-    training_devices = jax.devices()[num_inference_devices:]
+    training_devices = list(mesh.devices.flat) if mesh is not None else jax.devices()[num_inference_devices:]
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
 
-    training_mesh = device_mesh.get_mesh_from_config(config, devices=training_devices)
-    training_rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = model_factory.from_config(config, devices=training_devices, mesh=training_mesh, rngs=training_rngs)
-    mesh = model.mesh
+    if mesh is None:
+      mesh = device_mesh.get_mesh_from_config(config, devices=training_devices)
+    if actor_model is None:
+      training_rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+      model = model_factory.from_config(config, devices=training_devices, mesh=mesh, rngs=training_rngs)
+    else:
+      model = actor_model
 
     max_logging.log("Inference mesh used for the workload")
     inference_devices = jax.devices()[:num_inference_devices]
@@ -492,27 +501,46 @@ def setup_train_loop(
     )
     inference_mesh = inference_model.mesh
 
-    learning_rate_schedule, tx = train_utils.create_training_optimizer(config, model)
+    if learning_rate_schedule is None:
+      learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    tx = optimizer if optimizer is not None else optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=mesh)
 
     _create_model_partial, _ = nnx_abstract_model.create_nnx_abstract_model(config, mesh, devices=training_devices)
 
-    def init_state_fn():
-      nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-      # Reference uses the same init seed so it starts identical to the policy.
-      reference_model = _create_model_partial()
-      # TrainStateNNX only takes (model, optimizer); reference_model is an NNX
-      # sibling attribute set after construction (nnx.Module is mutable).
-      state = train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-      state.reference_model = reference_model
+    init_state_args = ()
+    if actor_model is not None:
+      actor_graph, actor_state = nnx.split(actor_model)
+      reference_graph, reference_state = nnx.split(nnx.clone(actor_model) if reference_model is None else reference_model)
+      init_state_args = (actor_state, reference_state)
+
+    def init_state_fn(*states):
+      states = states or init_state_args
+      nnx_model = nnx.merge(actor_graph, states[0]) if states else _create_model_partial()
+      reference = nnx.merge(reference_graph, states[1]) if states else _create_model_partial()
+      train_optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+      state = train_state_nnx.TrainStateNNX(nnx_model, train_optimizer)
+      state.reference_model = reference
       return state
 
+
     checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
+    if resume is not None:
+      selected_source = (restore_source.select_restore_source(
+          checkpoint_manager, "", config.load_full_state_path, step=checkpoint_step,
+          source_checkpoint_layout=config.source_checkpoint_layout,
+      ) if resume else RestoreSource("none"))
+      if resume and selected_source.kind == "none":
+        raise ValueError("No training checkpoint is available to resume.")
 
   with maybe_record_goodput(recorder, GoodputEvent.TRAINING_PREPARATION):
-    data_iterator = grpo_input_pipeline.create_data_iterator(config_inference, inference_mesh)
+    if data_iterator is None:
+      data_iterator = grpo_input_pipeline.create_data_iterator(
+          config_inference, inference_mesh, processing_class=processing_class,
+          dataset=train_dataset,
+      )
     state, _, state_mesh_shardings, data_iterator, _ = state_setup.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn,
+        step=checkpoint_step, selected_source=selected_source, init_state_args=init_state_args,
     )
     with logical_axis_rules(config.logical_axis_rules):
       state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
@@ -595,7 +623,8 @@ def generate_completions(
   return processed_batch
 
 
-def train_loop(config, config_inference, recorder, state=None, *, reporter_factory=None, report_inference_captures=False):
+def train_loop(config, config_inference, recorder, state=None, *, reporter_factory=None, report_inference_captures=False,
+               setup=None, processing_class=None, lifecycle=None, eos_token_ids=None):
   """The main GRPO training loop.
 
   This function orchestrates the entire training process. It initializes the
@@ -635,8 +664,8 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
       data_iterator,
       eval_data_iterator,
       state,
-  ) = setup_train_loop(config, config_inference, recorder)
-  tokenizer_model = transformers.AutoTokenizer.from_pretrained(
+  ) = setup if setup is not None else setup_train_loop(config, config_inference, recorder)
+  tokenizer_model = processing_class or transformers.AutoTokenizer.from_pretrained(
       config.tokenizer_path,
       add_bos_token=config.add_bos,
       add_eos_token=config.add_eos,
@@ -662,7 +691,13 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
   inference_engine = offline_engine.OfflineEngine(
       config=config_inference,
       mesh=inference_mesh,
+      **({"tokenizer": tokenizer_model, "eos_ids": eos_token_ids or []} if processing_class is not None else {}),
   )
+  if lifecycle is not None:
+    grpo_utils.pathways_reshard_nnx(
+        config_inference, inference_engine, state["model"], state_mesh_shardings["model"],
+        inference_state_mesh_shardings["model"],
+    )
   data_buffer = []
   data_buffer_lock = threading.Lock()
 
@@ -671,7 +706,9 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
   inference_captures = queue.SimpleQueue()
 
   def on_capture_complete(**capture):
-    if metric_logger.reporter is not None:
+    if lifecycle is not None:
+      lifecycle._log_capture(**capture)
+    elif metric_logger.reporter is not None:
       metric_logger.reporter.log_capture(**capture)
 
   prof = profiler.Profiler(config, offset_step=start_step, on_capture_complete=on_capture_complete)
@@ -748,11 +785,14 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
         max_logging.log("Data iterator exhausted in generation worker. Stopping.")
         break
       except Exception as e:  # pylint: disable=broad-except
+        if lifecycle is not None and not isinstance(e.__cause__, StopIteration):
+          worker_errors.put(e)
         max_logging.log(f"Error in generation worker: {e}")
         break
     max_logging.log("Generation worker thread finished.")
 
   stop_event = threading.Event()
+  worker_errors = queue.SimpleQueue()
   inference_engine_lock = threading.Lock()
 
   required_batch_size = int(config.per_device_batch_size * config.num_generations * mesh.size)
@@ -778,28 +818,33 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
   try:
     if reporter_factory is not None:
       metric_logger.reporter = reporter_factory(config)
+    if lifecycle is not None:
+      lifecycle._native_grpo_state = state
+      lifecycle._begin_training(start_step)
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
+      if lifecycle is not None:
+        if lifecycle.control.should_training_stop or lifecycle.control.should_epoch_stop:
+          break
+        lifecycle._begin_step()
+        if lifecycle.control.should_training_stop or lifecycle.control.should_epoch_stop:
+          break
       prof.maybe_activate_profiler(step, state)
 
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         while True:
           with data_buffer_lock:
-            if not data_buffer and not generation_thread.is_alive():
-              max_logging.log("Generation worker is not alive and data buffer is empty. Exiting.")
-              break
+            if lifecycle is not None and not worker_errors.empty():
+              raise worker_errors.get()
             if data_buffer:
               example_batch = data_buffer[0]
-              if example_batch[config.train_data_columns].shape[0] >= required_batch_size:
+              if example_batch[config.train_data_columns[0]].shape[0] >= required_batch_size:
                 example_batch = jax.tree_util.tree_map(lambda arr: arr[:required_batch_size], data_buffer[0])
                 data_buffer[0] = jax.tree_util.tree_map(lambda arr: arr[required_batch_size:], data_buffer[0])
                 break
-              else:
-                time.sleep(0.1)
-                continue
-            else:
-              time.sleep(0.1)
-              continue
+            if not generation_thread.is_alive():
+              raise exceptions.StopTraining("Training prompts exhausted before another full GRPO group was available.")
+          time.sleep(0.1)
         example_batch = jax.device_put(example_batch, data_sharding)
         with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
           state, metrics = p_train_step(state, example_batch)
@@ -820,11 +865,23 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
       # The reference is a sibling field on TrainStateNNX, so the whole state
       # can be saved as-is.
       state_to_save = state
-      checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      if lifecycle is None:
+        checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator, step)
+      else:
+        lifecycle._native_grpo_state = state
+        nnx.update(lifecycle.model.native_model, state["model"])
+        lifecycle._end_step(int(step) + 1, metrics["scalar"]["learning/loss"])
+        if lifecycle.control.should_log:
+          lifecycle.log({name: float(value) for name, value in metrics["scalar"].items()})
+        receipt = checkpointing.maybe_save_checkpoint(
+            checkpoint_manager, state_to_save, config, data_iterator, int(step), force=lifecycle.control.should_save,
+            **lifecycle._save_action(int(step) + 1), return_result=True,
+        )
+        lifecycle._resolve_save(receipt, checkpoint_manager)
 
       if config.dump_hlo and step == start_step:
         jax.block_until_ready(state)  # Ensure compilation has finished.
-        gcs_utils.upload_dump(
+        gcs.upload_dump(
             config.dump_hlo_local_dir,
             config.dump_hlo_gcs_dir,
             module_name=config.dump_hlo_module_name,
@@ -862,7 +919,7 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
       last_step_completion = datetime.datetime.now()
       metric_logger.buffer_and_write_metrics(metrics, step, step_time_delta)
 
-      if config.save_checkpoint_on_completion:
+      if config.save_checkpoint_on_completion and lifecycle is None:
         state_to_save = state
         checkpointing.maybe_save_checkpoint(checkpoint_manager, state_to_save, config, data_iterator)
       elif checkpoint_manager is not None:
@@ -870,6 +927,8 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
         checkpointing.wait_until_finished(checkpoint_manager)
     _job_completed_gracefully = True
   except exceptions.StopTraining as e:
+    if lifecycle is not None and hasattr(e, "save_receipt"):
+      lifecycle._resolve_save(e.save_receipt, checkpoint_manager)
     prof.deactivate()
     max_logging.log(f"Training stopped: {str(e)}")
     _job_completed_gracefully = True
@@ -882,7 +941,10 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
     if worker_alive:
       max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
     try:
-      if metric_logger.reporter is not None:
+      if lifecycle is not None:
+        for _ in range(inference_captures.qsize()):
+          lifecycle._log_capture(**inference_captures.get())
+      elif metric_logger.reporter is not None:
         for _ in range(inference_captures.qsize()):
           metric_logger.reporter.log_capture(**inference_captures.get())
       if worker_alive and report_inference_captures:
@@ -900,6 +962,12 @@ def train_loop(config, config_inference, recorder, state=None, *, reporter_facto
           raise
         max_logging.log(f"Metric cleanup failed while handling an earlier error: {error}")
     if _job_completed_gracefully:
+      if lifecycle is not None:
+        lifecycle._event("on_epoch_end")
+        if config.save_checkpoint_on_completion:
+          lifecycle.save_state()
+        lifecycle._terminal_actions()
+        lifecycle._event("on_train_end")
       record_goodput(recorder, RECORD_JOB_END_TIME)
 
   return state

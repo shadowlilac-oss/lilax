@@ -11,14 +11,16 @@ import uuid
 import jax
 from tunix.sft import profiler
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 class TrainingCapture:
   _lock = threading.Lock()
 
-  def __init__(self, config, trainer):
+  def __init__(self, config, trainer, *, profile_dir=None, on_capture_complete=None):
     self.config = config
+    self.on_capture_complete = on_capture_complete
+    self.base_output_dir = config.tensorboard_dir if profile_dir is None else profile_dir
     self.first_step = trainer.iter_steps + config.skip_first_n_steps_for_profiler
     max_steps = trainer.config.max_steps
     max_iter = None if max_steps is None else max_steps * trainer.config.get_with_default("gradient_accumulation_steps", 1)
@@ -42,7 +44,7 @@ class TrainingCapture:
         return
       try:
         options = profiler.ProfilerOptions(
-            log_dir=self.config.tensorboard_dir, skip_first_n_steps=self.config.skip_first_n_steps_for_profiler,
+            log_dir=self.base_output_dir, skip_first_n_steps=self.config.skip_first_n_steps_for_profiler,
             profiler_steps=self.config.profiler_steps,
         )
         profile_options = None
@@ -54,7 +56,7 @@ class TrainingCapture:
             profile_options.python_tracer_level = options.python_tracer_level
           if self.config.enable_continuous_profiling:
             profile_options.advanced_configuration = {"enable_continuous_profiling": True}
-        self.logdir = os.path.join(self.config.tensorboard_dir, f"capture-{uuid.uuid4().hex}")
+        self.logdir = os.path.join(self.base_output_dir, f"capture-{uuid.uuid4().hex}")
         jax.profiler.start_trace(self.logdir, profiler_options=profile_options)
         self.active = True
       except BaseException:
@@ -73,5 +75,8 @@ class TrainingCapture:
       self.active = False
       self.enabled = False
       self._lock.release()
-    if completed and self.reportable and reporter is not None:
-      reporter.log_capture(logdir=self.logdir, step=step, process_index=jax.process_index())
+    if completed and self.reportable:
+      if self.on_capture_complete is not None:
+        self.on_capture_complete(logdir=self.logdir, step=step, process_index=jax.process_index())
+      elif reporter is not None:
+        reporter.log_capture(logdir=self.logdir, step=step, process_index=jax.process_index())

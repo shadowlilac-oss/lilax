@@ -30,16 +30,16 @@ installation across all paths has not been verified. See [implementation status]
 ## Load a model
 
 ```python
-from lilax.modeling.models import AutoModelForCausalLM
+from lilax import AutoModelForCausalLM
 
 if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-0.6B",
-        conversion_output_dir="/shared/maxtext-conversion",
+        "Qwen/Qwen3-8B",
     )
 ```
 
-Choose a directory visible to every JAX process when Hugging Face weights need conversion.
+Hugging Face conversion uses the Trainer's output directory or the local Hugging Face cache.
+For multiple JAX processes, set a shared Trainer `output_dir` before first using the model.
 The model graph is constructed when first used. Lilax supports Hugging Face loading
 for selected models, not every model on the Hub.
 
@@ -49,11 +49,11 @@ Use `SFTConfig` for training settings and pass the dataset and tokenizer to `SFT
 
 ```python
 from datasets import load_dataset
-from transformers import AutoTokenizer
-from lilax.trainers.post_training.sft import SFTConfig, SFTTrainer
+from lilax import AutoModelForCausalLM, AutoTokenizer, SFTConfig, SFTTrainer
 
 if __name__ == "__main__":
-    model_id = "Qwen/Qwen3-0.6B"
+    model_id = "Qwen/Qwen3-8B"
+    model = AutoModelForCausalLM.from_pretrained(model_id)
     dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
     tokenizer = AutoTokenizer.from_pretrained(model_id)
 
@@ -64,20 +64,31 @@ if __name__ == "__main__":
             max_steps=100,
             per_device_train_batch_size=1,
             max_length=1024,
-            train_data_columns=["messages"],
         ),
         train_dataset=dataset,
         processing_class=tokenizer,
     )
     trainer.train()
+    trainer.save_model("./model")
 ```
 
-This example uses the model from the preceding section. Dataset formatting, hardware settings,
-and optional dependencies depend on the selected training path. The 100-step run used batch size 4;
-the example's batch size 1 has not been execution-verified.
+The Trainer recognizes the dataset's `messages` column and owns packing and completion loss masks.
+The example's Qwen3-8B training has not been executed. The earlier 100-step run used a different
+model and batch size and does not verify this API integration.
 
-For Tunix SFT, DPO, and distillation, `save_only_lora_params` and
-`restore_only_lora_params` on their training configs default to `None` (selection follows LoRA
+Use `jaxcoord config` to write a reusable execution profile, then run
+`jaxcoord launch --config-file jaxcoord.yaml train.py`. See [execution profiles](EXECUTION_PROFILE.md)
+for CPU/GPU/TPU placement, DiLoCo and Python/checkpoint precedence.
+The [public API reference](PUBLIC_API.md) lists inspected constructors and arguments.
+The [migration ledger](API_MIGRATION.md) records removed and relocated arguments.
+
+Pass finite data to `eval_dataset` and call `trainer.evaluate()` for manual evaluation.
+`eval_on_start` and positive `eval_steps` select startup and periodic evaluation.
+Evaluation consumes the supplied dataset without a batch cap. `SyntheticDataset` supports training
+only; selecting it for evaluation raises an error. Finite HF iterable datasets need no known length.
+
+For Tunix SFT, DPO, distillation and GRPO, `save_only_lora_params` and
+`restore_only_lora_params` in `TrainingCheckpointConfig` default to `None` (selection follows LoRA
 enablement). Set either to `False` for full-model checkpointing. QAT with LoRA requires both
 to be `False`; adapter-only checkpoints omit QAT statistics. Supply a matching base model
 when restoring adapter-only checkpoints. The native SFT lifecycle does not support these controls.
@@ -89,7 +100,8 @@ For example, with the OpenEnv Echo client installed and a configured model and t
 
 ```python
 from echo_env import EchoEnv
-from lilax.trainers.post_training.reinforcement import GRPOTrainer
+from lilax import GRPOConfig, GRPOTrainer
+from lilax.rollout import AgenticRolloutConfig, RolloutConfig
 
 
 class EchoTools:
@@ -123,8 +135,12 @@ class EchoTools:
 
 trainer = GRPOTrainer(
     model=model,
+    args=GRPOConfig(output_dir="./grpo-checkpoints"),
     train_dataset=train_dataset,
+    processing_class=tokenizer,
     environment_factory=EchoTools,
+    rollout_config=RolloutConfig(engine="vllm"),
+    agentic_config=AgenticRolloutConfig(enabled=True),
 )
 trainer.train()
 ```
@@ -132,9 +148,9 @@ trainer.train()
 Set `ENV_URL` to an Echo environment server. This example defines its own reward as the length of
 the last echoed message; it is not an environment-provided reward.
 
-Enable `rl.use_agentic_rollout` and use the bundled Qwen3 chat template and its `<|im_end|>` EOS.
-The existing dataset preprocessing still applies; alternatively supply a `train_iterator` in the
-native RL format. `reset()` returns a string appended to the prompt, or `None`. Public synchronous
+Use the bundled Qwen3 chat template and its `<|im_end|>` EOS on `processing_class`.
+Supply HF records prepared with `lilax.data.prepare_rl_dataset`; there is no public raw iterator argument.
+`reset()` returns a string appended to the prompt, or `None`. Public synchronous
 methods other than `reset`, `get_reward`, and `close` become tools; their typed arguments and
 docstrings must support Transformers' tool schema conversion. The model can call multiple tools per
 turn and continues until it answers without a tool call or reaches the rollout limit. Async tools,

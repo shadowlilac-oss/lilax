@@ -4,7 +4,7 @@ import gc
 
 from flax import nnx
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def build_dropless_graphdef(config, jit_model, state):

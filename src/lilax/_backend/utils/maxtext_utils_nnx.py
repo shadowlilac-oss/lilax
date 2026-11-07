@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.configs import pyconfig
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 

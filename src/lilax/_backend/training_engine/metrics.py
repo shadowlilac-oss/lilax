@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
 from lilax._backend.training_engine import abstract_engine
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.tensorboard_logging import config_summary
 from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.observability.tensorboard_logging import summary_writing

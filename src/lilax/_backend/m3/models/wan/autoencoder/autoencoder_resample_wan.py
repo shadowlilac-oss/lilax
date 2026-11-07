@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 
 from lilax._backend.m3.core.sharding import Sharding
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from .autoencoder_cache_wan import CACHE_T, RepSentinel, _update_cache
 from .autoencoder_causal_conv_wan import WanCausalConv3d
 from ..utils_wan import param_metadata

@@ -14,10 +14,11 @@ from vllm.sampling_params import SamplingParams
 
 from lilax._backend.common import profiler
 from lilax._backend.common.common_types import Config
+from lilax._backend.inference.vllm_messages import build_chat_messages
 from lilax._backend.configs.pyconfig import _lists_to_tuples
 from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.multimodal import utils as mm_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
 from lilax.configuration.loading import load_config_values
 
@@ -32,21 +33,7 @@ def _uses_mrope(self):
 ModelConfig.uses_mrope = property(_uses_mrope)
 
 
-def build_chat_messages(config: Config) -> list[dict[str, Any]]:
-  """Build the chat messages, prepending a system prompt when set."""
-  messages = []
-  if config.system_prompt:
-    messages.append({"role": "system", "content": config.system_prompt})
-  if config.use_multimodal and config.image_path:
-    content = [{"type": "image"} for _ in config.image_path.split(",")]
-    content.append({"type": "text", "text": config.prompt})
-    messages.append({"role": "user", "content": content})
-  else:
-    messages.append({"role": "user", "content": config.prompt})
-  return messages
-
-
-def create_vllm_llm(config: Config, **overrides: Any) -> LLM:
+def create_vllm_llm(config: Config, *, additional_config=None, **overrides: Any) -> LLM:
   """Create a vLLM engine; the MaxText adapter must already be registered."""
   vllm_args = {
       "model": config.tokenizer_path,
@@ -83,6 +70,11 @@ def create_vllm_llm(config: Config, **overrides: Any) -> LLM:
     vllm_args["max_num_batched_tokens"] = config.max_num_batched_tokens
   if config.max_num_seqs is not None:
     vllm_args["max_num_seqs"] = config.max_num_seqs
+  for name, value in (additional_config or {}).items():
+    if isinstance(value, dict) and isinstance(vllm_args["additional_config"].get(name), dict):
+      vllm_args["additional_config"][name].update(value)
+    else:
+      vllm_args["additional_config"][name] = value
   vllm_args.update(overrides)
 
   global _USE_MROPE

@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from lilax.configuration import serialize_config
+from lilax.configuration.serialization import serialize_config
 from lilax._backend.configs import pyconfig, types
 
 

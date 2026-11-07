@@ -16,11 +16,11 @@ from transformers import AutoTokenizer
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
-from lilax._backend.utils.model_creation import model_factory
+from lilax._backend.models.creation import model_factory
 from lilax._backend.pytree import partitioning
-from lilax.configuration import MaxTextConfig
+from lilax._backend.configs.inert import MaxTextConfig
 from lilax.runtime import Runtime
 
 

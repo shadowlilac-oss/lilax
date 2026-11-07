@@ -18,11 +18,14 @@ from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.trainers.pre_train.steps import train_step as pre_train_step
 from lilax._backend.distributed import device_mesh, sharding
-from lilax._backend.utils import accelerator_to_spec_map, gcs_utils, maxtext_utils
-from lilax._backend.utils import maxtext_utils_nnx, state_abstraction
+from lilax._backend.distributed.mesh_topology import accelerator_to_spec_map
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.utils import maxtext_utils
+from lilax._backend.utils import maxtext_utils_nnx
+from lilax._backend.distributed import state_abstraction
 from lilax._backend.observability.diagnostics import jaxpr_dump, mesh_report, sharding_report, system_info
 from lilax._backend.compiler.xla_options import libtpu_flags
-from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.models.creation import nnx_abstract_model
 
 
 def validate_config(config):

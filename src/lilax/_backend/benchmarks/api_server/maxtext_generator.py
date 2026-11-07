@@ -16,7 +16,7 @@ from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.multimodal import utils as mm_utils
 from lilax._backend.observability.diagnostics import system_info
-from lilax.configuration import MaxTextConfig, RLConfig
+from lilax._backend.configs.inert import MaxTextConfig, RLConfig
 from lilax.runtime import Runtime
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"

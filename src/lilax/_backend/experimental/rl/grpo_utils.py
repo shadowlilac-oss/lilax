@@ -25,7 +25,7 @@ from flax import nnx
 
 from lilax._backend.inference.offline_engine import InputData
 from lilax._backend.common.common_types import DecoderBlockType
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.training import param_scanning
 
 from pathwaysutils.experimental import reshard as experimental_reshard
@@ -184,19 +184,19 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
     The input `data` dictionary updated with the generated completions,
     segmentations, positions, and log-probabilities.
   """
-  data[config.train_data_columns] = np.asarray(
-      jnp.repeat(data[config.train_data_columns], config.num_generations, axis=0)
+  data[config.train_data_columns[0]] = np.asarray(
+      jnp.repeat(data[config.train_data_columns[0]], config.num_generations, axis=0)
   )
-  data[f"{config.train_data_columns}_true_length"] = np.asarray(
-      jnp.repeat(data[f"{config.train_data_columns}_true_length"], config.num_generations, axis=0)
+  data[f"{config.train_data_columns[0]}_true_length"] = np.asarray(
+      jnp.repeat(data[f"{config.train_data_columns[0]}_true_length"], config.num_generations, axis=0)
   )
   input_data = []
-  for i, d in enumerate(data[config.train_data_columns]):
+  for i, d in enumerate(data[config.train_data_columns[0]]):
     input_data.append(
         InputData(
             id=f"input_{i}",
             tokens=np.array(d),
-            true_length=np.array(data[f"{config.train_data_columns}_true_length"][i])[0],
+            true_length=np.array(data[f"{config.train_data_columns[0]}_true_length"][i])[0],
         )
     )
 
@@ -207,7 +207,7 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   prompt_completions_logprobs = []
   for i, r in enumerate(results):
     indices = np.arange(r.token_ids.shape[0])
-    completion_mask = (indices >= np.array(data[f"{config.train_data_columns}_true_length"][i])[0]).astype(jnp.int32)
+    completion_mask = (indices >= np.array(data[f"{config.train_data_columns[0]}_true_length"][i])[0]).astype(jnp.int32)
     completion_segmentation.append(completion_mask)
     prompt_completions.append(r.token_ids)
     prompt_completions_segmentation.append(np.full((r.token_ids.shape[0],), 1))
@@ -218,11 +218,11 @@ def generate_offline_completions(config, tokenizer_model, inference_engine, data
   prompt_completions_segmentation = pad_or_trim(prompt_completions_segmentation, config.max_target_length, 0)
   prompt_completions_logprobs = pad_or_trim(prompt_completions_logprobs, config.max_target_length, -np.inf)
 
-  data[f"{config.train_data_columns}_completions"] = prompt_completions
-  data[f"{config.train_data_columns}_completions_segmentation"] = prompt_completions_segmentation
-  data[f"{config.train_data_columns}_completions_position"] = np.where(
-      data[f"{config.train_data_columns}_completions_segmentation"],
-      np.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
+  data[f"{config.train_data_columns[0]}_completions"] = prompt_completions
+  data[f"{config.train_data_columns[0]}_completions_segmentation"] = prompt_completions_segmentation
+  data[f"{config.train_data_columns[0]}_completions_position"] = np.where(
+      data[f"{config.train_data_columns[0]}_completions_segmentation"],
+      np.arange(data[f"{config.train_data_columns[0]}_completions"].shape[1]),
       0,
   )
   data["ar_completions_segmentation"] = completion_segmentation
@@ -372,21 +372,21 @@ def concatenate_prompt_with_completions(config, tokenizer_model, data, completio
     return full_seq, eos_index
 
   batched_concat_and_eos = jax.vmap(_concat_and_find_eos, in_axes=(0, 0, 0))
-  prompts = data[config.train_data_columns]
-  true_length = data[f"{config.train_data_columns}_true_length"]
+  prompts = data[config.train_data_columns[0]]
+  true_length = data[f"{config.train_data_columns[0]}_true_length"]
   prompt_completions, eos_positions = batched_concat_and_eos(prompts, true_length, completions)
-  data[f"{config.train_data_columns}_completions"] = prompt_completions
-  data[f"{config.train_data_columns}_completions_segmentation"] = (
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1])[None, :] < eos_positions[:, None]
+  data[f"{config.train_data_columns[0]}_completions"] = prompt_completions
+  data[f"{config.train_data_columns[0]}_completions_segmentation"] = (
+      jnp.arange(data[f"{config.train_data_columns[0]}_completions"].shape[1])[None, :] < eos_positions[:, None]
   ).astype(jnp.int32)
-  data[f"{config.train_data_columns}_completions_position"] = jnp.where(
-      data[f"{config.train_data_columns}_completions_segmentation"],
-      jnp.arange(data[f"{config.train_data_columns}_completions"].shape[1]),
+  data[f"{config.train_data_columns[0]}_completions_position"] = jnp.where(
+      data[f"{config.train_data_columns[0]}_completions_segmentation"],
+      jnp.arange(data[f"{config.train_data_columns[0]}_completions"].shape[1]),
       0,
   )
-  completion_mask = data[f"{config.train_data_columns}_completions_position"] >= true_length - 1
+  completion_mask = data[f"{config.train_data_columns[0]}_completions_position"] >= true_length - 1
   data["ar_completions_segmentation"] = data[
-      f"{config.train_data_columns}_completions_segmentation"
+      f"{config.train_data_columns[0]}_completions_segmentation"
   ] * completion_mask.astype(jnp.int32)
   return data
 
@@ -441,7 +441,7 @@ def filter_and_split(config, example_batch, num_groups, global_batch_size_per_gr
     return []
 
   total_samples_needed = num_groups * global_batch_size_per_group
-  total_samples_available = example_batch[config.train_data_columns].shape[0]
+  total_samples_available = example_batch[config.train_data_columns[0]].shape[0]
   if total_samples_available < total_samples_needed:
     max_logging.log(
         f"Warning: Not enough samples ({total_samples_available}) in batch to create {num_groups} groups of size"

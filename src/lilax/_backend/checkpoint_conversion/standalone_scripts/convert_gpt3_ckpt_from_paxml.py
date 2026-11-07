@@ -14,12 +14,13 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig, types
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.observability.diagnostics import pytree
-from lilax._backend.utils.training import state_setup
+from lilax._backend.trainers.setup import state_setup
 from lilax._backend.utils import train_utils
 from lilax._backend.utils.globals import MAXTEXT_CONFIGS_DIR
-from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
+from lilax._backend.models.creation import model_factory, nnx_abstract_model
 
 
 def fmt_size(num_bytes: int) -> str:

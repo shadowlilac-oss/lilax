@@ -20,7 +20,7 @@ import jax.tree_util as jtu
 import numpy as np
 import tensorflow as tf
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 _TF_RETRYABLE_ERRORS = (tf.errors.FailedPreconditionError,)
 _GLOBAL_REMOTE_ITERATORS = weakref.WeakSet()
@@ -191,6 +191,7 @@ class MultiHostDataLoadIterator:
       generate_padding_batch: bool = False,
       expansion_loading_factor_for_grain: int = -1,
   ):
+    self._closed = False
     self.global_mesh = global_mesh
     self.dataloader = dataloader
     if hasattr(self.dataloader, "as_numpy_iterator"):
@@ -216,8 +217,12 @@ class MultiHostDataLoadIterator:
     self.out_of_data = False
     self.last_local_data = None
     self._reset_and_unread = True
+    self._closed = False
 
   def close(self):
+    if self._closed:
+      return
+    self._closed = True
     if hasattr(self, "local_iterator"):
       _close_iterator(self.local_iterator)
       _terminate_iterator_workers(self.local_iterator)

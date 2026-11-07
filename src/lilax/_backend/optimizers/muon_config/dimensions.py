@@ -10,8 +10,8 @@ from optax.contrib._muon import MuonDimensionNumbers as mdn
 
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils.model_creation import nnx_abstract_model
-from lilax.configuration.schema import MaxTextConfig
+from lilax._backend.models.creation import nnx_abstract_model
+from lilax._backend.configs.inert import MaxTextConfig
 
 
 def _is_path_contain_any(tuples, path):

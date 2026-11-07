@@ -4,7 +4,7 @@ from flax import nnx, traverse_util
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def collect_moe_bias_updates(config, intermediate_outputs):

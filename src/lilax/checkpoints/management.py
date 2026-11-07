@@ -46,13 +46,14 @@ from lilax._backend.training_engine.checkpointing import (
     CheckpointState as EngineCheckpointState,
 )
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging, maxtext_utils_nnx, train_utils
-from lilax._backend.utils.training import state_setup
-from lilax._backend.utils.generate_param_only_checkpoint import generate_decode_checkpoint as _generate_decode_checkpoint
-from lilax._backend.utils.layerwise_quantization import quantize_checkpoint as _quantize_checkpoint
-from lilax._backend.utils.model_creation import nnx_abstract_model
-from lilax._backend.utils.model_creation.model_factory import from_config
-from lilax.configuration import MaxTextConfig, RLConfig
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils_nnx, train_utils
+from lilax._backend.trainers.setup import state_setup
+from lilax._backend.checkpoint_conversion.generate_param_only_checkpoint import generate_decode_checkpoint as _generate_decode_checkpoint
+from lilax._backend.checkpoint_conversion.layerwise_quantization import quantize_checkpoint as _quantize_checkpoint
+from lilax._backend.models.creation import nnx_abstract_model
+from lilax._backend.models.creation.model_factory import from_config
+from lilax._backend.configs.inert import MaxTextConfig, RLConfig
 
 
 def generate_decode_checkpoint(config):

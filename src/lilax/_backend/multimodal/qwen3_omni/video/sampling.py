@@ -2,7 +2,7 @@
 
 import math
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 FRAME_FACTOR = 2  # Frame count must be divisible by this factor.
 FPS = 2.0  # Default frames per second for video sampling.

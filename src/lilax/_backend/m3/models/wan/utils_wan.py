@@ -15,7 +15,7 @@ import yaml
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
 from lilax._backend.m3.core import sharding as m3_sharding
 from lilax._backend.m3.core.sharding import TensorType, create_mesh
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 BlockSizes = tokamax_splash.SplashConfig
 CONTEXT = "context"

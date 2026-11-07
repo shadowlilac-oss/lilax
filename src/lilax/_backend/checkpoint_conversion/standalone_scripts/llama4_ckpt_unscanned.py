@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from lilax._backend.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import MODEL_PARAMS_DICT
 from lilax._backend.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 CAST_DTYPE = ml_dtypes.bfloat16

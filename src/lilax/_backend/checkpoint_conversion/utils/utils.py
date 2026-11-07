@@ -36,7 +36,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_N
 from lilax._backend.checkpoint_conversion.utils._memory_monitor import MemoryMonitorTqdm, print_peak_memory, print_ram_usage
 from lilax._backend.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
 SAFE_TENSORS_WEIGHTS_FILE = "model.safetensors"

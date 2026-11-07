@@ -21,9 +21,10 @@ from lilax._backend.common import train_state_nnx
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
 from lilax._backend.layers.quantization.configure import configure_quantization
 from lilax._backend.distributed import device_mesh, sharding
-from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.observability.diagnostics import system_info
-from lilax._backend.utils.model_creation import model_factory, nnx_abstract_model
+from lilax._backend.models.creation import model_factory, nnx_abstract_model
 
 
 def create_abstract_params(config, mesh: Mesh) -> nnx.State:

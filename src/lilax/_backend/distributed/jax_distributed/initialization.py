@@ -1,14 +1,17 @@
 """Backend dispatch for initializing the JAX distributed system."""
 
+import os
+
 import jax
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 
-from lilax._backend.utils import elastic_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed.jax_distributed.backend import is_cpu_backend, is_gpu_backend
 from lilax._backend.distributed.jax_distributed.cpu import initialize_jax_for_cpu
 from lilax._backend.distributed.jax_distributed.gpu import initialize_jax_for_gpu
+from lilax._backend.distributed.jax_distributed.jaxcoord import initialize_jaxcoord
 from lilax._backend.distributed.jax_distributed.tpu import initialize_jax_for_tpu_with_emergency_checkpointing
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
@@ -25,7 +28,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     max_logging.log("Skipping jax distributed system since its not needed for single controller.")
     if raw_keys["enable_multi_tier_checkpointing"]:
       max_logging.log("Initializing multi-tier checkpointing for single controller...")
-      mtc_init_kwargs = elastic_utils.single_controller_mtc_init_kwargs(raw_keys)
+      mtc_init_kwargs = elastic.single_controller_mtc_init_kwargs(raw_keys)
       initialize_multi_tier_checkpointing(
           local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
           backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
@@ -41,6 +44,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
     return
   if raw_keys["inference_benchmark_test"] or raw_keys["compile_topology"]:
     max_logging.log("Skipping jax distributed system initialization.")
+    return
+  if os.environ.get("LILAX_JAXCOORD") == "1" and not (
+      raw_keys["hardware"] == "tpu" and (raw_keys["enable_multi_tier_checkpointing"] or raw_keys["enable_emergency_checkpoint"])
+  ):
+    initialize_jaxcoord(raw_keys)
     return
   if is_gpu_backend(raw_keys):
     max_logging.log("Attempting to initialize the jax distributed system for GPU backend...")

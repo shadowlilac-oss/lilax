@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from flax.training import train_state
 import orbax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.checkpoint_conversion.standalone_scripts._gemma_conversion_process import run_conversion
 

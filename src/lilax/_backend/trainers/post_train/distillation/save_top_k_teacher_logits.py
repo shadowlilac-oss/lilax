@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import tensorflow as tf
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def get_top_k_logits(logits: jax.Array, k: int):

@@ -12,8 +12,8 @@ from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
 
 from lilax._backend.input_pipeline.multihost_dataloading import cleanup_all_iterators
-from lilax._backend.utils import gcs_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.observability import max_logging
 
 elastic_manager: manager.Manager | None = None
 pending_reinit_recorder = None

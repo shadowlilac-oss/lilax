@@ -6,21 +6,25 @@ import optax
 from flax import nnx
 from flax.core.spmd import logical_axis_rules
 from flax.nnx import tracers
-from orbax import checkpoint as ocp
 from tunix.sft import diffusion as tunix_diffusion_sft
-from tunix.sft import metrics_logger, peft_trainer
+from tunix.sft import peft_trainer
 
 from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import GoodputEvent, RECORD_JOB_END_TIME, maybe_record_goodput, record_goodput
 from lilax._backend.integration.tunix import diffusion_sft as maxtext_diffusion_sft
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.post_train.sft import hooks
-from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step
+from lilax._backend.trainers.post_train.checkpoint_selection import restore_trainer_step, training_checkpoint_options
+from lilax._backend.trainers.post_train.metrics_logging import tensorboard_logging_options
 from lilax._backend.trainers.post_train.profiling import TrainingCapture
+from lilax._backend.trainers.post_train.scalar_listeners import release_metrics_logger
+from lilax._backend.trainers.post_train.lifecycle import TrainerDataHooks, begin_training, finish_training
 from lilax._backend.trainers.pre_train.steps.loss import loss_fn
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import lora_utils, max_logging, maxtext_utils
-from lilax._backend.utils.model_creation import pretrained
+from lilax._backend.utils import lora_utils
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils
+from lilax._backend.models.creation import pretrained
 
 
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
@@ -91,11 +95,8 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
 
 
 def get_tunix_config(mt_config, report_to=None):
-  checkpointing_options = ocp.CheckpointManagerOptions(
-      save_interval_steps=mt_config.checkpoint_period, enable_async_checkpointing=mt_config.async_checkpointing
-  )
-  metrics_logging_options = (metrics_logger.MetricsLoggerOptions(log_dir=mt_config.tensorboard_dir)
-                             if report_to is None else None)
+  checkpointing_options = training_checkpoint_options(mt_config)
+  metrics_logging_options = tensorboard_logging_options(mt_config.tensorboard_dir) if report_to is None else None
   return peft_trainer.TrainingConfig(
       eval_every_n_steps=mt_config.eval_interval, max_steps=mt_config.steps,
       gradient_accumulation_steps=mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None,
@@ -163,6 +164,7 @@ def validate_config(config):
 def setup_trainer_state(
     mt_config, goodput_recorder=None, *, model=None, mesh=None, train_iterator=None, eval_iterator=None,
     checkpoint_step=None, report_to=None, checkpoint_manager=None,
+    optimizer=None, learning_rate_schedule=None,
 ):
   validate_config(mt_config)
   tunix_config = get_tunix_config(mt_config, report_to=report_to)
@@ -181,8 +183,10 @@ def setup_trainer_state(
   with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora and not (supplied_model and lora_utils.is_lora_enabled(model)):
       model = lora_utils.apply_lora_to_model(model, mesh, mt_config)
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
-    optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
+    if learning_rate_schedule is None:
+      learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(mt_config)
+    if optimizer is None:
+      optimizer = optimizers.get_optimizer(mt_config, learning_rate_schedule, model)
     if mt_config.gradient_clipping_threshold > 0:
       optimizer = optax.chain(optax.clip_by_global_norm(max_norm=mt_config.gradient_clipping_threshold), optimizer)
     with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
@@ -194,15 +198,19 @@ def setup_trainer_state(
       if mt_config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(model, mt_config)
       trainer = _create_trainer(model, optimizer, tunix_config, mt_config)
-      if checkpoint_step is not None or checkpoint_manager is not None:
-        restore_trainer_step(trainer, checkpoint_root, checkpoint_step, checkpoint_manager)
-      trainer.with_training_hooks(training_hooks)
-      trainer.with_data_hooks(data_hooks)
-      trainer = configure_training_objective(trainer, mt_config)
+      try:
+        if checkpoint_step is not None or checkpoint_manager is not None:
+          restore_trainer_step(trainer, checkpoint_root, checkpoint_step, checkpoint_manager)
+        trainer.with_training_hooks(training_hooks)
+        trainer.with_data_hooks(data_hooks)
+        trainer = configure_training_objective(trainer, mt_config)
+      except BaseException:
+        release_metrics_logger(trainer.metrics_logger, close_backends=True)
+        raise
   return trainer, mesh
 
 
-def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=None):
+def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=None, lifecycle=None):
   with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     data_hooks = trainer.data_hooks
     if train_iterator is not None:
@@ -215,9 +223,19 @@ def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=
     is_block_diffusion = getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion"
     records_internal_metrics = bool(getattr(mt_config, "record_internal_nn_metrics", False))
     enable_nnx_cache = mt_config.num_experts <= 1 and not (is_block_diffusion and records_internal_metrics)
-    data_hooks.capture = TrainingCapture(mt_config, trainer)
+    data_hooks.capture = TrainingCapture(
+        mt_config, trainer, profile_dir=getattr(lifecycle.args, "xprof_dir", None) if lifecycle is not None else None,
+        on_capture_complete=lifecycle._log_capture if lifecycle is not None else None,
+    )
     try:
-      trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator, cache_nnx_graph=enable_nnx_cache)
+      if lifecycle is not None:
+        begin_training(trainer, lifecycle)
+        trainer.with_data_hooks(TrainerDataHooks(data_hooks, lifecycle, trainer.iter_steps))
+      trainer.train(data_hooks.train_data_iterator, data_hooks.eval_data_iterator if lifecycle is None else None,
+                    cache_nnx_graph=enable_nnx_cache)
+      if lifecycle is not None:
+        finish_training(trainer, lifecycle)
+        trainer.close()
     finally:
       data_hooks.finish_capture(trainer)
   return trainer
@@ -226,10 +244,12 @@ def train_model(mt_config, trainer, mesh, *, train_iterator=None, eval_iterator=
 def train(
     mt_config, goodput_recorder=None, *, model=None, mesh=None, train_iterator=None, eval_iterator=None,
     checkpoint_step=None, reporter_factory=None, report_to=None, checkpoint_manager=None,
+    optimizer=None, learning_rate_schedule=None, lifecycle=None,
 ):
   trainer, mesh = setup_trainer_state(
       mt_config, goodput_recorder, model=model, mesh=mesh, train_iterator=train_iterator, eval_iterator=eval_iterator,
       checkpoint_step=checkpoint_step, report_to=report_to, checkpoint_manager=checkpoint_manager,
+      optimizer=optimizer, learning_rate_schedule=learning_rate_schedule,
   )
   job_completed_gracefully = False
   reporter = None
@@ -237,15 +257,18 @@ def train(
     if reporter_factory is not None:
       reporter = reporter_factory(mt_config)
       trainer.training_hooks.metric_logger.reporter = reporter
-    trainer = train_model(mt_config, trainer, mesh)
+    trainer = train_model(mt_config, trainer, mesh, lifecycle=lifecycle)
     job_completed_gracefully = True
   finally:
     try:
       if not job_completed_gracefully:
         trainer.training_hooks.metric_logger.flush_metrics_and_cleanup()
     finally:
-      if reporter is not None:
-        reporter.close()
+      try:
+        if reporter is not None:
+          reporter.close()
+      finally:
+        release_metrics_logger(trainer.metrics_logger, close_backends=not job_completed_gracefully)
     if job_completed_gracefully:
       record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
   return trainer, mesh

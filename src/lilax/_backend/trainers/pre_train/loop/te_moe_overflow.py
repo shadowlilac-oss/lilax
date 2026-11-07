@@ -3,7 +3,7 @@
 import jax
 import numpy as np
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def track_te_moe_overflow(config, step, metrics, te_moe_overflow_window, prof):

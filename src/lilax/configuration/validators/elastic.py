@@ -1,4 +1,4 @@
-from lilax.configuration.domain_types import DatasetType
+from lilax._backend.configs.dataset_types import DatasetType
 
 
 def validate_elastic_training_options(self):

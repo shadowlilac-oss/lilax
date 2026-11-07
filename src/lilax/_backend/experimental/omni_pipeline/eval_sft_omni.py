@@ -16,9 +16,10 @@ from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.trainers.post_train.rl import utils_rl
-from lilax._backend.utils import gcs_utils, max_logging
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
-from lilax.configuration import MaxTextConfig
+from lilax._backend.configs.inert import MaxTextConfig
 
 
 @dataclass
@@ -85,7 +86,16 @@ def evaluate_sft_omni(
 
   engine = maxengine.MaxEngine(config)
   params = engine.load_params()
-  tokenizer = engine.build_tokenizer(engine.get_tokenizer())
+  return evaluate(
+      engine, params, config, num_examples=num_examples, tmp_results_file=tmp_results_file,
+      remove_tmp_results=remove_tmp_results, ckpt_type=ckpt_type, image_resize=image_resize,
+  )
+
+
+def evaluate(engine, params, config, *, eval_dataset=None, tokenizer=None, num_examples=-1,
+             tmp_results_file="omni_eval_results.csv", remove_tmp_results=True, ckpt_type="sft", image_resize=-1):
+  if tokenizer is None:
+    tokenizer = engine.build_tokenizer(engine.get_tokenizer())
   max_prefill_predict_length = getattr(config, "max_prefill_predict_length", 1024)
   max_target_length = getattr(config, "max_target_length", 2048)
   eos_token_ids = {tokenizer.eos_id} if getattr(tokenizer, "eos_id", None) is not None else set()
@@ -104,7 +114,8 @@ def evaluate_sft_omni(
   max_logging.log(f"Results will be saved to {tmp_results_file} and uploaded to GCS: {result_gcs_path}")
   results_data = []
   tmvp_config = TmvpConfig()
-  test_ds = datasets.load_dataset(config.hf_path, "default", split=config.hf_eval_split)
+  test_ds = (datasets.load_dataset(config.hf_path, "default", split=config.hf_eval_split)
+             if eval_dataset is None else eval_dataset)
   for idx, example in enumerate(tqdm(test_ds, desc=f"Evaluating {config.hf_path} dataset")):
     question = example["query"]
     image_np = np.asarray(example["image"].convert("RGB"))
@@ -189,12 +200,12 @@ def evaluate_sft_omni(
     if is_correct:
       correct_count += 1
     total_count += 1
-    max_logging.log(f"Running accuracy: {correct_count / total_count:.4f} | Processed: {total_count}/{len(test_ds)}")
+    max_logging.log(f"Running accuracy: {correct_count / total_count:.4f} | Processed: {total_count}")
     if num_examples != -1 and total_count >= num_examples:
       break
     if idx % 100 == 0 and result_gcs_path is not None and jax.process_index() == 0:
       pd.DataFrame(results_data).to_csv(tmp_results_file, index=False)
-      gcs_utils.upload_blob(result_gcs_path, tmp_results_file)
+      gcs.upload_blob(result_gcs_path, tmp_results_file)
       max_logging.log(f"Uploaded the results file to GCS bucket: {result_gcs_path}")
   if total_count > 0:
     max_logging.log(f"\nFinal accuracy on {config.hf_path} dataset: {correct_count / total_count:.4f}")
@@ -203,7 +214,7 @@ def evaluate_sft_omni(
   if result_gcs_path is not None and jax.process_index() == 0:
     pd.DataFrame(results_data).to_csv(tmp_results_file, index=False)
     max_logging.log(f"Saved predictions to {tmp_results_file}")
-    gcs_utils.upload_blob(result_gcs_path, tmp_results_file)
+    gcs.upload_blob(result_gcs_path, tmp_results_file)
     max_logging.log(f"Uploaded the results file to GCS bucket: {result_gcs_path}")
     if remove_tmp_results and os.path.exists(tmp_results_file):
       os.remove(tmp_results_file)

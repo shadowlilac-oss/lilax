@@ -5,7 +5,7 @@ from typing import Any
 from flax import nnx
 import jax
 from lilax._backend.common.checkpoints.lora_filter import _filter_lora_trainable_state
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def _deep_merge_dicts(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:

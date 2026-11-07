@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from lilax._backend.inference.mlperf import offline_inference
-from lilax.generation.engine import create_engine_from_config
+from lilax.generation._engine import create_engine_from_config
 
 
 warnings.simplefilter("ignore", category=FutureWarning)

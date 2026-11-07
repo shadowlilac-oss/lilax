@@ -17,7 +17,7 @@ import jax
 
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
 from lilax._backend.common.cloud import is_decoupled
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 @contextlib.contextmanager
@@ -45,12 +45,12 @@ def xprof_server(logdir, port, process_index):
 class Profiler:
   """Activate or deactivate a profiler based on configuration."""
 
-  def __init__(self, config, offset_step=0, on_capture_complete=None):
+  def __init__(self, config, offset_step=0, on_capture_complete=None, *, profile_dir=None):
     self.libcudart = None
     self.on_capture_complete = on_capture_complete
     self.mode = config.profiler
     if self.mode != "":
-      self.base_output_dir = config.tensorboard_dir
+      self.base_output_dir = config.tensorboard_dir if profile_dir is None else profile_dir
     self.output_path = ""
     self.upload_all_profiler_results = config.upload_all_profiler_results
     self.profile_cleanly = config.profile_cleanly

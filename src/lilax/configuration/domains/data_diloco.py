@@ -2,7 +2,7 @@ import logging
 
 from pydantic import BaseModel, Field, NonNegativeInt, model_validator
 
-logger = logging.getLogger("lilax.configuration.schema")
+logger = logging.getLogger("lilax._backend.configs.inert")
 
 
 class DilocoParams(BaseModel):

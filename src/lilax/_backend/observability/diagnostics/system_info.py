@@ -2,7 +2,7 @@
 
 import jax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def print_system_information():

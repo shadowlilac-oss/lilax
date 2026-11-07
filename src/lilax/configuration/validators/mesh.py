@@ -6,7 +6,7 @@ import yaml
 from lilax._backend.utils.globals import MAXTEXT_PKG_DIR
 from lilax.configuration.domains.execution_mesh import CustomRule
 
-logger = logging.getLogger("lilax.configuration.schema")
+logger = logging.getLogger("lilax._backend.configs.inert")
 
 
 def resolve_custom_mesh_rules(self):

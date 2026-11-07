@@ -7,7 +7,8 @@ import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as 
 
 from lilax._backend.common import state_initialization
 from lilax._backend.common.checkpoints import checkpointing
-from lilax._backend.utils import max_logging, state_abstraction
+from lilax._backend.observability import max_logging
+from lilax._backend.distributed import state_abstraction
 from lilax._backend.pytree import partitioning
 
 

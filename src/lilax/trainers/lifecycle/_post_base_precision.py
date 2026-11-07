@@ -8,6 +8,12 @@ def check_precision_overrides(graph_config, overrides):
       name for name in PRECISION_FIELDS
       if name in overrides and overrides[name] != getattr(graph_config, name)
   ]
+  for name in ("dtype", "grad_dtype", "weight_dtype", "matmul_precision", "remat_policy", "remat_policy_for_vit",
+               "parameter_memory_host_offload", "optimizer_memory_host_offload"):
+    if name in overrides:
+      requested, current = overrides[name], getattr(graph_config, name)
+      if str(getattr(requested, "value", requested)) != str(getattr(current, "value", current)):
+        changed.append(name)
   if changed:
     raise ValueError(f"Cannot change precision settings on a materialized model: {', '.join(changed)}.")
 

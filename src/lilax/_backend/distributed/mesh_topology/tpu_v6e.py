@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def optimize_mesh_for_tpu_v6e(mesh, devices):

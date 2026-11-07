@@ -24,19 +24,19 @@ from lilax._backend.input_pipeline.input_pipeline_interface import create_data_i
 from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import diloco_sharding
+from lilax._backend.trainers.diloco import diloco_sharding
 from lilax._backend.utils import elastic_utils
 from lilax._backend.utils import lora_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.distributed import sharding
-from lilax._backend.utils import state_abstraction
+from lilax._backend.distributed import state_abstraction
 from lilax._backend.layers.context_parallel import sequence_reorder
 from lilax._backend.observability.diagnostics import mesh_report
 from lilax._backend.observability.diagnostics import sharding_report
-from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.models.creation import nnx_abstract_model
 from lilax._backend.integration.transformer_engine import moe_bootstrap
-from lilax._backend.utils.training import state_setup
+from lilax._backend.trainers.setup import state_setup
 from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
 from lilax._backend.utils.training.rampup_batch import create_rampup_manager
 
@@ -204,6 +204,7 @@ def setup_train_loop(
     config, recorder, devices=None, elastic_retry_cache=None, *, model=None, mesh=None,
     runtime=None, data_iterator=None, eval_data_iterator=None, checkpoint_step=-1,
     checkpoint_manager=_UNSET_CHECKPOINT_MANAGER, selected_source=None,
+    tx=None, learning_rate_schedule=None,
 ):
   """Set up training state, checkpointing, model, mesh, and data loaders."""
   supplied_model = model
@@ -252,7 +253,10 @@ def setup_train_loop(
       def create_model(model_state=supplied_state):
         return nnx.merge(supplied_graphdef, model_state)
 
-    learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
+    if learning_rate_schedule is None:
+      learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    if tx is None:
+      tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=mesh)
 
     def create_train_state_fn(*model_args):
       train_model = create_model(*model_args)

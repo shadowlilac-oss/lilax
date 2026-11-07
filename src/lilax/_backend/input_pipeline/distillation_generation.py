@@ -12,7 +12,8 @@ from transformers import AutoTokenizer
 import tqdm.asyncio
 
 from lilax._backend.input_pipeline import distillation_data_processing
-from lilax._backend.utils import gcs_utils, max_logging
+from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.observability import max_logging
 
 
 async def _send_request(request, stub, tokenizer, num_generations, progress_bar):

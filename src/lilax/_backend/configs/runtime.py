@@ -1,7 +1,7 @@
 """Resolve inert public configurations for the native runtime."""
 
 from lilax._backend.configs import pyconfig, types
-from lilax.configuration.schema import (
+from lilax._backend.configs.inert import (
     CustomRule, DecoderBlockType, MaxTextConfig, ReorderStrategy, RLConfig, ShardMode, VisionEncoderBlockType,
 )
 
@@ -31,11 +31,16 @@ def resolve_runtime_config(
     values.pop("qwix_qat_config", None)
   else:
     values = public_config.model_copy(update=overrides).get_keys()
-  return pyconfig._resolve_native_config(
+  resolved = pyconfig._resolve_native_config(
       _native_enum_values(values), (public_config._explicit_keys | overrides.keys()) - {"qwix_qat_config"},
       config_class, resolved_values=True,
       train_dataset_provided=train_dataset_provided, eval_dataset_provided=eval_dataset_provided,
   )
+  if "tensorboard_dir" in overrides:
+    resolved = pyconfig.HyperParameters(resolved._pydantic_config.model_copy(
+        update={"tensorboard_dir": overrides["tensorboard_dir"]},
+    ))
+  return resolved
 
 
 def resolve_initialized_config(
@@ -64,6 +69,8 @@ def resolve_initialized_config(
       config, "__pydantic_fields_set__",
       (public_config._explicit_keys | overrides.keys()) - {"qwix_qat_config"} & types.MaxTextConfig.model_fields.keys(),
   )
+  if "tensorboard_dir" in overrides:
+    config = config.model_copy(update={"tensorboard_dir": overrides["tensorboard_dir"]})
   return pyconfig.HyperParameters(config)
 
 

@@ -73,7 +73,8 @@ from lilax._backend.layers.decoder import families, layer_layout, output_project
 
 from lilax._backend.layers import scan_cache
 from lilax._backend.multimodal import utils as mm_utils
-from lilax._backend.utils import max_logging, maxtext_utils, maxtext_utils_nnx
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx
 from lilax._backend.distributed import sharding
 from lilax._backend.device_memory import memory_kinds
 from lilax._backend.distributed.sharding import create_sharding

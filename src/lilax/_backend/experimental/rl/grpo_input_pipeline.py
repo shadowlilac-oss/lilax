@@ -99,6 +99,7 @@ def preprocessing_pipeline(
     add_eos=True,
     num_threads=1,
     drop_remainder=False,
+    processing_class=None,
 ):
   """Creates a preprocessing pipeline for a Hugging Face dataset.
 
@@ -134,7 +135,7 @@ def preprocessing_pipeline(
     raise ValueError("Batch size should be divisible number of global devices.")
 
   if tokenize:
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
+    tokenizer = processing_class or transformers.AutoTokenizer.from_pretrained(
         tokenizer_path,
         add_bos_token=add_bos,
         add_eos_token=add_eos,
@@ -203,6 +204,7 @@ def make_hf_train_iterator(
     config,
     global_mesh,
     process_indices_train,
+    *, dataset=None, processing_class=None,
 ):
   """Loads a Hugging Face dataset and creates a local preprocessed iterator.
 
@@ -218,7 +220,7 @@ def make_hf_train_iterator(
   Returns:
     A local data iterator for the training set.
   """
-  train_ds = datasets.load_dataset(
+  train_ds = dataset if dataset is not None else datasets.load_dataset(
       config.hf_path,
       data_dir=config.hf_data_dir,
       data_files=config.hf_train_files,
@@ -231,17 +233,18 @@ def make_hf_train_iterator(
       dataloading_host_count=len(process_indices_train),
       global_mesh=global_mesh,
       dataset=train_ds,
-      data_column_names=[config.train_data_columns],
+      data_column_names=config.train_data_columns,
       tokenize=config.tokenize_train_data,
       tokenizer_path=config.tokenizer_path,
       hf_access_token=config.hf_access_token,
       global_batch_size=config.global_batch_size_to_load,
       max_target_length=config.max_prefill_predict_length,
+      processing_class=processing_class,
   )
   return local_iter
 
 
-def create_data_iterator(config, mesh):
+def create_data_iterator(config, mesh, *, dataset=None, processing_class=None):
   """Creates a data iterator for GRPO training.
 
   This function determines which processes should load data and then creates a
@@ -269,7 +272,10 @@ def create_data_iterator(config, mesh):
   if config.eval_interval > 0:
     raise ValueError("GRPO input pipeline is not supported for eval data")
   train_iterator = input_pipeline_interface.create_process_specific_iterator(
-      config, mesh, process_indices_train, make_hf_train_iterator
+      config, mesh, process_indices_train,
+      lambda config, mesh, processes: make_hf_train_iterator(
+          config, mesh, processes, dataset=dataset, processing_class=processing_class,
+      ),
   )
   return train_iterator
 

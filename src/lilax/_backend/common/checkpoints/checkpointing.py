@@ -23,12 +23,15 @@ from lilax._backend.common.checkpoints.linen_compatibility import (
 from lilax._backend.common.checkpoints.lora_filter import _filter_lora_trainable_state
 from lilax._backend.common.checkpoints.quantized_restore import _augment_want_with_scales, maybe_dequantize_restored_params
 from lilax._backend.common.checkpoints.restore_source_types import RestoreSource, _normalize_checkpoint_root
+from lilax._backend.common.checkpoints.save_receipt import save_receipt
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
 from lilax._backend.trainers.diloco import checkpointing as diloco_checkpoint_utils
-from lilax._backend.utils import elastic_utils, exceptions, gcs_utils
+from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.trainers import stop_training as exceptions
+from lilax._backend.storage import gcs
 from lilax._backend.utils import globals as maxtext_globals
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
 
@@ -74,7 +77,7 @@ def create_orbax_checkpoint_manager(
         " will be removed soon, this is now handled dynamically by Orbax Checkpointer."
     )
   max_logging.log(f"Creating checkpointer with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
-  validated_path = gcs_utils.mkdir_and_check_permissions(checkpoint_dir)
+  validated_path = gcs.mkdir_and_check_permissions(checkpoint_dir)
   if ocdbt_target_data_file_size_bytes is None:
     ocdbt_target_data_file_size_bytes = DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   context = checkpoint_context.build_context(
@@ -296,7 +299,16 @@ def load_params_from_path(
   max_logging.log(f"restoring params from {load_parameters_from_path}")
   path = epath.Path(_normalize_checkpoint_root(load_parameters_from_path))
   is_nnx = isinstance(abstract_unboxed_params, nnx.State)
-  want = abstract_unboxed_params.to_pure_dict() if is_nnx else abstract_unboxed_params
+  if is_nnx:
+    overwrite_state, restore_state = nnx.split_state(
+        abstract_unboxed_params,
+        lambda path, var: isinstance(var, nnx.Variable)
+        and variablelib.variable_name_from_type(var.type, allow_register=True) == "_overwrite_with_gradient",
+        ...,
+    )
+    want = restore_state.to_pure_dict()
+  else:
+    want = abstract_unboxed_params
   restore_key = os.path.basename(str(load_parameters_from_path).rstrip("/"))
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
@@ -334,7 +346,7 @@ def load_params_from_path(
     stored_params_meta = stored.get("params") if isinstance(stored, dict) and isinstance(stored.get("params"), dict) else {}
     stored_collections = set(stored_params_meta.keys()) if stored_params_meta else None
     collection_leaves = collections.defaultdict(dict)
-    for path_tuple, leaf in nnx.to_flat_state(abstract_unboxed_params):
+    for path_tuple, leaf in nnx.to_flat_state(restore_state):
       if isinstance(leaf, nnx.Variable):
         col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
         value = leaf.get_value() if hasattr(leaf, "get_value") else leaf
@@ -415,7 +427,7 @@ def load_params_from_path(
   _raise_on_weight_mismatch(want, restored_weights)
   _log_unconsumed_checkpoint_weights(want, audit_stored)
   if is_nnx:
-    nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
+    nnx.replace_by_pure_dict(abstract_unboxed_params, _deep_merge_dicts(restored_weights, overwrite_state.to_pure_dict()))
     return abstract_unboxed_params
   return restored_weights
 
@@ -469,43 +481,58 @@ def _handle_post_checkpoint_preemption(checkpoint_manager, step, force_ckpt_save
 def checkpoint_exception_guard(config, checkpoint_manager, handler_fn=None):
   try:
     yield
-    elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+    elastic.maybe_elastic_scale_up(config, checkpoint_manager)
   except Exception as error:
-    elastic_utils.maybe_bubble_elastic_exception(config, error)
+    elastic.maybe_bubble_elastic_exception(config, error)
     if handler_fn:
       handler_fn(error)
     else:
       raise
 
 
-def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None, training_graph=None):
-  if checkpoint_manager is None:
-    return
+def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None, training_graph=None, *,
+                          action_id=None, completed_step=None, return_result=False, force=False):
+  if return_result and (action_id is None or completed_step is None):
+    raise ValueError("A save receipt requires action_id and completed_step.")
+  if checkpoint_manager is None and not return_result:
+    return None
   if step is not None:
     actual_step = int(step)
   else:
     actual_step = int(state.step if config.enable_diloco else state.optimizer.step) - 1
-  force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+  if checkpoint_manager is None:
+    return save_receipt(action_id, completed_step, actual_step)
+  force_ckpt_save = force or (step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0))
   if not _should_save_checkpoint_at_step(checkpoint_manager, actual_step, config, force_ckpt_save):
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
-    return
+    return save_receipt(action_id, completed_step, actual_step) if return_result else None
   if latest_step(checkpoint_manager) == actual_step or actual_step in all_steps(checkpoint_manager):
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
-    return
+    return save_receipt(action_id, completed_step, actual_step) if return_result else None
 
   def _checkpoint_error_handler(err):
     raise RuntimeError(f"Checkpointing failed. {str(err)}") from err
 
   with checkpoint_exception_guard(config, checkpoint_manager, _checkpoint_error_handler):
     checkpoint_saved = save_checkpoint(
-        checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save, training_graph=training_graph
+        checkpoint_manager, actual_step, state, config, data_iterator, force_ckpt_save, training_graph=training_graph,
+        action_id=action_id, completed_step=completed_step, return_result=return_result,
     )
-  if checkpoint_saved:
+  if checkpoint_saved.outcome != "no_save" if return_result else checkpoint_saved:
     print_save_message(actual_step, config.async_checkpointing)
-  _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
+  try:
+    _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
+  except exceptions.StopTraining as error:
+    if return_result:
+      error.save_receipt = checkpoint_saved
+    raise
+  return checkpoint_saved if return_result else None
 
 
-def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False, training_graph=None):
+def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False, training_graph=None, *,
+                    action_id=None, completed_step=None, return_result=False):
+  if return_result and (action_id is None or completed_step is None):
+    raise ValueError("A save receipt requires action_id and completed_step.")
   if not isinstance(state, (dict, nnx.State, train_state.TrainState, struct.PyTreeNode)):
     if isinstance(state, train_state_nnx.TrainStateNNX):
       state = nnx.state(state)
@@ -536,8 +563,12 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     if filtered:
       state = filtered
   if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
-    return emergency_checkpointing.save(checkpoint_manager, step, state, config, force)
+    metadata = {"lilax_save_action": {"action_id": action_id, "completed_step": completed_step}} if return_result else None
+    saved = emergency_checkpointing.save(checkpoint_manager, step, state, config, force, custom_metadata=metadata)
+    return save_receipt(action_id, completed_step, step, saved, unsupported_tier=True) if return_result else saved
   custom_metadata = {}
+  if return_result:
+    custom_metadata["lilax_save_action"] = {"action_id": action_id, "completed_step": completed_step}
   if training_graph is not None:
     custom_metadata["maxtext_easy_training_graph"] = training_graph
   if config:
@@ -553,8 +584,11 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
       response = checkpoint_manager.save_checkpointables_async(
           step, checkpointables, force=force, custom_metadata=custom_metadata
       )
-      return response is not None
-    return checkpoint_manager.save_checkpointables(step, checkpointables, force=force, custom_metadata=custom_metadata)
+      return save_receipt(action_id, completed_step, step, response) if return_result else response is not None
+    saved = checkpoint_manager.save_checkpointables(step, checkpointables, force=force, custom_metadata=custom_metadata)
+    return save_receipt(action_id, completed_step, step, saved) if return_result else saved
   except FileExistsError as error:
+    if return_result and not isinstance(error, ocp.training.errors.StepAlreadyExistsError):
+      raise
     max_logging.log(f"Checkpoint for step {step} already exists, skipping save. ({error})")
-    return False
+    return save_receipt(action_id, completed_step, step, False) if return_result else False

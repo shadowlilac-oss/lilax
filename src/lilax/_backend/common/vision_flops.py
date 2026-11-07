@@ -1,6 +1,6 @@
 """FLOPs accounting for multimodal vision encoders."""
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def calculate_gemma3_vision_layers_tflops_per_device(config):

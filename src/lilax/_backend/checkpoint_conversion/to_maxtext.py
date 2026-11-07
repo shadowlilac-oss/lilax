@@ -17,6 +17,11 @@ from huggingface_hub import hf_hub_download, list_repo_files
 from orbax.checkpoint import type_handlers
 from safetensors import safe_open
 
+from lilax._backend.checkpoint_conversion.projection_layout import (
+    is_hybrid_qwen_adapter, mlp_only_adapter, projection_layout_adapter, supports_hybrid_fp8_qkv, supports_mlp_layout,
+    validate_huggingface_projection_layout, validate_mlp_only_layout,
+)
+from lilax._backend.checkpoint_conversion.model_families.qwen3_5 import fused as fused_qwen3_5
 from lilax._backend.checkpoint_conversion.model_families.hf_model_config_registry import HF_MODEL_CONFIGS
 from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry import HOOK_FNS, PARAM_MAPPING
 from lilax._backend.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
@@ -27,9 +32,9 @@ from lilax._backend.checkpoint_conversion.utils.utils import (
 from lilax._backend.configs import pyconfig
 from lilax._backend.configs.types import DType
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.utils.globals import HF_IDS
-from lilax._backend.utils.model_creation import nnx_abstract_model
+from lilax._backend.models.creation import nnx_abstract_model
 
 
 def resolve_scale_key(key: str, container) -> str:
@@ -793,8 +798,21 @@ def convert_to_maxtext(
   hf_lora_adapter_path = config.hf_lora_adapter_path
   is_adapter_only = bool(hf_lora_adapter_path and not config.load_parameters_path)
   is_merge_mode = bool(hf_lora_adapter_path and config.load_parameters_path)
+  validate_mlp_only_layout(config)
+  validate_huggingface_projection_layout(config, hf_config=HF_MODEL_CONFIGS.get(config.model_name))
+  if hf_lora_adapter_path and (config.fused_qkv or config.fused_mlp) and mlp_only_adapter(config) is not None:
+    raise NotImplementedError("Fused projection conversion with LoRA is not supported for this model.")
+  if ((config.fused_qkv or config.fused_mlp) and mlp_only_adapter(config) is not None
+      and HF_MODEL_CONFIGS[config.model_name].to_dict().get("quantization_config")
+      and not (config.fused_qkv and supports_hybrid_fp8_qkv(config) and projection_layout_adapter(config) is not None)):
+    raise NotImplementedError("Fused projection conversion from a quantized Hugging Face model is not supported.")
 
   if is_adapter_only:
+    layout_adapter = projection_layout_adapter(config)
+    if layout_adapter is not None and (
+        config.fused_qkv or (supports_mlp_layout(layout_adapter) and config.fused_mlp)
+    ):
+      raise NotImplementedError("Import of LoRA factors into fused projections is not supported.")
     max_logging.log("LoRA adapter path provided and load_parameters_path NOT provided. Converting LoRA adapter ONLY.")
     lora_weights = load_hf_dict_from_safetensors(hf_lora_adapter_path, hf_token, revision)
     state_params = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
@@ -848,10 +866,23 @@ def convert_to_maxtext(
       tensor_getter = _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision)
 
     model_key = config.model_name
+    layout_adapter = projection_layout_adapter(config)
+    fuse_projections = layout_adapter is not None and (
+        config.fused_qkv or (supports_mlp_layout(layout_adapter) and config.fused_mlp)
+    )
+    output_config = config
+    mapping_config = output_config
+    if fuse_projections:
+      native_config = getattr(output_config, "_pydantic_config", output_config)
+      mapping_config = pyconfig.HyperParameters(
+          native_config.model_copy(update={
+              "fused_qkv": False, "fused_mlp": False if supports_mlp_layout(layout_adapter) else config.fused_mlp,
+          })
+      )
     hf_config_dict = HF_MODEL_CONFIGS[model_key].to_dict()
-    param_map = PARAM_MAPPING[model_key](hf_config_dict, config, config.scan_layers)
-    hook_map = HOOK_FNS[model_key](hf_config_dict, config, config.scan_layers, saving_to_hf=False)
-    maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(config)
+    param_map = PARAM_MAPPING[model_key](hf_config_dict, mapping_config, config.scan_layers)
+    hook_map = HOOK_FNS[model_key](hf_config_dict, mapping_config, config.scan_layers, saving_to_hf=False)
+    maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(mapping_config)
     start = time.time()
     final_mt_weights = [None] * len(maxtext_abstract_dict)
     filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_abstract_dict.keys())
@@ -865,11 +896,28 @@ def convert_to_maxtext(
         raise ValueError(f"MaxText parameter {mt_key} not found in mapping.")
       target_indices, target_shapes = _get_maxtext_indices_and_shapes(mt_key, maxtext_abstract_dict)
       param_dtype = _param_save_dtype(mt_key, save_dtype)
+      hybrid_fp8_qkv = (supports_hybrid_fp8_qkv(config) and config.fused_qkv and isinstance(mt_key, str)
+                        and any(mt_key.endswith(f"-attention-attention-{name}-{kind}")
+                                for name in ("query", "key", "value") for kind in ("kernel", "kernel_scale")))
+      if hybrid_fp8_qkv:
+        param_dtype = "float8_e4m3fn"
       getter = tensor_getter if param_dtype == save_dtype else partial(tensor_getter, dtype=param_dtype)
       load_fn = _get_hf_loading_function(param_map.get(mt_key), getter, hook_map.get(mt_key), target_shapes, config, mt_key)
-      _get_maxtext_weight(load_fn, target_indices, target_shapes, mt_key, final_mt_weights, param_dtype, lazy_load_tensors)
+      _get_maxtext_weight(load_fn, target_indices, target_shapes, mt_key, final_mt_weights, param_dtype,
+                          lazy_load_tensors and not (hybrid_fp8_qkv and mt_key.endswith("-kernel_scale")))
 
     del hf_state_dict_numpy
+    if fuse_projections:
+      target_dict, abstract_params_treedef = get_maxtext_model_info(output_config)
+      transformed = {key: final_mt_weights[index] for key, (index, _) in maxtext_abstract_dict.items()}
+      if is_hybrid_qwen_adapter(layout_adapter) and layout_adapter is not fused_qwen3_5:
+        text_target = {key: value for key, value in target_dict.items() if key.startswith("params-decoder-")}
+        layout_adapter.fuse_for_maxtext(transformed, text_target, config, lazy_tensor=LazyTensor if lazy_load_tensors else None)
+        final_mt_weights = [transformed[key] for key in target_dict]
+      else:
+        final_mt_weights = layout_adapter.fuse_for_maxtext(
+            transformed, target_dict, config, lazy_tensor=LazyTensor if lazy_load_tensors else None
+        )
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
     state_params = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)

@@ -8,7 +8,7 @@ from lilax._backend.checkpoint_conversion.standalone_scripts.llama_ckpt_conversi
 from lilax._backend.checkpoint_conversion.utils.rope_permutation import unpermute_from_match_maxtext_rope
 from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils.generate_param_only_checkpoint import _read_train_checkpoint
+from lilax._backend.checkpoint_conversion.generate_param_only_checkpoint import _read_train_checkpoint
 
 
 def reverse_scale(arr, scale):

@@ -6,7 +6,7 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def call_with_supported_kwargs(func: Any, **kwargs) -> Any:

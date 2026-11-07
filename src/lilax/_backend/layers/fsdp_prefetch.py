@@ -27,7 +27,8 @@ from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.utils import max_logging, maxtext_utils_nnx
+from lilax._backend.observability import max_logging
+from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.distributed import sharding
 
 

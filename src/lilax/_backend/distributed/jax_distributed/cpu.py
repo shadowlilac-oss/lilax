@@ -6,11 +6,13 @@ import time
 
 import jax
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
+  if "JAX_PROCESS_COUNT" not in os.environ and "JOB_INDEX" not in os.environ:
+    return
   coordinator_ip_address = get_coordinator_ip_address()
   coordinator_address = coordinator_ip_address + ":1234"
   job_index = int(os.environ.get("JOB_INDEX"))

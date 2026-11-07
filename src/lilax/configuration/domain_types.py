@@ -144,15 +144,6 @@ class TokenizerType(str, Enum):
   TIKTOKEN = "tiktoken"
 
 
-class DatasetType(str, Enum):
-  SYNTHETIC = "synthetic"
-  HF = "hf"
-  GRAIN = "grain"
-  TFDS = "tfds"
-  C4MLPERF = "c4_mlperf"
-  OLMO_GRAIN = "olmo_grain"
-
-
 class RopeType(str, Enum):
   DEFAULT = "default"
   LLAMA3_1 = "llama3.1"

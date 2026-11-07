@@ -29,7 +29,7 @@ from lilax._backend.input_pipeline.protos import example_pb2
 from lilax._backend.multimodal import processor as mm_processor
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.input_pipeline.packing import sequence_packing
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 AUTOTUNE = tf.data.experimental.AUTOTUNE
 

@@ -60,17 +60,19 @@ class SFTPromptMasking(grain.MapTransform):
 class SFTPromptMaskingVision(grain.MapTransform):
   """SFT prompt masking for multimodal"""
 
-  def __init__(self, query_column, response_column, max_target_length, pad_id):
+  def __init__(self, query_column, response_column, max_target_length, pad_id, completion_only=True):
     self.query_column = query_column
     self.response_column = response_column
     self.max_target_length = max_target_length
     self.pad_id = pad_id
+    self.completion_only = completion_only
 
   def map(self, element):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
     targets = np.concatenate(
         (
-            np.asarray([self.pad_id] * len(element[self.query_column])),
+            np.asarray([self.pad_id] * len(element[self.query_column])) if self.completion_only
+            else element[self.query_column],
             element[self.response_column],
         )
     )

@@ -14,13 +14,6 @@ from lilax._backend.input_pipeline.distillation_data_processing import (
     load_dataset as load_distillation_dataset,
     process_dataset as process_distillation_dataset,
 )
-from lilax._backend.input_pipeline.input_pipeline_interface import create_data_iterator
-from lilax._backend.input_pipeline.tokenizer import (
-    HFTokenizer,
-    SentencePieceTokenizer,
-    TikTokenTokenizer,
-    build_tokenizer,
-)
 from lilax._backend.input_pipeline.mmap.index_builder import (
     build_blend_indices,
     build_document_index,
@@ -36,4 +29,4 @@ from lilax._backend.input_pipeline.mmap.index_builder import (
     resolve_shard_prefixes,
     should_separate_last_epoch,
 )
-from lilax._backend.utils.standalone_dataloader import data_load_loop
+from lilax.data_pipeline.standalone_dataloader import data_load_loop

@@ -26,7 +26,7 @@ from lilax._backend.utils.globals import HF_IDS
 from lilax.modeling.models import MaxTextModel
 
 
-@dataclass
+@dataclass(kw_only=True)
 class LoraConfig:
   r: int
   lora_alpha: float
@@ -39,7 +39,10 @@ class PeftModel(MaxTextModel):
   """A native model with a Qwix LoRA adapter and its original runtime."""
 
   def __init__(self, native_model, runtime, adapter_config=None, *, base_model=None, peft_config=None, adapter_source=None):
-    super().__init__(native_model, runtime, construction_config=adapter_config)
+    super().__init__(native_model, runtime, construction_config=adapter_config,
+                     config=base_model.config if base_model is not None else None)
+    if base_model is not None:
+      self.generation_config = base_model.generation_config
     self._adapter_config = self.construction_config if base_model is None else None
     self._base_model = base_model
     self._peft_config = peft_config
@@ -77,11 +80,12 @@ class PeftModel(MaxTextModel):
     model.materialize(runtime=runtime)
     config = self._adapter_config if self._pending_native_model is not None else copy.deepcopy(model.construction_config)
     source = self._adapter_source
-    if source is not None and source[0] == "hf":
-      _, model_id, revision = source
+    if source is not None and source[0] == "huggingface":
+      _, model_id, revision, token = source
+      token = config.hf_access_token if token is None else token
       adapter_path = str(model_id)
       config_path = os.path.join(adapter_path, "adapter_config.json") if os.path.isdir(adapter_path) else hf_hub_download(
-          adapter_path, "adapter_config.json", token=config.hf_access_token, revision=revision,
+          adapter_path, "adapter_config.json", token=token, revision=revision,
       )
       with open(config_path, "r", encoding="utf-8") as config_file:
         metadata = json.load(config_file)
@@ -89,7 +93,7 @@ class PeftModel(MaxTextModel):
         raise ValueError(f"Unsupported PEFT adapter type: {metadata['peft_type']}")
       if metadata["r"] != self._peft_config.r or metadata["lora_alpha"] != self._peft_config.lora_alpha:
         raise ValueError("Adapter rank and alpha must match the supplied LoraConfig.")
-      weights = load_hf_dict_from_safetensors(adapter_path, config.hf_access_token, revision)
+      weights = load_hf_dict_from_safetensors(adapter_path, token, revision)
       _validate_hf_adapter_weights(config, weights)
       adapter = convert_lora_to_maxtext_adapter(config, weights, save_dtype="float32")
     if self._pending_native_model is None:
@@ -97,7 +101,7 @@ class PeftModel(MaxTextModel):
       self._pending_native_model = lora_utils.apply_lora_to_model(model.native_model, runtime.mesh, config)
       self._adapter_config = config
     native_model = self._pending_native_model
-    if source is not None and source[0] == "hf":
+    if source is not None and source[0] == "huggingface":
       expected_paths = {tuple(str(part) for part in path) for path, _ in nnx.to_flat_state(nnx.state(native_model, nnx.LoRAParam))}
       adapter_paths = {tuple(str(part) for part in path[:-1]) for path in flatten_dict(adapter)}
       missing_paths = sorted(expected_paths - adapter_paths)
@@ -124,13 +128,10 @@ class PeftModel(MaxTextModel):
     self._pending_native_model = None
     return self
 
-  def __call__(self, *args, **kwargs):
-    return self.native_model(*args, **kwargs)
-
-  def save_pretrained(self, save_directory, *, format="hf"):
+  def save_pretrained(self, save_directory, *, format="huggingface"):
     """Save adapter parameters in Hugging Face or native Orbax format."""
     self.materialize(runtime=self.runtime)
-    if format == "hf":
+    if format == "huggingface":
       config = self._adapter_config
       hf_config = HF_MODEL_CONFIGS[config.model_name]
       param_map = _get_model_mappings(config.model_name, config.scan_layers, hf_config.to_dict(), config)["param_mapping"]
@@ -139,7 +140,7 @@ class PeftModel(MaxTextModel):
       weights = {name: np.asarray(weight) for name, weight in weights.items()}
       save_adapter_files(str(save_directory), weights, config, found_modules, HF_IDS.get(config.model_name))
       return
-    if format != "native":
+    if format != "maxtext":
       raise ValueError(f"Unsupported adapter format: {format}")
     manager = checkpoint_manager.CheckpointManager(root_directory=str(save_directory))
     try:
@@ -151,13 +152,13 @@ class PeftModel(MaxTextModel):
       manager.close()
 
   @classmethod
-  def from_pretrained(cls, model, model_id, peft_config: LoraConfig, *, format="native", revision=None):
+  def from_pretrained(cls, model, model_id, peft_config: LoraConfig, *, format="maxtext", revision=None, token=None):
     """Apply an adapter and restore native Orbax or Hugging Face weights."""
-    if format not in ("hf", "native"):
+    if format not in ("huggingface", "maxtext"):
       raise ValueError(f"Unsupported adapter format: {format}")
     adapted_model = cls(
         None, model.runtime, base_model=model, peft_config=peft_config,
-        adapter_source=(format, model_id, revision),
+        adapter_source=(format, model_id, revision, token),
     )
     if model.is_materialized:
       adapted_model.materialize(runtime=model.runtime)
@@ -212,3 +213,6 @@ def get_peft_model(model, peft_config: LoraConfig) -> PeftModel:
   if model.is_materialized:
     adapted_model.materialize(runtime=model.runtime)
   return adapted_model
+
+
+__all__ = ["LoraConfig", "PeftModel", "get_peft_model"]

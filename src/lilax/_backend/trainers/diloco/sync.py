@@ -12,7 +12,7 @@ import optax
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.trainers.diloco.fragmenter import FragmentedTreeManipulator
 from lilax._backend.trainers.diloco.nnx_state import replace_nnx_model_params, replace_nnx_model_params_frag
-from lilax._backend.utils.diloco_sharding import add_diloco_to_sharding
+from lilax._backend.trainers.diloco.diloco_sharding import add_diloco_to_sharding
 
 
 def synchronize_full_state(

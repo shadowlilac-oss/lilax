@@ -11,7 +11,7 @@ import optax
 
 from lilax._backend.trainers.diloco.fragmenter import FragmentedTreeManipulator, get_streaming_schedule
 from lilax._backend.trainers.diloco import sync as spmd_diloco_sync
-from lilax._backend.utils.diloco_sharding import add_diloco_to_sharding, extract_per_island_metrics
+from lilax._backend.trainers.diloco.diloco_sharding import add_diloco_to_sharding, extract_per_island_metrics
 
 Batch = Any
 Params = PyTree

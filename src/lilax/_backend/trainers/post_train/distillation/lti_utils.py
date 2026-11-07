@@ -4,7 +4,7 @@ import re
 
 from flax import nnx
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def _nav_to_attr(root, parts):

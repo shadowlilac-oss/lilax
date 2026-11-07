@@ -9,7 +9,7 @@ from flax import nnx
 
 from lilax._backend.common.common_types import ShardMode, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, Array, Config, DType, get_weight_dtype
 from lilax._backend.layers.initializers import Initializer, default_embed_init
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.device_memory import memory_kinds
 from lilax._backend.distributed.sharding import logical_to_mesh_axes, truncate_out_sharding
 

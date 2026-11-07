@@ -7,7 +7,7 @@ import jax
 from jax.experimental import multihost_utils
 
 from lilax._backend.common.telemetry import mllog_utils
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def start_run_clock(config, start_step, warmup_fn=None, barrier_fn=None, python_vars=None):

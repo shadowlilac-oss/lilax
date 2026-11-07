@@ -20,7 +20,7 @@ from lilax._backend.inference.offline_output import completion_logprobs, complet
 from lilax._backend.inference.maxengine.maxengine import MaxEngine
 from lilax._backend.input_pipeline.packing.prefill_packing import PrefillProcessor
 from lilax._backend.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.distributed.mesh_topology import mesh_axes
 
 DecodeState = Any
@@ -162,9 +162,11 @@ class InferenceWorker:
       rng: jax.random.PRNGKey = None,
       mesh: Mesh = None,
       debug: bool = False,
+      model=None,
   ):
     self.config = config
     self.params = params
+    self.model = model
     self.devices = devices
     self.is_pw_reshard = is_pw_reshard
     self.enable_batch_prefill = enable_batch_prefill
@@ -210,7 +212,7 @@ class InferenceWorker:
   def _init_engine(self, params):
     start_time = time.time()
     engine = MaxEngine(self.config, self.devices)
-    params = engine.load_params(params=params, rng=self.rng)
+    params = engine.load_params(params=params, model=self.model, rng=self.rng)
     max_logging.log(f"Time taken to initialize engine: {time.time() - start_time} seconds")
     return params, engine
 
@@ -399,6 +401,7 @@ class OfflineEngine:
       mesh: Mesh = None,
       rng: jax.random.PRNGKey = None,
       debug: bool = False,
+      *, model=None, max_new_tokens=None,
   ):
     max_logging.log("Initializing OfflineEngine")
     self.config = config
@@ -412,6 +415,10 @@ class OfflineEngine:
     self.batch_prefill_max_batch_size = batch_prefill_max_batch_size
     self.max_prefill_length = self.config.max_prefill_predict_length
     self.max_decode_length = self.config.max_target_length - self.max_prefill_length
+    if max_new_tokens is not None:
+      if not 0 < max_new_tokens <= self.max_decode_length:
+        raise ValueError(f"max_new_tokens must be between 1 and {self.max_decode_length} for this engine.")
+      self.max_decode_length = max_new_tokens
     self.rng = jax.random.PRNGKey(0) if rng is None else rng
     self.debug = debug
     self._validate_config()
@@ -435,6 +442,7 @@ class OfflineEngine:
         batch_prefill_max_batch_size=self.batch_prefill_max_batch_size,
         rng=self.rng,
         debug=self.debug,
+        model=model,
     )
     self.tokenizer = self.worker.tokenizer
 

@@ -1,6 +1,6 @@
 """Native DiLoCo and streaming DiLoCo configuration fields."""
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from pydantic.fields import Field
 from pydantic.functional_validators import model_validator
 from pydantic.main import BaseModel

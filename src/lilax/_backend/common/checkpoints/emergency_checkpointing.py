@@ -5,11 +5,13 @@ from typing import Any
 from absl import flags
 from etils import epath
 from flax import nnx
+import inspect
+
 import jax
 from lilax._backend.common import train_state_nnx
-from lilax._backend.utils import gcs_utils
+from lilax._backend.storage import gcs
 from lilax._backend.utils import globals as maxtext_globals
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 import orbax.checkpoint as ocp
 import orbax.checkpoint.experimental.emergency.checkpoint_manager as emergency_checkpoint_manager
 import orbax.checkpoint.experimental.emergency.replicator_checkpoint_manager as emergency_replicator_checkpoint_manager
@@ -38,7 +40,7 @@ def create_emergency_checkpoint_manager(
     local_checkpoint_dir = f"{local_checkpoint_dir}/{jax._src.distributed.global_state.process_id}"
     local_p = epath.Path(local_checkpoint_dir)
     local_p.mkdir(exist_ok=True, parents=True)
-  persistent_p = gcs_utils.mkdir_and_check_permissions(persistent_checkpoint_dir)
+  persistent_p = gcs.mkdir_and_check_permissions(persistent_checkpoint_dir)
   if isinstance(abstract_state, nnx.State):
     abstract_state = train_state_nnx.to_checkpoint_dict(abstract_state)
   manager = CheckpointManager(
@@ -77,7 +79,7 @@ def create_replicator_checkpoint_manager(
   return manager
 
 
-def save(checkpoint_manager, step, state, config, force):
+def save(checkpoint_manager, step, state, config, force, *, custom_metadata=None):
   """Saves the state under the state checkpointable."""
   chunk_byte_size = (
       config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
@@ -88,6 +90,10 @@ def save(checkpoint_manager, step, state, config, force):
       ocdbt_target_data_file_size=chunk_byte_size,
   )
   replicator_error_handler(config)
+  if custom_metadata is not None and "custom_metadata" in inspect.signature(checkpoint_manager.save).parameters:
+    return checkpoint_manager.save(
+        step, args=ocp.args.Composite(state=checkpoint_args), force=force, custom_metadata=custom_metadata,
+    )
   return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=force)
 
 

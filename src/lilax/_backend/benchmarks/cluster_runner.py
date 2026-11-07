@@ -12,7 +12,7 @@ _V5E_V6E_TOPOLOGIES = {1: "1x1", 4: "2x2", 8: "2x4", 16: "4x4", 32: "4x8", 64: "
 _V5P_TOPOLOGIES = {8: "2x2x1", 16: "2x2x2", 32: "2x2x4", 64: "2x4x4", 128: "4x4x4", 256: "4x4x8", 512: "4x8x8", 1024: "8x8x8", 2048: "8x8x16", 4096: "8x16x16"}
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ClusterConfig:
   cluster_name: str
   project: str
@@ -23,7 +23,7 @@ class ClusterConfig:
   topology: str | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PathwaysConfig:
   server_image: str | None = None
   proxy_server_image: str | None = None
@@ -45,7 +45,7 @@ class MaxTextModel:
   pathways_xla_flag_options: dict | None = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class WorkloadConfig:
   model: MaxTextModel | None
   base_output_directory: str

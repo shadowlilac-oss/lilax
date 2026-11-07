@@ -6,6 +6,7 @@ import logging
 import random
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any
 
 import jax
@@ -195,22 +196,22 @@ def _effective_repeats(task: str, num_examples: int | None, n_repeats: int | Non
   return 4 if task == "gpqa" else 1
 
 
-def _build_eval(task: str, num_examples: int | None, n_repeats: int | None):
+def _build_eval(task: str, num_examples: int | None, n_repeats: int | None, *, dataset=None):
   if task == "mmlu":
-    return MMLUEval(num_examples=num_examples)
+    return MMLUEval(num_examples=num_examples, dataset=dataset)
   if task == "gpqa":
-    return GPQAEval(num_examples=num_examples, n_repeats=_effective_repeats(task, num_examples, n_repeats))
+    return GPQAEval(num_examples=num_examples, n_repeats=_effective_repeats(task, num_examples, n_repeats), dataset=dataset)
   if task == "drop":
-    return DropEval(num_examples=num_examples)
+    return DropEval(num_examples=num_examples, dataset=dataset)
   if task == "mgsm":
-    return MGSMEval(num_examples_per_lang=num_examples or 250)
+    return MGSMEval(num_examples_per_lang=num_examples or 250, dataset=dataset)
   if task == "mgsm_en":
-    return MGSMEval(num_examples_per_lang=num_examples or 250, languages=["en"])
+    return MGSMEval(num_examples_per_lang=num_examples or 250, languages=["en"], dataset=dataset)
   if task == "gsm8k":
-    return GSM8KEval(num_examples=num_examples)
+    return GSM8KEval(num_examples=num_examples, dataset=dataset)
   if task in ("aime2024", "aime2025"):
     return AIMEEval(year=2024 if task == "aime2024" else 2025, num_examples=num_examples,
-                    n_repeats=_effective_repeats(task, num_examples, n_repeats))
+                    n_repeats=_effective_repeats(task, num_examples, n_repeats), dataset=dataset)
   raise ValueError(f"Unsupported simple_evals task: {task}. Supported: {list(SUPPORTED_TASKS)}.")
 
 
@@ -233,7 +234,7 @@ def _validate_tasks(tasks: list[str]) -> None:
     )
 
 
-def run_simple_evals(cfg: dict, hf_token: str | None = None) -> dict:
+def run_simple_evals(cfg: dict, hf_token: str | None = None, *, endpoint=None, eval_dataset=None, compute_metrics=None) -> dict:
   """Run selected simple-evals tasks and write their aggregate results."""
   model_name = cfg["model_name"]
   tasks = cfg["tasks"]
@@ -257,7 +258,7 @@ def run_simple_evals(cfg: dict, hf_token: str | None = None) -> dict:
   task_durations: dict[str, float] = {}
   debug_collector = SimpleEvalsDebugCollector() if log_debug_info else None
   is_rank0 = False
-  with build_server_manager(cfg, token, enable_chat_api=True) as server:
+  with (build_server_manager(cfg, token, enable_chat_api=True) if endpoint is None else nullcontext(endpoint)) as server:
     is_rank0 = jax.process_index() == 0
     if is_rank0:
       simple_evals_common.set_default_num_threads(server.concurrency)
@@ -274,7 +275,8 @@ def run_simple_evals(cfg: dict, hf_token: str | None = None) -> dict:
       )
       for task in tasks:
         logger.info("Running simple_evals task '%s' at %s", task, server.base_url)
-        eval_obj = _build_eval(task, num_samples, n_repeats)
+        dataset = (eval_dataset[task] if isinstance(eval_dataset, dict) and task in eval_dataset else eval_dataset)
+        eval_obj = _build_eval(task, num_samples, n_repeats, dataset=dataset)
         if debug_collector is not None:
           debug_collector.set_task(task)
         task_start = time.monotonic()
@@ -282,6 +284,12 @@ def run_simple_evals(cfg: dict, hf_token: str | None = None) -> dict:
         task_durations[task] = time.monotonic() - task_start
         eval_results[task] = eval_result
         task_scores = _map_scores(task, eval_result)
+        if compute_metrics is not None:
+          responses = [conversation[-1]["content"] for conversation in eval_result.convos]
+          references = [item["correct_answer"] for item in eval_result.metadata["example_level_metadata"]]
+          if any(not isinstance(value, str) for value in (*responses, *references)):
+            raise ValueError("compute_metrics requires text predictions and single text references.")
+          task_scores.update({f"{task}_{name}": value for name, value in compute_metrics(responses, references).items()})
         logger.info("simple_evals task '%s' scores: %s", task, task_scores)
         scores.update(task_scores)
     multihost_utils.sync_global_devices("simple_evals_complete")

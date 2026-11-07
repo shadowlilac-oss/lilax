@@ -415,6 +415,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
       rollout_config: base_rollout.RolloutConfig,
       maxtext_config: Any,
       cache_config_or_size: base_rollout.CacheConfig | int = None,
+      eos_token_ids: Optional[list[int]] = None,
   ):
     if cache_config_or_size is None:
       cache_config_or_size = rollout_config.kv_cache_size
@@ -453,6 +454,8 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     )
     self._maxtext_config = maxtext_config
     optional_vllm_config = {}
+    if eos_token_ids is not None:
+      optional_vllm_config["eos_tokens"] = eos_token_ids
     if hasattr(rollout_config, "rollout_vllm_free_kv_cache_during_weight_sync"):
       if _accepts_kwarg(VllmConfig, "free_kv_cache_during_weight_sync"):
         optional_vllm_config["free_kv_cache_during_weight_sync"] = (

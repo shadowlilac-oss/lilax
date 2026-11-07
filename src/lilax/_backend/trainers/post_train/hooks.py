@@ -14,7 +14,9 @@ from lilax._backend.common.data_loader import DataLoader
 from lilax._backend.common.goodput import GoodputEvent, record_goodput
 from lilax._backend.common.metric_logger import MetricLogger, MetadataKey
 from lilax._backend.distributed import sharding
-from lilax._backend.utils import exceptions, gcs_utils, max_logging
+from lilax._backend.trainers import stop_training as exceptions
+from lilax._backend.storage import gcs
+from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import pytree
 
 
@@ -70,7 +72,7 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
       train_ctx._flops_measured = True
     if self.config.dump_hlo:
       jax.block_until_ready(state)
-      gcs_utils.upload_dump(
+      gcs.upload_dump(
           self.config.dump_hlo_local_dir, self.config.dump_hlo_gcs_dir,
           module_name=self.config.dump_hlo_module_name, delete_local_after=self.config.dump_hlo_delete_local_after,
           all_host_upload=self.config.dump_hlo_upload_all,

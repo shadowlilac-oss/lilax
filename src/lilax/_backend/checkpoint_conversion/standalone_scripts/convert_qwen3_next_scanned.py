@@ -14,7 +14,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from lilax._backend.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 MODEL_PARAMS_DICT = {

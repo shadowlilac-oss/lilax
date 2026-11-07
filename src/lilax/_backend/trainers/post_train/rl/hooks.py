@@ -3,7 +3,7 @@ from typing import Any, Callable, Optional
 from tunix.sft import hooks as tunix_hooks
 
 from lilax._backend.common.goodput import GoodputEvent, record_goodput
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 class RLTrainingHooks(tunix_hooks.TrainingHooks):

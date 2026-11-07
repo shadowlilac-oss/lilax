@@ -4,15 +4,9 @@ import os
 
 import jax
 
-from lilax._backend.configs.runtime import resolve_runtime_config
-from lilax._backend.inference.vllm_decode import (
-    build_chat_messages,
-    create_vllm_llm as _create_vllm_llm,
-    decode_with_tunix as _decode_with_tunix,
-    decode_with_vllm as _decode_with_vllm,
-)
-from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
-from lilax._backend.integration.vllm import maxtext_vllm_adapter
+from .configuration import VLLMConfig
+from ._model_source import serving_model_source, serving_overrides
+from lilax._backend.inference.vllm_messages import build_chat_messages
 
 
 def _prepare_vllm():
@@ -26,30 +20,25 @@ def _prepare_vllm():
     )
 
 
-def create_vllm_llm(config, **overrides):
+def create_vllm_llm(model, *, serving_config: VLLMConfig | None = None):
   """Create a vLLM engine from a public config after adapter registration."""
+  from lilax._backend.inference.vllm_decode import create_vllm_llm as _create_vllm_llm
+  from lilax._backend.integration.vllm import maxtext_vllm_adapter
+
   _prepare_vllm()
-  config = resolve_runtime_config(config)
-  maxtext_vllm_adapter.register(config)
-  return _create_vllm_llm(config, **overrides)
+  options = serving_config or VLLMConfig()
+  overrides = serving_overrides(options)
+  additional_config = overrides.pop("additional_config")
+  config, resource = serving_model_source(model, overrides=overrides)
+  try:
+    maxtext_vllm_adapter.register(config)
+    llm = _create_vllm_llm(config, additional_config=additional_config)
+  except BaseException:
+    if resource is not None:
+      resource.cleanup()
+    raise
+  llm._lilax_checkpoint_directory = resource
+  return llm
 
 
-def decode_with_vllm(config):
-  """Decode with a public MaxText configuration."""
-  _prepare_vllm()
-  config = resolve_runtime_config(config)
-  maxtext_vllm_adapter.register(config)
-  return _decode_with_vllm(config)
-
-
-def decode_with_tunix(model):
-  """Decode using the native model and mesh bound to a MaxText model."""
-  _prepare_vllm()
-  maxtext_vllm_adapter.register(model.runtime.config)
-  native_model = model.native_model
-  if isinstance(native_model, TunixMaxTextAdapter):
-    native_model = native_model.base
-  return _decode_with_tunix(model.runtime.config, native_model, model.runtime.mesh)
-
-
-__all__ = ["build_chat_messages", "create_vllm_llm", "decode_with_tunix", "decode_with_vllm"]
+__all__ = ["build_chat_messages", "create_vllm_llm"]

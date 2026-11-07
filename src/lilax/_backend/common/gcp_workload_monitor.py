@@ -13,7 +13,7 @@ from google.api_core.exceptions import GoogleAPIError
 from google.cloud import monitoring_v3
 from urllib3.util.retry import Retry
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 _METADATA_SERVER_URL = "http://metadata.google.internal/computeMetadata/v1/"

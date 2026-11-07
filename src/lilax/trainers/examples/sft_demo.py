@@ -1,19 +1,13 @@
 """GSM8K evaluation and LoRA SFT workflow from the MaxText demo notebooks."""
 
+import json
+from importlib.resources import files
 import re
 
 import datasets
-import grain
-import jax
-from flax import nnx
 from tqdm.auto import tqdm
-from tunix.rl.rollout import base_rollout
-from tunix.rl.rollout.vllm_rollout import VllmRollout
 
-from lilax._backend.checkpoint_conversion.to_huggingface import _get_lora_delta
-from lilax._backend.input_pipeline import instruction_data_processing
-from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
-from lilax._backend.trainers.post_train.sft import train_sft
+from lilax import SFTTrainer
 
 
 DATASET_NAME = "openai/gsm8k"
@@ -39,47 +33,50 @@ MATCH_FORMAT = re.compile(
 MATCH_ANSWER = re.compile(rf"{ANSWER_START}.*?([\d\.\,\$]{{1,}})", flags=re.MULTILINE | re.DOTALL)
 
 
-def get_test_dataset(config, tokenizer, data_template_path):
-  """Load and format the shuffled GSM8K test split as a Grain map dataset."""
-  template_config = instruction_data_processing.load_data_template_from_file(data_template_path)
+def get_test_dataset(processing_class, *, token=None):
+  """Load and format the shuffled GSM8K test split as an HF dataset."""
+  template_config = json.loads(files("lilax").joinpath("_backend/examples/chat_templates/math_qa.json").read_text())
   dataset = datasets.load_dataset(
-      DATASET_NAME, data_dir=DATASET_DATA_DIR, split=DATASET_TEST_SPLIT, token=config.hf_access_token,
+      DATASET_NAME, data_dir=DATASET_DATA_DIR, split=DATASET_TEST_SPLIT, token=token,
   )
-  return grain.MapDataset.source(dataset).shuffle(seed=SEED).map(
-      lambda x: {
-          "question": x["question"],
-          "prompt": tokenizer.apply_chat_template(
-              [{"role": "user", "content": template_config["PROMPT_TEMPLATE"].format(question=x["question"].strip())}],
-              tokenize=False, add_generation_prompt=True,
-          ),
-          "target_answer": instruction_data_processing.extract_reasoning_and_answer(
-              x["answer"], template_config["REASONING_ANSWER_SEPARATOR"]
-          )[1],
-      }
-  )
+  separator = template_config["REASONING_ANSWER_SEPARATOR"]
+
+  def format_example(x):
+    _, answer = x["answer"].split(separator) if separator in x["answer"] else (None, None)
+    return {
+        "question": x["question"],
+        "prompt": processing_class.apply_chat_template(
+            [{"role": "user", "content": template_config["PROMPT_TEMPLATE"].format(question=x["question"].strip())}],
+            tokenize=False, add_generation_prompt=True,
+        ),
+        "target_answer": answer,
+    }
+
+  return dataset.shuffle(seed=SEED).map(format_example)
 
 
-def evaluate_model(dataset, vllm_rollout, debug=True):
+def evaluate_model(dataset, model, processing_class, debug=True):
   """Return the demo's exact, within-10-percent, and format percentages."""
-  rollout_config = base_rollout.RolloutConfig(
-      max_tokens_to_generate=MAX_TOKENS_TO_GENERATE, max_prompt_length=MAX_PROMPT_LENGTH,
-      temperature=EVALUATION_CONFIG["temperature"], top_p=EVALUATION_CONFIG["top_p"],
-      top_k=EVALUATION_CONFIG["top_k"], data_type="bfloat16",
-  )
   total, total_correct, total_partially_correct, total_correct_format = 0, 0, 0, 0
   for batch in tqdm(dataset):
-    batch_response = vllm_rollout.generate(batch["prompt"], rollout_config)
+    inputs = processing_class(batch["prompt"], padding=True, return_tensors="np")
+    if any(sum(mask) > MAX_PROMPT_LENGTH for mask in inputs["attention_mask"]):
+      raise ValueError(f"A demo prompt exceeds MAX_PROMPT_LENGTH={MAX_PROMPT_LENGTH}.")
+    sequences = model.generate(
+        **inputs, max_new_tokens=MAX_TOKENS_TO_GENERATE, do_sample=True, **EVALUATION_CONFIG,
+    )
+    responses = processing_class.batch_decode(sequences[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
     for i, question in enumerate(batch["question"]):
       if debug:
         print("========================================")
         print(f"Question: {question}")
         print("----------------------------------------")
-        print(f"Model Generated Response: {batch_response.text[i]}")
+        print(f"Model Generated Response: {responses[i]}")
         print("----------------------------------------")
         print(f"Target Response: {batch['target_answer'][i]}")
         print("========================================")
       is_correct, is_partially_correct, has_correct_format = score_response(
-          target=batch["target_answer"][i], prediction=batch_response.text[i], debug=debug
+          target=batch["target_answer"][i], prediction=responses[i], debug=debug
       )
       total_correct += is_correct
       total_partially_correct += is_partially_correct
@@ -117,69 +114,10 @@ def score_response(target, prediction, debug=True):
   return is_correct, is_partially_correct, has_correct_format
 
 
-def setup_trainer(trainer):
-  """Prepare a public Tunix SFTTrainer for the notebook's pre-training evaluation."""
-  train_iterator, eval_iterator = trainer._data_iterators()
-  trainer.native_trainer, mesh = train_sft.setup_trainer_state(
-      trainer.config, model=trainer.model.native_model, mesh=trainer.model.runtime.mesh,
-      train_iterator=train_iterator, eval_iterator=eval_iterator,
-  )
-  trainer.model.native_model = trainer.native_trainer.model
-  return trainer.native_trainer, mesh
-
-
-def create_rollout(trainer, tokenizer, model_version, mesh):
-  """Create the notebook's Tunix vLLM rollout for a prepared native trainer."""
-  return VllmRollout(
-      model=TunixMaxTextAdapter(trainer.model), tokenizer=tokenizer, cache_config_or_size=1280, mesh=mesh,
-      rollout_config=base_rollout.RolloutConfig(
-          rollout_vllm_model_version=model_version, rollout_vllm_hbm_utilization=0.3,
-          rollout_vllm_init_with_random_weights=True, rollout_vllm_tpu_backend_type="jax",
-          data_type=jax.numpy.bfloat16, max_tokens_to_generate=512,
-      ),
-  )
-
-
-def train_trainer(trainer, mesh):
-  """Train the prepared SFTTrainer and enforce the notebook's step count."""
-  trainer.native_trainer = train_sft.train_model(trainer.config, trainer.native_trainer, mesh)
-  trainer.model.native_model = trainer.native_trainer.model
-  if trainer.native_trainer.train_steps < trainer.config.steps:
-    raise RuntimeError(
-        f"Training ended prematurely! Expected {trainer.config.steps} steps, "
-        f"but only completed {trainer.native_trainer.train_steps} steps."
-    )
-  return trainer.native_trainer
-
-
-def sync_lora_for_evaluation(trainer, config, vllm_rollout):
-  """Apply the notebook's in-place state merge and hand the filtered state to vLLM.
-
-  This retains the existing LoRA graph and its interception; it does not unload the adapter.
-  Calling it again applies the delta again.
-  """
-  _, state = nnx.split(trainer.model)
-  flat_params = jax.device_put(state.to_pure_dict(), jax.devices("cpu")[0])
-  scaling = config.lora.lora_alpha / config.lora.lora_rank
-  official_dict = {}
-  for path, val in jax.tree_util.tree_flatten_with_path(flat_params)[0]:
-    p_names = [str(p.key if hasattr(p, "key") else str(p).strip("['']")) for p in path]
-    official_dict["params-" + "-".join(p_names)] = val
-  merge_count = 0
-  for off_key, val in official_dict.items():
-    if off_key.endswith("-kernel"):
-      delta = _get_lora_delta(off_key, official_dict, scaling)
-      if delta is not None:
-        merged_val = val + delta.reshape(val.shape) if delta.size == val.size else val + delta
-        original_path = off_key.replace("params-", "").split("-")
-        curr = flat_params
-        for part in original_path[:-1]:
-          curr = curr[part]
-        curr[original_path[-1]] = merged_val
-        merge_count += 1
-        print(f"[Merged on CPU] {off_key}")
-  nnx.update(trainer.model, nnx.State(jax.device_put(flat_params)))
-  full_updated_state = nnx.state(trainer.model)
-  clean_state = nnx.State({k: v for k, v in full_updated_state.items() if "lora" not in str(k)})
-  vllm_rollout.update_params(clean_state)
-  return merge_count
+def finetune_and_evaluate(model, args, train_dataset, test_dataset, processing_class, debug=True):
+  """Evaluate, train, and reevaluate the same public model, including an attached PEFT adapter."""
+  trainer = SFTTrainer(model=model, args=args, train_dataset=train_dataset, processing_class=processing_class)
+  before = evaluate_model(test_dataset.batch(BATCH_SIZE), model, processing_class, debug=debug)
+  output = trainer.train()
+  after = evaluate_model(test_dataset.batch(BATCH_SIZE), trainer.model, processing_class, debug=debug)
+  return trainer, output, before, after

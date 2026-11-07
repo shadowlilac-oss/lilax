@@ -6,7 +6,8 @@ from enum import Enum
 import jax
 from ml_goodput_measurement import goodput, goodput_elastic, monitoring, monitoring_elastic
 
-from lilax._backend.utils import elastic_utils, max_logging
+from lilax._backend.utils import elastic_utils
+from lilax._backend.observability import max_logging
 
 
 def get_goodput_job_name(config) -> str:

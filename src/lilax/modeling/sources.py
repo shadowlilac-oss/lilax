@@ -1,11 +1,19 @@
 """Resolve model checkpoint sources and conversion paths."""
 
+import copy
+import hashlib
+import json
+
 from pathlib import Path
 
 from etils import epath
+from huggingface_hub.constants import HF_HUB_CACHE
+import jax
 
-from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
+from lilax._backend.checkpoint_conversion.cpu_bootstrap import conversion_provenance, convert_on_cpu
 from lilax.configuration import AutoConfig
+from lilax.configuration.model_architecture import ArchitectureConfig
+from lilax.configuration.model_mapping import project_model_config
 from lilax.modeling.hub import get_model_capabilities, resolve_model_name, resolve_model_snapshot
 from lilax.runtime import Runtime
 from lilax.modeling import persistence as model_persistence
@@ -16,6 +24,7 @@ def resolve_pretrained_source(
     local_files_only=False, model_mode="train", rng_key=None, wrap_with_tunix_adapter=False,
     tokenizer_pad_id=None, quant_mode_str="train", lazy_load_tensors=True, eager_load_method="safetensors",
     save_dtype="bfloat16", simulated_cpu_devices_count=16, conversion_output_dir=None,
+    fuse_qkv=None, fuse_mlp=None, precision_config=None, quantization_config=None,
 ):
   auto_config = config is None and runtime is None
   path = str(pretrained_model_name_or_path)
@@ -50,7 +59,16 @@ def resolve_pretrained_source(
   if not is_hf and local_path.is_dir():
     resolve_model_name(local_path, model_name=config.model_name)
   if runtime is None:
-    runtime = Runtime(config)
+    config = copy.deepcopy(config)
+    if quantization_config is not None:
+      config.quantization_config = quantization_config
+    if precision_config is not None:
+      config.precision_config = precision_config
+    if fuse_qkv is not None or fuse_mlp is not None:
+      architecture = config.architecture_config or ArchitectureConfig()
+      updates = {name: value for name, value in (("fused_qkv", fuse_qkv), ("fused_mlp", fuse_mlp)) if value is not None}
+      config.architecture_config = architecture.model_copy(update=updates)
+    runtime = Runtime(project_model_config(config))
   elif config is not runtime.public_config and config is not runtime.config:
     raise ValueError("The configuration must be the configuration used to initialize the runtime.")
   source_qat_config = None
@@ -65,6 +83,8 @@ def resolve_pretrained_source(
       "save_dtype": save_dtype, "simulated_cpu_devices_count": simulated_cpu_devices_count,
       "qat_config": source_qat_config,
       "auto_config": auto_config and not is_hf,
+      "public_config": config,
+      "cache_dir": cache_dir,
   }
   return runtime, checkpoint
 
@@ -76,9 +96,20 @@ def resolve_checkpoint_path(checkpoint, runtime):
     if native_path and epath.Path(native_path).exists():
       checkpoint_path = native_path
     else:
-      if checkpoint["conversion_output_dir"] is None:
-        raise ValueError("Hugging Face conversion requires an explicit shared conversion_output_dir.")
       conversion_config = runtime.public_config.model_copy(update={"scan_layers": runtime.config.scan_layers})
+      if checkpoint["conversion_output_dir"] is None:
+        shared_output = runtime.config.base_output_directory
+        if jax.process_count() > 1 and not shared_output:
+          raise ValueError(
+              "Multihost Hub conversion needs a shared Trainer output_dir or BASE_OUTPUT_DIRECTORY for staging."
+          )
+        root = shared_output or str(Path(checkpoint["cache_dir"] or HF_HUB_CACHE).expanduser().resolve())
+        provenance = conversion_provenance(
+            conversion_config, checkpoint["snapshot"], checkpoint["revision"], checkpoint["save_dtype"],
+            checkpoint["simulated_cpu_devices_count"], None, "explicit",
+        )
+        digest = hashlib.sha256(json.dumps(provenance, sort_keys=True).encode("utf-8")).hexdigest()
+        checkpoint["conversion_output_dir"] = str(epath.Path(root) / "lilax-models" / digest)
       checkpoint_path = convert_on_cpu(
           conversion_config, checkpoint["snapshot"], checkpoint["conversion_output_dir"],
           lazy_load_tensors=checkpoint["lazy_load_tensors"], eager_load_method=checkpoint["eager_load_method"],

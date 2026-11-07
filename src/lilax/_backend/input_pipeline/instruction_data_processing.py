@@ -7,7 +7,7 @@ import re
 
 import datasets
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def load_data_template_from_file(template_path):

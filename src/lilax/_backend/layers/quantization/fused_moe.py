@@ -10,7 +10,7 @@ from qwix._src import interception as qwix_interception
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 
 def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:

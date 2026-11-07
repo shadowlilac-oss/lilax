@@ -12,7 +12,7 @@ from lilax._backend.common.common_types import DType, ShardMode, Array
 from lilax._backend.layers.nnx_wrappers import ToNNX
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.layers.initializers import NdInitializer, nd_dense_init
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 from lilax._backend.device_memory import memory_kinds
 
 

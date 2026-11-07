@@ -16,7 +16,7 @@ from lilax._backend.m3 import models as m3_models
 from lilax._backend.m3.core.sharding import create_mesh
 from lilax._backend.m3.infra import scan as m3_scan
 from lilax._backend.optimizers import optimizers
-from lilax._backend.utils import max_logging
+from lilax._backend.observability import max_logging
 
 _BATCH_AXES = ("data", "fsdp")
 
