@@ -893,6 +893,7 @@ def convert_to_maxtext(
     param_map = PARAM_MAPPING[model_key](hf_config_dict, mapping_config, config.scan_layers)
     hook_map = HOOK_FNS[model_key](hf_config_dict, mapping_config, config.scan_layers, saving_to_hf=False)
     maxtext_abstract_dict, abstract_params_treedef = get_maxtext_model_info(mapping_config)
+    max_logging.log("Starting weight transformation...")
     start = time.time()
     final_mt_weights = [None] * len(maxtext_abstract_dict)
     filtered_map_keys = validate_and_filter_param_map_keys(param_map.keys(), maxtext_abstract_dict.keys())
@@ -928,6 +929,7 @@ def convert_to_maxtext(
         final_mt_weights = layout_adapter.fuse_for_maxtext(
             transformed, target_dict, config, lazy_tensor=LazyTensor if lazy_load_tensors else None
         )
+    max_logging.log("Weight transformation preparation complete.")
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
     state_params = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
@@ -937,6 +939,10 @@ def convert_to_maxtext(
   max_logging.debug(f"Length of state_params leaves: {len(leaves)}")
   if leaves:
     max_logging.debug(f"Type of first leaf before saving: {type(leaves[0])}")
+  if lazy_load_tensors and not is_adapter_only:
+    max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
+  else:
+    max_logging.log("Starting checkpoint save...")
   save_weights_to_checkpoint(
       output_directory, state_params, simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3, config=config,

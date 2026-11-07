@@ -10,6 +10,7 @@ import torch
 from flax.training import train_state
 
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.observability import max_logging
 
 
 MODEL_PARAMS_DICT = {
@@ -66,6 +67,7 @@ def _convert(base_model_path, maxtext_model_path, model_size):
   heads, kv_heads, head_dim, vocab = (
       params["num_heads"], params["num_kv_heads"], params["dims_per_head"], params["vocab"]
   )
+  max_logging.log(f"Loading the base model from {base_model_path}")
   checkpoints = {}
   for path in sorted(pathlib.Path(base_model_path).glob("[!.]*.pth")):
     checkpoints[int(path.name.split(".", maxsplit=2)[1])] = torch.load(path, map_location="cpu", weights_only=True)
@@ -128,6 +130,7 @@ def _convert(base_model_path, maxtext_model_path, model_size):
   manager = checkpointing.create_orbax_checkpoint_manager(maxtext_model_path, True, False, 1)
   state = train_state.TrainState(step=0, apply_fn=None, params={"params": weights}, tx=None, opt_state={})
   if manager is not None:
+    max_logging.log("Starting checkpoint save...")
     checkpointing.save_checkpoint(manager, 0, state)
     if checkpointing.reached_preemption(manager, 0):
       checkpointing.wait_until_finished(manager)

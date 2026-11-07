@@ -13,6 +13,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 from lilax._backend.checkpoint_conversion.utils.utils import save_weights_to_checkpoint
+from lilax._backend.observability import max_logging
 
 
 MODEL_PARAMS_DICT = {
@@ -216,7 +217,7 @@ def _convert_huggingface_to_jax_weights(
     return None
 
   for i, ckpt_path in enumerate(ckpt_paths):
-    logging.info(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
+    max_logging.log(f"Loading checkpoint {i+1} of {len(ckpt_paths)} ...")
     with safe_open(ckpt_path, framework="pt", device="cpu") as f:
       for raw_key in f.keys():
         key = _normalize(raw_key)
@@ -297,17 +298,17 @@ def _convert_huggingface_to_jax_weights(
       "token_embedder": {"embedding": None},
   }
 
-  logging.info("Processing decoder norm scale")
+  max_logging.log("Processing decoder norm scale")
   jax_weights["decoder"]["decoder_norm"]["scale"] = _to_numpy(chkpt_vars["decoder_norm.scale"], weight_dtype)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  logging.info("Processing logits dense")
+  max_logging.log("Processing logits dense")
   jax_weights["decoder"]["logits_dense"]["kernel"] = _to_numpy(
       chkpt_vars["logits_dense.kernel"], weight_dtype
   ).transpose()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  logging.info("Processing token embeddings")
+  max_logging.log("Processing token embeddings")
   jax_weights["token_embedder"]["embedding"] = _to_numpy(chkpt_vars["token_embedder.embedding"], weight_dtype)
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
@@ -315,7 +316,7 @@ def _convert_huggingface_to_jax_weights(
       "dense_layers": first_num_dense_layers,
       "moe_layers": base_num_decoder_layers - first_num_dense_layers,
   }
-  logging.info("Processing self attention and normalization in dense layer")
+  max_logging.log("Processing self attention and normalization in dense layer")
   for layer_key, layer_value in layers.items():
     self_attention = jax_weights["decoder"][f"{layer_key}"]["self_attention"]
     pre_self_attention_layer_norm = jax_weights["decoder"][f"{layer_key}"]["pre_self_attention_layer_norm"]
@@ -404,7 +405,7 @@ def _convert_huggingface_to_jax_weights(
     jax_weights["decoder"][f"{layer_key}"]["post_self_attention_layer_norm"] = post_self_attention_layer_norm
     logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
-  logging.info("Processing layer weights")
+  max_logging.log("Processing layer weights")
   for layer_key, layer_value in layers.items():
     if layer_key == "dense_layers":
       mlp = jax_weights["decoder"][f"{layer_key}"]["mlp"]
@@ -493,7 +494,7 @@ def _convert_huggingface_to_jax_weights(
       logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
 
   if has_mtp:
-    logging.info("Processing MTP Layer")
+    max_logging.log("Processing MTP Layer")
 
     jax_weights["mtp_block"] = {
         "mtp_layer_1": {
@@ -655,6 +656,7 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, model_params: 
                            enable_mtp: bool = False, weight_dtype: str = "float16", scanned: bool = True) -> dict:
   params = MODEL_PARAMS_DICT[model_size] if model_params is None else model_params
   if scanned:
+    max_logging.log(f"Loading the base model from {base_model_path}")
     return _convert_huggingface_to_jax_weights(base_model_path, params, psutil.Process(), enable_mtp, weight_dtype)
   tensors = {}
   key_prefix = params.get("hf_key_prefix", "")
