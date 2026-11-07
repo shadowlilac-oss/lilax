@@ -32,6 +32,8 @@ def permute_to_match_maxtext_rope(arr):
 
 
 def convert(base_model_path, maxtext_model_path, model_size):
+  if model_size not in MODEL_PARAMS_DICT:
+    raise NotImplementedError
   environment = os.environ.copy()
   environment["JAX_PLATFORMS"] = "cpu"
   environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"

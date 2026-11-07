@@ -78,7 +78,8 @@ def dequantize_mxfp4(quantized: torch.Tensor, scales: torch.Tensor) -> torch.Ten
 
 
 def convert_model(input_path: str, output_path: str, cache_file_num: int = 2):
-  torch.set_default_dtype(torch.bfloat16)
+  if os.path.realpath(input_path) == os.path.realpath(output_path):
+    raise ValueError("Input and output paths cannot be the same.")
   os.makedirs(output_path, exist_ok=True)
   model_index_file = os.path.join(input_path, "model.safetensors.index.json")
   if not os.path.exists(model_index_file):

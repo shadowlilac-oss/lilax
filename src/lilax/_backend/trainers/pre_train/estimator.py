@@ -205,8 +205,8 @@ def estimate(config):
       candidate["explicit_keys"] = [key for key in candidate["explicit_keys"] if key != "hf_access_token"]
     payload = json.dumps(serialized_configs)
     with open(output_filename, "w", encoding="utf-8") as output:
-      output.write("import json\n\nfrom lilax.configuration import deserialize_config\n")
-      output.write("from lilax.trainers import train_pretraining\n\n")
+      output.write("import json\n\nfrom lilax.configuration.serialization import deserialize_config\n")
+      output.write("from lilax._backend.trainers.pre_train.entrypoint import train_pretraining\n\n")
       output.write(f"configs = [deserialize_config(item) for item in json.loads({payload!r})]\n\n")
       output.write("def train(index):\n  return train_pretraining(configs[index])\n")
   for pdb, policy in results:

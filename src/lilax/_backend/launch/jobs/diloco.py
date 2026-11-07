@@ -91,8 +91,8 @@ def submit_diloco_job(
     })
   payload = json.dumps(settings)
   python = (
-      "import json; from lilax import MaxTextConfig; "
-      "from lilax.trainers.pretraining.trainer import train_pretraining; "
+      "import json; from lilax._backend.configs.inert import MaxTextConfig; "
+      "from lilax._backend.trainers.pre_train.entrypoint import train_pretraining; "
       f"train_pretraining(MaxTextConfig(**json.loads({payload!r})))"
   )
   unset_xla_flags = "unset XLA_FLAGS && " if enable_streaming_diloco else ""

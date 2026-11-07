@@ -827,6 +827,8 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, model_params: 
 def convert(base_model_path: str, maxtext_model_path: str, model_size: str, simulated_cpu_devices_count: int = 16,
             use_ocdbt: bool = True, use_zarr3: bool = True, enable_mtp: bool = False,
             weight_dtype: str = "float16", model_params: dict | None = None) -> None:
+  if model_params is None and model_size not in MODEL_PARAMS_DICT:
+    raise NotImplementedError(f"Model '{model_size}' is not supported.")
   environment = os.environ.copy()
   environment["JAX_PLATFORMS"] = "cpu"
   environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
