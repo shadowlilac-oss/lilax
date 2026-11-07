@@ -641,7 +641,7 @@ local_checkpoint_period: 0
 jax_cache_dir: "~/jax_cache"
 
 # Hardware
-hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
+hardware: 'gpu' # Supported hardware types are 'tpu', 'gpu', 'gpu_multiprocess' and 'cpu'
 
 # internal_compile allows bypassing open-source topology name mappings when using internal topologies directly via get_topology_desc.
 internal_compile: false

@@ -177,7 +177,7 @@ def scan_layers(layers: nnx.Sequential, *, param_scan_axis: int) -> nnx.Module:
   One run of identical layers becomes a single `ScannedLayers`. Several runs
   become an `nnx.Sequential` of `ScannedLayers`, one per run.
   """
-  runs = _identical_runs(list(layers))
+  runs = _identical_runs(list(layers.layers))
   scanned = []
   for run in runs:
     if isinstance(run[0], ScannedLayers):

@@ -1,0 +1,8 @@
+editdistance==0.8.1
+google-jetstream @ https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip
+pyglove==0.4.5
+seqio==0.0.20
+tensorboard==2.20.0
+tensorboard-data-server==0.7.2
+tensorflow==2.20.0
+tensorflow-text==2.20.1

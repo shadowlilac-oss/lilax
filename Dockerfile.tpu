@@ -9,5 +9,10 @@ RUN test "$TARGETARCH" = amd64 && \
 ENV CC=gcc-12 CXX=g++-12
 WORKDIR /opt/lilax
 COPY . .
-RUN python -m pip install -e '.[tpu]' \
-    -r src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt
+RUN python -m pip install uv && \
+    UV_TORCH_BACKEND=cpu python -m uv pip install --system --resolution=lowest-direct -e '.[tpu-post-train]' \
+    'google-tunix @ https://github.com/google/tunix/archive/385551df4643ee3ac3205e813a93c2ff217dffa5.zip' \
+    'diffusers>=0.37.1' 'importlib-metadata>=10.1.0' 'librosa>=1.0.0' 'soundfile>=0.14.0' \
+    'nvidia-cuda-cccl>=13.3.3.4.1' 'nvidia-ml-py>=13.615.71' \
+    -r src/lilax/_backend/assets/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt \
+    -r src/lilax/_backend/assets/dependencies/extra_deps/tpu_post_train_tf_requirements.txt

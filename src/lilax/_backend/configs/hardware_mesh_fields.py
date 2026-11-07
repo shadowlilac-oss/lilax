@@ -27,7 +27,7 @@ DEFAULT_MESH_AXES: list[str] = [
 class HardwareAndMesh(BaseModel):
   """Configuration for hardware and parallelism mesh."""
 
-  hardware: Literal["tpu", "gpu", "gpu_multiprocess", "cpu"] = Field("tpu", description="The type of hardware to run on.")
+  hardware: Literal["tpu", "gpu", "gpu_multiprocess", "cpu"] = Field("gpu", description="The type of hardware to run on.")
   num_slices: int = Field(-1, description="Number of TPU slices. Automatically determined.")
   mesh_axes: list[str] = Field(
       default_factory=lambda: copy.deepcopy(DEFAULT_MESH_AXES),
