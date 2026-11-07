@@ -3,6 +3,25 @@
 import math
 
 
+def uses_tunix_gradient_accumulation(config):
+  """Whether post-training delegates accumulation to Tunix for this objective."""
+  if config.use_sft and (config.enable_diloco or config.use_multimodal or config.optimizer_memory_host_offload):
+    return False
+  uses_tunix = config.use_tunix_gradient_accumulation or (
+      config.use_sft and getattr(config, "training_objective", "causal_lm") == "block_diffusion"
+  )
+  return uses_tunix and (config.use_sft or config.use_dpo)
+
+
+def get_iterator_batch_size(config, is_training=True):
+  """Global rows per iterator item for the effective accumulation owner."""
+  if not is_training:
+    return config.global_batch_size_to_load_eval
+  if uses_tunix_gradient_accumulation(config):
+    return config.global_batch_size_to_load // config.gradient_accumulation_steps
+  return config.global_batch_size_to_load
+
+
 def derive_batch_sizes(config):
   """Set batch sizes after the target device count has been resolved."""
   def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):

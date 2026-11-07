@@ -29,6 +29,7 @@ import grain.python as grain
 from grain.experimental import ElasticIterator
 from huggingface_hub import HfFileSystem
 
+from lilax._backend.configs.batch_sizes import get_iterator_batch_size
 from lilax._backend.input_pipeline import data_processing_utils
 from lilax._backend.input_pipeline.sources import record_file_datasets
 from lilax._backend.input_pipeline.sources import host_sharding
@@ -363,6 +364,7 @@ def _mmap_pretrain_pipeline(
     text_column,
     grain_worker_count,
     grain_per_worker_buffer_size,
+    is_training=True,
 ):
   """Pretrain pipeline for Megatron-compatible mmap / mmap_npy pre-tokenized formats."""
   # Match Megatron's EOD, position, and loss semantics.
@@ -396,7 +398,7 @@ def _mmap_pretrain_pipeline(
         )
     )
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training)
 
   mp_options = _make_mmap_multiprocessing_options(dataset, config, grain_worker_count, grain_per_worker_buffer_size)
 
@@ -433,7 +435,7 @@ def pretrain_preprocessing_pipeline(
     tokenize,
     grain_worker_count,
     grain_per_worker_buffer_size,
-    *, processing_class=None,
+    *, processing_class=None, is_training=True,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for pretrain"""
   if config.grain_file_type in ("mmap", "mmap_npy"):
@@ -441,7 +443,9 @@ def pretrain_preprocessing_pipeline(
         f"grain_file_type={config.grain_file_type!r} requires exactly one pre-tokenized "
         f"text column, got {data_columns}"
     )
-    return _mmap_pretrain_pipeline(dataset, config, data_columns[0], grain_worker_count, grain_per_worker_buffer_size)
+    return _mmap_pretrain_pipeline(
+        dataset, config, data_columns[0], grain_worker_count, grain_per_worker_buffer_size, is_training
+    )
 
   is_offline = getattr(config, "is_offline_distillation", False)
 
@@ -470,9 +474,9 @@ def pretrain_preprocessing_pipeline(
   if is_offline:
     pipeline_columns.extend(["top_k_logits", "top_k_indices"])
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training)
   dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, tuple(pipeline_columns), tokenizer_model
+      dataset, config, batch_size, pad_id, tuple(pipeline_columns), tokenizer_model, is_training=is_training
   )
 
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
@@ -488,6 +492,7 @@ def dpo_preprocessing_pipeline(
     tokenize,
     grain_worker_count,
     grain_per_worker_buffer_size,
+    is_training=True,
 ):
   """Use grain to pre-process the dataset and return iterators for dpo fine-tuning"""
   dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
@@ -506,8 +511,8 @@ def dpo_preprocessing_pipeline(
       )
   )
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
-  if config.grain_use_elastic_iterator:
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training)
+  if is_training and config.grain_use_elastic_iterator:
     # ElasticIterator batches internally, so return the pre-batch dataset.
     pass
   else:
@@ -568,6 +573,7 @@ def sft_preprocessing_pipeline(
     tokenize,
     grain_worker_count,
     grain_per_worker_buffer_size,
+    is_training=True,
 ):
   """Use grain pipeline to pre-process the dataset and return iterators for sft fine-tuning"""
   dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
@@ -615,9 +621,9 @@ def sft_preprocessing_pipeline(
   )
   data_columns = ("inputs", "targets")
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training)
   dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model
+      dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model, is_training=is_training
   )
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
@@ -633,9 +639,10 @@ def vision_sft_preprocessing_pipeline(
     tokenize: bool = True,
     grain_worker_count: int = 0,
     grain_per_worker_buffer_size: int = 1,
+    is_training=True,
 ):
   """Use grain pipeline to pre-process dataset and return iterators for multimodal SFT fine-tuning."""
-  if config.grain_use_elastic_iterator:
+  if is_training and config.grain_use_elastic_iterator:
     raise ValueError(
         "ElasticIterator is not supported yet for multimodal SFT because post-batch "
         "transformations (like folding images) cannot be easily applied to the iterator."
@@ -725,7 +732,7 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(batch_transforms.ExtractImagesAndMasks())
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training)
 
   dataset = dataset.batch(batch_size, drop_remainder=True)
   dataset = dataset.map(batch_transforms.FoldImagesIntoBatch(model_name=config.model_name))
@@ -762,15 +769,23 @@ def _get_pipeline_fn(config):
   return pretrain_preprocessing_pipeline
 
 
+def _train_iterator_global_batch_size(config):
+  """Global rows per train item; SFT and DPO pipelines load one Tunix accumulation microbatch per item."""
+  return get_iterator_batch_size(config)
+
+
 def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, shard_count=None, mp_opts=None):
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
   When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
   """
   ds = preprocessing_fn(dataset=dataset)
+  global_batch_size = _train_iterator_global_batch_size(config)
+  if shard_count is not None:
+    global_batch_size = global_batch_size * shard_count // jax.process_count()
   return ElasticIterator(
       ds,
-      global_batch_size=config.global_batch_size_to_load,
+      global_batch_size=global_batch_size,
       shard_options=grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
           shard_count=shard_count if shard_count is not None else jax.process_count(),
@@ -873,7 +888,7 @@ def make_grain_train_iterator(
     if config.grain_use_elastic_iterator:
       preprocessing_fn = functools.partial(_make_elastic_iterator, config=config, preprocessing_fn=preprocessing_fn)
 
-    global_shape = (config.global_batch_size_to_load, config.max_target_length)
+    global_shape = (_train_iterator_global_batch_size(config), config.max_target_length)
     return multihost_dataloading.RemoteIteratorWrapper(
         get_ds_fn,
         preprocessing_fn,
@@ -881,6 +896,16 @@ def make_grain_train_iterator(
         global_shape,
         checkpoint_path=config.checkpoint_dir,
         elastic=config.grain_use_elastic_iterator,
+    )
+
+  if config.grain_use_elastic_iterator:
+    mp_options = (
+        grain.MultiprocessingOptions(
+            num_workers=config.grain_worker_count,
+            per_worker_buffer_size=config.grain_per_worker_buffer_size,
+        )
+        if config.grain_worker_count > 0
+        else None
     )
 
   if 0 < config.expansion_factor_real_data < 1:
@@ -893,7 +918,13 @@ def make_grain_train_iterator(
           dataloading_host_index=dataloading_host_index,
           dataloading_host_count=dataloading_host_count,
       )
-      train_dataloader = preprocessing_fn(dataset=train_ds)
+      if config.grain_use_elastic_iterator:
+        train_dataloader = _make_elastic_iterator(
+            train_ds, config, preprocessing_fn, shard_index=dataloading_host_index,
+            shard_count=dataloading_host_count, mp_opts=mp_options,
+        )
+      else:
+        train_dataloader = preprocessing_fn(dataset=train_ds)
       train_dataloader_list.append(train_dataloader)
     return [
         multihost_dataloading.MultiHostDataLoadIterator(x, global_mesh, config.generate_padding_batch_train)
@@ -908,14 +939,6 @@ def make_grain_train_iterator(
       dataloading_host_count=shard_count,
   )
   if config.grain_use_elastic_iterator:
-    mp_options = (
-        grain.MultiprocessingOptions(
-            num_workers=config.grain_worker_count,
-            per_worker_buffer_size=config.grain_per_worker_buffer_size,
-        )
-        if config.grain_worker_count > 0
-        else None
-    )
     train_dataloader = _make_elastic_iterator(
         train_ds,
         config,
@@ -931,7 +954,7 @@ def make_grain_train_iterator(
       train_dataloader,
       global_mesh,
       config.generate_padding_batch_train,
-      expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+      expansion_loading_factor_for_grain=1 if config.grain_use_elastic_iterator else config.expansion_factor_real_data,
   )
 
 
@@ -999,6 +1022,7 @@ def make_grain_eval_iterator(
 
   eval_preprocessing_fn_kwargs = {
       "config": config,
+      "is_training": False,
       "data_columns": config.eval_data_columns,
       "tokenize": config.tokenize_eval_data,
       "grain_worker_count": config.grain_worker_count_eval,

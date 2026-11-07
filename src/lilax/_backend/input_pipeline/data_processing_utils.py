@@ -8,6 +8,7 @@ import grain.python as grain
 
 import datasets
 from grain._src.python.dataset.sources import tfrecord_dataset
+from lilax._backend.configs.batch_sizes import uses_tunix_gradient_accumulation
 from lilax._backend.diffusion.block_diffusion import corruption as block_diffusion_corruption
 from lilax._backend.input_pipeline import encoding_dsv4
 from lilax._backend.input_pipeline import tokenizer
@@ -56,18 +57,21 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_columns}"
 
 
-def get_local_batch_size(config):
+def get_local_batch_size(config, is_training=True):
   """Computes local batch size based on process count and expansion factor."""
-  if config.elastic_enabled:
+  if config.elastic_enabled and is_training:
     batch_size = elastic.get_local_batch_size(config)
   else:
-    batch_size = config.global_batch_size_to_load // jax.process_count()
-  if config.expansion_factor_real_data > 1:
+    global_batch_size = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+    batch_size = global_batch_size // jax.process_count()
+  if is_training and config.expansion_factor_real_data > 1:
     batch_size = int(batch_size // config.expansion_factor_real_data)
+  if is_training and uses_tunix_gradient_accumulation(config):
+    batch_size = batch_size // config.gradient_accumulation_steps
   return batch_size
 
 
-def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model, shift=True):
+def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenizer_model, shift=True, *, is_training=True):
   """Packs or pads the dataset, batches it, and optionally shifts tokens for next-token prediction."""
   if config.packing:
     length_struct = {col: config.max_target_length for col in data_columns}
@@ -101,7 +105,7 @@ def format_and_batch(dataset, config, batch_size, pad_id, data_columns, tokenize
     dataset = dataset.map(feature_transforms.Rekey(rekey_dict))
   else:
     dataset = dataset.map(pad_or_trim.PadOrTrimToMaxLength(config.max_target_length, pad_id))
-  if config.grain_use_elastic_iterator:
+  if is_training and config.grain_use_elastic_iterator:
     if shift:
       dataset = dataset.map(target_shift.ShiftData(ignored_ids=[pad_id], axis=0))
     return dataset

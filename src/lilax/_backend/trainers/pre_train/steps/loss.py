@@ -108,9 +108,9 @@ def _masked_cross_entropy_sums(model, config, data, logits, is_block_diffusion, 
   return jnp.sum(xent), jnp.sum(z_loss)
 
 
-def _add_auxiliary_losses(config, intermediate_outputs, loss, total_weights, manual_gradient_accumulation, is_train):
+def _add_auxiliary_losses(config, intermediate_outputs, loss, total_weights, sum_auxiliary_losses, is_train):
   def _add_aux_loss(total, aux_loss):
-    if manual_gradient_accumulation and is_train:
+    if sum_auxiliary_losses:
       return total + aux_loss * jnp.asarray(total_weights, jnp.float32)
     return total + aux_loss
 
@@ -138,7 +138,7 @@ def _add_auxiliary_losses(config, intermediate_outputs, loss, total_weights, man
   return loss, mtp_loss, indexer_loss, moe_lb_loss
 
 
-def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
+def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True, *, return_loss_sum=False):
   del dropout_rng, params, sparsity_state
   is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
   if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
@@ -151,7 +151,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
   _truncate_to_micro_batch(config, data, is_train)
   if lineage_adapter.is_native(config):
-    return lineage_adapter.loss_and_aux(model, config, data, is_train=is_train)
+    loss, aux = lineage_adapter.loss_and_aux(model, config, data, is_train=is_train)
+    if return_loss_sum:
+      loss = aux["xent_sum"] + (aux["mtp_loss"] + aux["moe_lb_loss"]) * aux["total_weights"]
+    return loss, aux
   forced_routing_kwargs = (
       {"forced_routed_experts": data["forced_routed_experts"]} if "forced_routed_experts" in data else {}
   )
@@ -197,13 +200,14 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     total_weights = jnp.sum(data["targets_segmentation"] != 0)
   manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
-  if manual_gradient_accumulation:
+  if manual_gradient_accumulation or return_loss_sum:
     loss = xent_sum
   else:
     loss = xent_sum / (total_weights + EPS)
   total_z_loss = total_z_loss / (total_weights + EPS)
   loss, mtp_loss, indexer_loss, moe_lb_loss = _add_auxiliary_losses(
-      config, intermediate_outputs, loss, total_weights, manual_gradient_accumulation, is_train
+      config, intermediate_outputs, loss, total_weights,
+      return_loss_sum or (manual_gradient_accumulation and is_train), is_train
   )
 
   moe_bias_updates, mtp_moe_bias_updates = collect_moe_bias_updates(config, intermediate_outputs)

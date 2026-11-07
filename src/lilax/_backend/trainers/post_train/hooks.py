@@ -94,7 +94,8 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     super().on_train_step_start(train_ctx)
-    self.train_metadata[train_ctx.train_steps] = {"total_weights": self.get_total_weights(train_ctx.data_hooks.train_batch)}
+    metadata = self.train_metadata.setdefault(train_ctx.train_steps, {"total_weights": 0})
+    metadata["total_weights"] += self.get_total_weights(train_ctx.data_hooks.train_batch, is_training=True)
 
   @override
   def on_train_step_end(self, train_ctx: peft_trainer.PeftTrainer, train_step: int, train_loss: float, step_time: float = 0.0):
@@ -127,7 +128,7 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
   @override
   def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     self.eval_metadata["eval_step_count"] += 1.0
-    self.eval_metadata["total_weights"] += self.get_total_weights(train_ctx.data_hooks.eval_batch)
+    self.eval_metadata["total_weights"] += self.get_total_weights(train_ctx.data_hooks.eval_batch, is_training=False)
 
   @override
   def on_eval_step_end(self, train_ctx: peft_trainer.PeftTrainer, eval_loss: float):
@@ -159,7 +160,7 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
     return False
 
   @abc.abstractmethod
-  def get_total_weights(self, batch) -> jax.Array:
+  def get_total_weights(self, batch, *, is_training=True) -> jax.Array:
     pass
 
 

@@ -9,6 +9,7 @@ import transformers
 import grain.python as grain
 
 from lilax._backend.input_pipeline import data_processing_utils
+from lilax._backend.configs.batch_sizes import uses_tunix_gradient_accumulation
 from lilax._backend.input_pipeline import dpo_utils
 from lilax._backend.input_pipeline.sources import hf_data_source
 from lilax._backend.input_pipeline.transforms import block_diffusion_transform
@@ -166,11 +167,11 @@ def vision_sft_preprocessing_pipeline(
     dataset = dataset.map(format_sharegpt)
 
   text_columns = _vision_sft_columns(dataset, text_columns)
-  if config.elastic_enabled:
+  if config.elastic_enabled and is_training:
     local_batch_size = elastic.get_local_batch_size(config)
   else:
     local_batch_size = global_batch_size // jax.process_count()
-  if config.use_tunix_gradient_accumulation:
+  if is_training and uses_tunix_gradient_accumulation(config):
     batch_size = local_batch_size // config.gradient_accumulation_steps
   else:
     batch_size = local_batch_size
@@ -332,10 +333,11 @@ def preprocessing_pipeline(
     formatting_func_kwargs: Optional[dict] = None,
     processing_class=None,
     data_collator=None,
+    is_training=True,
 ):
   """Pipeline for preprocessing HF dataset."""
   assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
-  if config.elastic_enabled:
+  if config.elastic_enabled and is_training:
     local_batch_size = elastic.get_local_batch_size(config)
   else:
     local_batch_size = global_batch_size // jax.process_count()
@@ -606,7 +608,7 @@ def make_hf_train_iterator(
         generate_padding_batch=config.generate_padding_batch_train,
         use_dpo=config.use_dpo,
         use_sft=config.use_sft,
-        use_tunix_gradient_accumulation=config.use_tunix_gradient_accumulation,
+        use_tunix_gradient_accumulation=uses_tunix_gradient_accumulation(config),
         num_microbatches=config.gradient_accumulation_steps,
         sft_train_on_completion_only=config.sft_train_on_completion_only,
         chat_template_path=config.chat_template_path,
@@ -685,6 +687,7 @@ def make_hf_eval_iterator(
         hf_access_token=config.hf_access_token,
         global_batch_size=config.global_batch_size_to_load_eval,
         max_target_length=config.max_target_length,
+        is_training=False,
         shuffle=False,
         drop_remainder=False,
         data_shuffle_seed=config.data_shuffle_seed,

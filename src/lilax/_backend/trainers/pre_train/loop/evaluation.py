@@ -7,6 +7,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 
 from lilax._backend.common.telemetry import mllog_utils
+from lilax._backend.trainers.diloco import diloco_sharding
 from lilax._backend.observability import max_logging
 from lilax._backend.distributed import sharding
 
@@ -30,6 +31,8 @@ def run_evaluation(
   last_eval_step_completion = datetime.datetime.now()
   metric_logger_instance.mark_eval_loop_start()
   for eval_batch in eval_data_iterator:
+    if config.enable_diloco:
+      eval_batch = diloco_sharding.reshape_first_axis_with_diloco(config.num_diloco_replicas, eval_batch)
     eval_batch = jax.device_put(
         eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
     )

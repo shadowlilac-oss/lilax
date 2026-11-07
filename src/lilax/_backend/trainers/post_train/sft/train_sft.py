@@ -8,8 +8,10 @@ from flax.core.spmd import logical_axis_rules
 from flax.nnx import tracers
 from tunix.sft import diffusion as tunix_diffusion_sft
 from tunix.sft import peft_trainer
+from tunix.sft import utils as tunix_utils
 
 from lilax._backend.common.data_loader import DataLoader
+from lilax._backend.configs.batch_sizes import uses_tunix_gradient_accumulation
 from lilax._backend.common.goodput import GoodputEvent, RECORD_JOB_END_TIME, maybe_record_goodput, record_goodput
 from lilax._backend.integration.tunix import diffusion_sft as maxtext_diffusion_sft
 from lilax._backend.optimizers import optimizers
@@ -20,17 +22,35 @@ from lilax._backend.trainers.post_train.profiling import TrainingCapture
 from lilax._backend.trainers.post_train.scalar_listeners import release_metrics_logger
 from lilax._backend.trainers.post_train.lifecycle import TrainerDataHooks, begin_training, finish_training
 from lilax._backend.trainers.pre_train.steps.loss import loss_fn
+from lilax._backend.trainers.pre_train.moe.bias import apply_routed_bias_updates
 from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import lora_utils
 from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
 from lilax._backend.models.creation import pretrained
+from lilax._backend.experimental.lineage import lineage_adapter
+from lilax._backend.trainers.post_train.sft.microbatch_accumulation import accumulate_microbatch_gradients
+from lilax._backend.trainers.post_train.sft.routed_bias import RoutedBiasAccumulator
 
 
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
+  maxtext_accumulation_steps = 1
+
+  def _eval_step(self, model, inputs):
+    numerator, aux = self.eval_loss_fn(model, **self.gen_model_input_fn(inputs))
+    output = tunix_utils.LossOutput(
+        primary_loss=tunix_utils.WeightedMetric(numerator, aux["total_weights"], min_denom=1.0), aux_metrics={}
+    )
+    return output.primary_loss.compute(), output
+
   def create_train_step_fn(self):
     loss_fn_ref = self.loss_fn
     has_aux = self._has_aux
+    accumulation_steps = self.maxtext_accumulation_steps
+    mt_config = self.maxtext_config
+    update_routed_bias = (
+        not lineage_adapter.is_native(mt_config) and mt_config.routed_bias and mt_config.routed_bias_update_rate > 0.0
+    )
     gen_fn = self.gen_model_input_fn
     wrt = nnx.LoRAParam if self._lora_enabled else nnx.Param
     nnx.pop(self.model, nnx.Intermediate)
@@ -61,20 +81,37 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
         return out, (None, new_rest)
 
       grad_fn = jax.value_and_grad(loss_wrapper, argnums=0, has_aux=True)
-      (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
+      if accumulation_steps > 1:
+        out_val, aux, new_rest, grads = accumulate_microbatch_gradients(
+            grad_fn, diff_params, rest, inputs, accumulation_steps
+        )
+      else:
+        (out_val, (aux, new_rest)), grads = grad_fn(diff_params, rest, **inputs)
       for _, variable in nnx.iter_graph(model):
         if isinstance(variable, nnx.Variable) and hasattr(variable, "_trace_state"):
           if not variable._trace_state.is_valid():
             object.__setattr__(variable, "_trace_state", tracers.TraceState())
       nnx.update(model, new_rest)
+      if accumulation_steps > 1 and lineage_adapter.GA_STATS_KEY in aux:
+        aux = lineage_adapter.finalize_accumulated_step(model, aux)
+      if update_routed_bias and mt_config.gradient_accumulation_steps > 1:
+        aux = grad_accumulator.routed_bias.add(model, aux)
 
       if not uses_gradient_accumulation:
+        if accumulation_steps == 1:
+          denominator = jnp.maximum(aux["total_weights"], 1)
+          grads = jax.tree.map(lambda grad: grad / denominator, grads)
         if isinstance(grads, dict) and not isinstance(grads, nnx.State):
           grads = nnx.State(grads)
         optimizer.update(model, grads)
+        if update_routed_bias:
+          if mt_config.gradient_accumulation_steps > 1:
+            grad_accumulator.routed_bias.apply(model, aux, mt_config)
+          else:
+            apply_routed_bias_updates(model, aux, mt_config)
         grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda value: value.astype(jnp.float32), grads))
       else:
-        grad_accumulator.add(grads)
+        grad_accumulator.add(grads, denom=aux["total_weights"])
 
         def apply_updates(model, optimizer, grad_accumulator):
           acc_grads = grad_accumulator.get()
@@ -82,6 +119,8 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
           if isinstance(acc_grads, dict) and not isinstance(acc_grads, nnx.State):
             acc_grads = nnx.State(acc_grads)
           optimizer.update(model, acc_grads)
+          if update_routed_bias:
+            grad_accumulator.routed_bias.apply(model, aux, mt_config)
           grad_accumulator.reset()
           return norm
 
@@ -89,7 +128,10 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
           return jnp.array(0.0, dtype=jnp.float32)
 
         grad_norm = nnx.cond(is_update_step, apply_updates, skip_updates, model, optimizer, grad_accumulator)
-      return out_val, aux if has_aux else None, grad_norm
+      output = tunix_utils.LossOutput(
+          primary_loss=tunix_utils.WeightedMetric(out_val, aux["total_weights"], min_denom=1.0), aux_metrics={}
+      )
+      return output.primary_loss.compute(), output, grad_norm
 
     return train_step
 
@@ -99,7 +141,11 @@ def get_tunix_config(mt_config, report_to=None):
   metrics_logging_options = tensorboard_logging_options(mt_config.tensorboard_dir) if report_to is None else None
   return peft_trainer.TrainingConfig(
       eval_every_n_steps=mt_config.eval_interval, max_steps=mt_config.steps,
-      gradient_accumulation_steps=mt_config.gradient_accumulation_steps if mt_config.gradient_accumulation_steps > 1 else None,
+      gradient_accumulation_steps=(
+          mt_config.gradient_accumulation_steps
+          if mt_config.gradient_accumulation_steps > 1
+          and uses_tunix_gradient_accumulation(mt_config) else None
+      ),
       checkpoint_root_directory=mt_config.checkpoint_dir, checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options, profiler_options=None,
       data_sharding_axis=tuple(mt_config.data_sharding),
@@ -107,15 +153,21 @@ def get_tunix_config(mt_config, report_to=None):
 
 
 def use_maxtext_loss_function(trainer, mt_config):
+  uses_maxtext_accumulation = mt_config.gradient_accumulation_steps > 1 and not mt_config.use_tunix_gradient_accumulation
+
   def make_loss_func(is_train):
     def loss_func(model, inputs, inputs_position, inputs_segmentation, targets, targets_position, targets_segmentation):
       data = {
           "inputs": inputs, "inputs_position": inputs_position, "inputs_segmentation": inputs_segmentation,
           "targets": targets, "targets_position": targets_position, "targets_segmentation": targets_segmentation,
       }
-      return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=is_train)
+      return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=is_train, return_loss_sum=True)
     return loss_func
 
+  trainer.maxtext_accumulation_steps = mt_config.gradient_accumulation_steps if uses_maxtext_accumulation else 1
+  trainer.maxtext_config = mt_config
+  if not lineage_adapter.is_native(mt_config) and mt_config.routed_bias and mt_config.routed_bias_update_rate > 0.0:
+    trainer.grad_accumulator.routed_bias = RoutedBiasAccumulator(trainer.model)
   trainer = trainer.with_loss_fn(make_loss_func(is_train=True), has_aux=True)
   trainer.eval_loss_fn = make_loss_func(is_train=False)
   return trainer

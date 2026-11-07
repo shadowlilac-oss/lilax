@@ -4,6 +4,7 @@ from flax import nnx, traverse_util
 import jax
 import jax.numpy as jnp
 
+from lilax._backend.layers.moe import load_balance_updates_from_counts
 from lilax._backend.observability import max_logging
 
 
@@ -41,7 +42,8 @@ def _decode_moe_bias_update(update, config):
   return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
 
 
-def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
+def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config):
+  diag_bias_values, diag_bias_updates = [], []
   for path, update in traverse_util.flatten_dict(intermediates).items():
     if path[-1] != "moe_bias_updates":
       continue
@@ -52,12 +54,22 @@ def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, confi
     if bias is None:
       continue
     update = _decode_moe_bias_update(update, config)
+    if jnp.issubdtype(update.dtype, jnp.integer):
+      update = load_balance_updates_from_counts(update, config.num_experts, config.routed_bias_update_rate)
+    scan_axis = bias.get_metadata().get("param_scan_axis", 0)
+    if scan_axis != 0 and not getattr(config, "using_pipeline_parallelism", False):
+      update = jnp.moveaxis(update, 0, scan_axis)
     if update.shape != bias.value.shape:
       raise ValueError(
           f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
           f"but the gate bias it updates has shape {bias.value.shape}."
       )
-    bias.value = bias.value + update.astype(bias.value.dtype)
+    if getattr(config, "using_pipeline_parallelism", False):
+      update = update.astype(bias.value.dtype)
+    bias.value = bias.value + update
+    diag_bias_values.append(bias.value)
+    diag_bias_updates.append(update)
+  return diag_bias_values, diag_bias_updates
 
 
 def _apply_deepseek4_bias_updates(model, intermediate_outputs, config):
@@ -95,18 +107,13 @@ def _apply_deepseek4_bias_updates(model, intermediate_outputs, config):
 
 def _apply_decoder_and_mtp_bias_updates(model, aux, config):
   diag_bias_values, diag_bias_updates = [], []
-  moe_bias_updates = aux.get("moe_bias_updates")
   mtp_moe_bias_updates = aux.get("mtp_moe_bias_updates")
   if getattr(config, "using_pipeline_parallelism", False):
     _apply_moe_bias_updates_by_path(model.decoder, aux["intermediate_outputs"].get("decoder", {}), config)
   else:
-    decoder_layer = getattr(model.decoder, "moe_layers", model.decoder)
-    decoder_bias = _find_gate_bias(decoder_layer)
-    if decoder_bias is not None and moe_bias_updates is not None:
-      decoder_update = jnp.array(moe_bias_updates[0])
-      decoder_bias.value = decoder_bias.value + decoder_update
-      diag_bias_values.append(decoder_bias.value)
-      diag_bias_updates.append(decoder_update)
+    diag_bias_values, diag_bias_updates = _apply_moe_bias_updates_by_path(
+        model.decoder, aux["intermediate_outputs"].get("decoder", {}), config
+    )
   if mtp_moe_bias_updates is not None and hasattr(model, "mtp_block"):
     for index, update in enumerate(mtp_moe_bias_updates):
       mtp_layer = getattr(model.mtp_block, f"mtp_layer_{index + 1}", None)

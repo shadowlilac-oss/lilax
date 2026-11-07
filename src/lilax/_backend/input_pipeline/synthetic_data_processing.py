@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from lilax._backend.input_pipeline import multihost_dataloading
 from lilax._backend.configs import pyconfig
-from lilax._backend.trainers.diloco.diloco_sharding import reshape_first_axis_with_diloco
+from lilax._backend.configs.batch_sizes import get_iterator_batch_size
 from lilax._backend.distributed import sharding
 
 
@@ -53,7 +53,10 @@ class SyntheticDataIterator:
   def __init__(self, config, mesh):
     self.mesh = mesh
     self.config = config
-    data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
+    # Emit the plain batch layout like every other input pipeline; the DataLoader adds the DiLoCo replica axis.
+    data_pspec_shardings = sharding.create_sharding(
+        mesh, config.input_data_sharding_logical_axes, rules=config.logical_axis_rules
+    )
     self.data_generator = jax.jit(
         SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
     )
@@ -102,8 +105,6 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
-    if config.enable_diloco:
-      output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
     return output
 
 
@@ -135,6 +136,8 @@ class PlaceHolderDataIterator:
         to contribute the same number of rows to the global batch.
     """
     global_batch_size_to_load = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+    if is_training and config.dataset_type in ("hf", "grain"):
+      global_batch_size_to_load = get_iterator_batch_size(config)
     batch_size = global_batch_size_to_load // jax.process_count()
     neg_ones = np.full((batch_size, config.max_target_length), -1, dtype=np.int32)
     batch = {
