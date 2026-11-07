@@ -1,6 +1,10 @@
 import gc
 import logging
+import os
 import pathlib
+import pickle
+import subprocess
+import sys
 
 import numpy as np
 import psutil
@@ -823,5 +827,36 @@ def convert_to_jax_weights(base_model_path: str, model_size: str, model_params: 
 def convert(base_model_path: str, maxtext_model_path: str, model_size: str, simulated_cpu_devices_count: int = 16,
             use_ocdbt: bool = True, use_zarr3: bool = True, enable_mtp: bool = False,
             weight_dtype: str = "float16", model_params: dict | None = None) -> None:
+  environment = os.environ.copy()
+  environment["JAX_PLATFORMS"] = "cpu"
+  environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={simulated_cpu_devices_count}"
+  arguments = (os.fspath(base_model_path), os.fspath(maxtext_model_path), model_size, simulated_cpu_devices_count,
+               use_ocdbt, use_zarr3, enable_mtp, weight_dtype, model_params)
+  child = subprocess.run(
+      [sys.executable, "-c", (
+          "import os; result_fd = os.dup(1); os.dup2(2, 1); "
+          "from lilax._backend.checkpoint_conversion.standalone_scripts "
+          "import convert_deepseek_family_ckpt as converter; "
+          "converter._run_cpu_worker(result_fd)"
+      )],
+      input=pickle.dumps(arguments), stdout=subprocess.PIPE, env=environment, check=True,
+  )
+  error = pickle.loads(child.stdout)
+  if error is not None:
+    raise error
+
+
+def _run_cpu_worker(result_fd):
+  try:
+    _convert_on_cpu(*pickle.load(sys.stdin.buffer))
+    error = None
+  except Exception as exc:
+    error = exc
+  with os.fdopen(result_fd, "wb") as result_file:
+    pickle.dump(error, result_file)
+
+
+def _convert_on_cpu(base_model_path, maxtext_model_path, model_size, simulated_cpu_devices_count,
+                    use_ocdbt, use_zarr3, enable_mtp, weight_dtype, model_params):
   weights = convert_to_jax_weights(base_model_path, model_size, model_params, enable_mtp, weight_dtype)
   save_weights_to_checkpoint(maxtext_model_path, weights, simulated_cpu_devices_count, use_ocdbt, use_zarr3)

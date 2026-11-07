@@ -1,4 +1,8 @@
+import os
 import pathlib
+import pickle
+import subprocess
+import sys
 
 import jax
 import numpy as np
@@ -28,6 +32,34 @@ def permute_to_match_maxtext_rope(arr):
 
 
 def convert(base_model_path, maxtext_model_path, model_size):
+  environment = os.environ.copy()
+  environment["JAX_PLATFORMS"] = "cpu"
+  environment["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={SIMULATED_CPU_DEVICES_COUNT}"
+  arguments = (os.fspath(base_model_path), os.fspath(maxtext_model_path), model_size)
+  child = subprocess.run(
+      [sys.executable, "-c", (
+          "import os; result_fd = os.dup(1); os.dup2(2, 1); "
+          "from lilax._backend.checkpoint_conversion.standalone_scripts "
+          "import llama_ckpt_conversion_inference_only as converter; converter._run_cpu_worker(result_fd)"
+      )],
+      input=pickle.dumps(arguments), stdout=subprocess.PIPE, env=environment, check=True,
+  )
+  error = pickle.loads(child.stdout)
+  if error is not None:
+    raise error
+
+
+def _run_cpu_worker(result_fd):
+  try:
+    _convert(*pickle.load(sys.stdin.buffer))
+    error = None
+  except Exception as exc:
+    error = exc
+  with os.fdopen(result_fd, "wb") as result_file:
+    pickle.dump(error, result_file)
+
+
+def _convert(base_model_path, maxtext_model_path, model_size):
   params = MODEL_PARAMS_DICT[model_size]
   heads, kv_heads, head_dim, vocab = (
       params["num_heads"], params["num_kv_heads"], params["dims_per_head"], params["vocab"]
