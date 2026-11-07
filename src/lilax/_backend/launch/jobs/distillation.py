@@ -23,7 +23,7 @@ class DistillationJob:
   config_gcs: str
   libtpu_init_args: str
   trainer_module: str = "lilax.trainers.post_training.distillation"
-  trainer_function: str = "run_distillation"
+  trainer_function: str = "_run_distillation"
   overrides: dict = field(default_factory=dict)
   priority: str = "high"
   num_slices: int = 1
