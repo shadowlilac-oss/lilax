@@ -5,9 +5,13 @@ import jax.numpy as jnp
 import qwix
 
 from lilax._backend.configs.pyconfig import HyperParameters
+from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 
 
 def apply_qat(model, config, qat_config, runtime):
+  if isinstance(model, TunixMaxTextAdapter):
+    model.base, config = apply_qat(model.base, config, qat_config, runtime)
+    return model, config
   if qat_config.provider == "odml" and any(rule.tile_size is not None for rule in qat_config.rules):
     raise ValueError("Qwix ODML QAT does not support tile_size.")
   rules = [qwix.QuantizationRule(**rule.model_dump()) for rule in qat_config.rules]

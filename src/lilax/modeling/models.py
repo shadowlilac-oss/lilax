@@ -18,6 +18,7 @@ import orbax.checkpoint as ocp
 from lilax._backend.configs.pyconfig import HyperParameters
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import convert_on_cpu
 from lilax._backend.checkpoint_conversion.to_huggingface import convert_to_huggingface
+from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.models.creation import model_factory, pretrained, scan_layers_sync
 from lilax.configuration import AutoConfig, QwixQATConfig
@@ -191,7 +192,9 @@ class MaxTextModel:
         "images": images, "image_masks": image_masks, "videos": videos, "video_masks": video_masks,
         "video_grid_thw": video_grid_thw, "audio_values": audio_values,
     })
-    return self.native_model(
+    native_model = self.native_model
+    native_model = native_model.base if isinstance(native_model, TunixMaxTextAdapter) else native_model
+    return native_model(
         input_ids, position_ids, segment_ids, decoder_input_embeddings=inputs_embeds,
         encoder_images=media["images"], encoder_image_masks=media["image_masks"], encoder_videos=media["videos"],
         encoder_video_masks=media["video_masks"], encoder_video_grid_thw=media["video_grid_thw"],

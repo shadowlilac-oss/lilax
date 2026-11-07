@@ -21,6 +21,7 @@ from lilax._backend.checkpoint_conversion.model_families.param_mapping_registry 
 from lilax._backend.checkpoint_conversion.utils.utils import (
     extract_nnx_weights, load_hf_dict_from_safetensors, save_adapter_files,
 )
+from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.utils import lora_utils
 from lilax._backend.utils.globals import HF_IDS
 from lilax.modeling.models import MaxTextModel
@@ -102,12 +103,13 @@ class PeftModel(MaxTextModel):
       self._adapter_config = config
     native_model = self._pending_native_model
     if source is not None and source[0] == "huggingface":
-      expected_paths = {tuple(str(part) for part in path) for path, _ in nnx.to_flat_state(nnx.state(native_model, nnx.LoRAParam))}
+      adapter_model = native_model.base if isinstance(native_model, TunixMaxTextAdapter) else native_model
+      expected_paths = {tuple(str(part) for part in path) for path, _ in nnx.to_flat_state(nnx.state(adapter_model, nnx.LoRAParam))}
       adapter_paths = {tuple(str(part) for part in path[:-1]) for path in flatten_dict(adapter)}
       missing_paths = sorted(expected_paths - adapter_paths)
       if missing_paths:
         raise ValueError(f"Hugging Face adapter is missing model LoRA parameters: {missing_paths}")
-      native_model = lora_utils.apply_converted_lora_adapter(native_model, adapter)
+      lora_utils.apply_converted_lora_adapter(adapter_model, adapter)
     elif source is not None:
       manager = checkpoint_manager.CheckpointManager(root_directory=str(source[1]))
       try:
@@ -135,7 +137,9 @@ class PeftModel(MaxTextModel):
       config = self._adapter_config
       hf_config = HF_MODEL_CONFIGS[config.model_name]
       param_map = _get_model_mappings(config.model_name, config.scan_layers, hf_config.to_dict(), config)["param_mapping"]
-      state = nnx.to_pure_dict(nnx.state(self.native_model, nnx.LoRAParam))
+      native_model = self.native_model
+      adapter_model = native_model.base if isinstance(native_model, TunixMaxTextAdapter) else native_model
+      state = nnx.to_pure_dict(nnx.state(adapter_model, nnx.LoRAParam))
       weights, found_modules = _transform_weights_to_adapter(param_map, extract_nnx_weights(state))
       weights = {name: np.asarray(weight) for name, weight in weights.items()}
       save_adapter_files(str(save_directory), weights, config, found_modules, HF_IDS.get(config.model_name))

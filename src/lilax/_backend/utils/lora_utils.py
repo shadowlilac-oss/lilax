@@ -19,6 +19,7 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common import train_state_nnx
 from lilax._backend.configs import pyconfig
 from lilax._backend.distributed import device_mesh
+from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.storage import gcs as gcs_utils
 from lilax._backend.observability import max_logging
 from lilax._backend.distributed import state_abstraction
@@ -381,6 +382,9 @@ def apply_lora_to_model(
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
   if not mt_config.lora.enable_lora:
+    return model
+  if isinstance(model, TunixMaxTextAdapter):
+    model.base = apply_lora_to_model(model.base, mesh, mt_config)
     return model
   lora_provider = _build_lora_provider(mt_config)
   decoder = getattr(model, "decoder", model)

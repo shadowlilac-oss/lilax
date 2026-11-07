@@ -16,6 +16,7 @@ from lilax._backend.checkpoint_conversion.projection_layout import (
     is_hybrid_qwen_adapter, projection_layout_adapter, supports_mlp_layout, validate_huggingface_projection_layout,
     validate_mlp_only_layout,
 )
+from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.integration.vllm.convert_utils import _partition_size
 from lilax.configuration import QwixQATConfig
 from lilax.configuration.model_mapping import model_config_from_effective
@@ -40,7 +41,8 @@ def checkpoint_qat_config(path):
 
 
 def restore_qat_checkpoint(model, runtime, config, checkpoint_path):
-  state = nnx.state(model).filter(
+  native_model = model.base if isinstance(model, TunixMaxTextAdapter) else model
+  state = nnx.state(native_model).filter(
       lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
   ).to_pure_dict()
 
@@ -56,15 +58,16 @@ def restore_qat_checkpoint(model, runtime, config, checkpoint_path):
       return {key: unwrap_value(value) for key, value in node.items()}
     return node
 
-  target = wrap_value(state)
   checkpointer = ocp.PyTreeCheckpointer(
       use_ocdbt=config.checkpoint_storage_use_ocdbt, use_zarr3=config.checkpoint_storage_use_zarr3,
   )
+  has_base_key = "base" in checkpointer.metadata(checkpoint_path).item_metadata.tree
+  target = {"base": wrap_value(state)} if has_base_key else wrap_value(state)
   with runtime.mesh:
     restored = checkpointer.restore(
         checkpoint_path, item=target, restore_args=ocp.checkpoint_utils.construct_restore_args(target)
     )
-    nnx.update(model, unwrap_value(restored))
+    nnx.update(native_model, unwrap_value(restored["base"] if has_base_key else restored))
 
 
 def save_pretrained(
