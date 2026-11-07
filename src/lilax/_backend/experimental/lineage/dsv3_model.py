@@ -19,7 +19,7 @@ from lilax._backend.experimental.lineage import dsv3_mla
 from lilax._backend.experimental.lineage import dsv3_mtp
 from lilax._backend.experimental.lineage import dsv3_mtp_block
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import normalization
 from lilax._backend.experimental.lineage.gmmv2 import expert_mlp
 from lilax._backend.experimental.lineage.sharding import partition_specs
 
@@ -140,7 +140,7 @@ def dsv3_layer_kwargs(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -> d
       qk_head_dim=m.qk_head_dim, rope_head_dim=m.rope_head_dim, num_query_heads=m.num_query_heads,
       mscale=float(m.mscale), kv_lora_rank=m.kv_lora_rank, max_position_embeddings=m.max_position_embeddings,
       original_max_position_embeddings=m.original_max_position_embeddings, rope_factor=int(m.rope_factor),
-      mesh=mesh, norm_fn=functools.partial(ops.rms_norm, epsilon=m.norm_epsilon), rope_fn=dsv3_mla.yarn,
+      mesh=mesh, norm_fn=functools.partial(normalization.rms_norm,epsilon=m.norm_epsilon), rope_fn=dsv3_mla.yarn,
       gmm_fn=expert_mlp.make_gmm_fn(emb_dim=m.emb_dim), axis_mapping=cfg.sharding.axis_mapping,
       expert_axis_name="expert", capacity_factor=float(k.capacity_factor), router_dtype=m.router_dtype,
       ragged_buffer_factor=float(k.ragged_buffer_factor), quant=k.quant,

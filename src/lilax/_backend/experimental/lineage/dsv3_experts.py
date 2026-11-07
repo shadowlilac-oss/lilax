@@ -10,8 +10,9 @@ import jaxtyping as jt
 import typeguard
 
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
 from lilax._backend.experimental.lineage import quantization
+from lilax._backend.experimental.lineage import ragged_gather_reduce_metadata
+from lilax._backend.experimental.lineage import ragged_silu_mul
 
 
 class GmmFn(Protocol):
@@ -112,7 +113,7 @@ def dsv3_routed_experts_impl(
     with jax.named_scope("gate"):
       bank = gmm_fn.gate(x, w.gate, group_sizes, bank, row, out_scale=gate_scale)
     with jax.named_scope("silu"):
-      act = ops.ragged_silu_mul_fwd(
+      act = ragged_silu_mul.ragged_silu_mul_fwd(
           bank, row, sorted_coeffs, num_tokens, block_size_tokens=1024, block_size_hidden=2048,
       )
   with jax.named_scope("linear"):
@@ -127,7 +128,7 @@ def dsv3_routed_experts_gather_impl(
     start: jt.Int[jax.Array, ""] | int, w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
     group_sizes: jt.Num[jax.Array, "E"], sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
     bank: jt.Num[jax.Array, "bank_rows D_gate"], bank_offset: jt.Int[jax.Array, ""],
-    reduce_metadata: ops.RaggedGatherReduceMetadata, y_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
+    reduce_metadata: ragged_gather_reduce_metadata.RaggedGatherReduceMetadata, y_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
     *, gmm_fn: GmmFn, quant_rule: quantization.GmmQuantRule,
 ) -> tuple[jt.Num[jax.Array, "NBT D0 D1"], jt.Num[jax.Array, "bank_rows D_gate"]]:
   assert w.gate is not None
@@ -256,7 +257,7 @@ def dsv3_routed_experts_bwd_impl(
   fuse_glu = quant_rule is not None and getattr(gmm_fn, "supports_fused_glu", False)
   dyn_grad_scale = getattr(gmm_fn, "supports_dynamic_grad_scale", False)
   with jax.named_scope("silu"):
-    act = ops.ragged_silu_mul_fwd(
+    act = ragged_silu_mul.ragged_silu_mul_fwd(
         bank, row, sorted_coeffs, num_tokens, block_size_tokens=1024, block_size_hidden=2048,
         out_dtype=act_qtype if fuse_glu else None, out_scale=act_scale if fuse_glu else None,
     )
@@ -287,12 +288,12 @@ def dsv3_routed_experts_bwd_impl(
   with jax.named_scope("silu"):
     grad_gate_amax = None
     if quant_rule is not None and dyn_grad_scale:
-      grad_gate_out, grad_sorted_coeffs, grad_gate_amax = ops.ragged_silu_mul_bwd(
+      grad_gate_out, grad_sorted_coeffs, grad_gate_amax = ragged_silu_mul.ragged_silu_mul_bwd(
           grad_act, bank, row, sorted_coeffs, num_tokens, block_size_tokens=1024, block_size_hidden=1024,
           g_mask_max=act_max if fuse_glu else None, with_absmax=True,
       )
     else:
-      grad_gate_out, grad_sorted_coeffs = ops.ragged_silu_mul_bwd(
+      grad_gate_out, grad_sorted_coeffs = ragged_silu_mul.ragged_silu_mul_bwd(
           grad_act, bank, row, sorted_coeffs, num_tokens, block_size_tokens=1024, block_size_hidden=1024,
           g_mask_max=act_max if fuse_glu else None,
       )

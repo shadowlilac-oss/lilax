@@ -26,7 +26,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import tile_math
 from lilax._backend.experimental.lineage.gmmv2 import relayout
 
 
@@ -731,7 +731,7 @@ def inner_kernel(
     if cfgs.lhs_cfgs.should_use_external_scale and not cfgs.rhs_cfgs.has_scale:
       assert cfgs.lhs_cfgs.quant_dtype is not None
       inv_scale = 1.0 / tiled_lhs_ref.get_scale().astype(jnp.float32)
-      tiled_lhs = ops.quantize_tile(tiled_lhs, inv_scale, cfgs.lhs_cfgs.quant_dtype)
+      tiled_lhs = tile_math.quantize_tile(tiled_lhs, inv_scale, cfgs.lhs_cfgs.quant_dtype)
 
     acc_list = []
     if not cfgs.lhs_cfgs.should_quantize or (cfgs.lhs_cfgs.should_use_external_scale and not cfgs.rhs_cfgs.has_scale):
@@ -848,10 +848,10 @@ def inner_kernel(
         act_val_ref = tiled_out_ref.act
         half_n = cfgs.tiles.tile_n // 2
         c_tile = jnp.where(mask[:, :1], tiled_lhs_ref.get_glu_coeffs().reshape(-1, 1)[:acc_m], 0.0)
-        act_tile = ops.silu_mul_tile(acc_out[:, :half_n], acc_out[:, half_n:], c_tile, out_val_ref.dtype)
+        act_tile = tile_math.silu_mul_tile(acc_out[:, :half_n], acc_out[:, half_n:], c_tile, out_val_ref.dtype)
         if glu_out_scale_ref is not None:
           inv_scale = 1.0 / glu_out_scale_ref[0].astype(jnp.float32)
-          act_out = ops.quantize_tile(act_tile, inv_scale, act_val_ref.dtype)
+          act_out = tile_math.quantize_tile(act_tile, inv_scale, act_val_ref.dtype)
         else:
           act_out = act_tile.astype(act_val_ref.dtype)
         tiled_act_2d_ref = act_val_ref.reshape(-1, half_n)

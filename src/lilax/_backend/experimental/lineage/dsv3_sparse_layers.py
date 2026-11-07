@@ -11,7 +11,7 @@ import typeguard
 from lilax._backend.experimental.lineage import dsv3_expert_shuffle
 from lilax._backend.experimental.lineage import dsv3_sparse_layer
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import microbatching
 from lilax._backend.experimental.lineage import quantization
 from lilax._backend.experimental.lineage.scan import weight_scan_prologue_epilogue
 
@@ -86,9 +86,9 @@ def dsv3_sparse_layers(
     dsv3_expert_shuffle.validate_expert_permutations(expert_permutations, num_experts=num_experts, num_layers=num_layers)
     if expert_permutations.shape[0] != num_layers:
       raise ValueError(f"expert_permutations has {expert_permutations.shape[0]} rows," f" expected {num_layers}")
-  mb0, mb1 = ops.split_microbatches(x, mesh=mesh)
-  yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
-  segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
+  mb0, mb1 = microbatching.split_microbatches(x, mesh=mesh)
+  yarn_freqs_0, yarn_freqs_1 = microbatching.split_microbatches(yarn_freqs, mesh=mesh)
+  segment_ids_0, segment_ids_1 = microbatching.split_microbatches(segment_ids, mesh=mesh)
   _collect_w_dcn = functools.partial(dsv3_sparse_layer.collect_w_dcn, axis_mapping=axis_mapping)
   _collect_w_ici_fwd = functools.partial(
       dsv3_sparse_layer.collect_w_ici, axis_mapping=axis_mapping, split=True, expert_axis_name=expert_axis_name,
@@ -172,5 +172,5 @@ def dsv3_sparse_layers(
       offload_fn=dsv3_sparse_layer.offload_residuals, load_fn=dsv3_sparse_layer.load_residuals,
       w_aux=expert_permutations, collect_fn_pre=collect_fn_pre, reduce_fn_pre=reduce_fn_pre,
   )
-  out = ops.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
+  out = microbatching.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
   return out, aux

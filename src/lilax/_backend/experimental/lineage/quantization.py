@@ -8,7 +8,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from lilax._backend.experimental.lineage import ops, ragged_quantization
+from lilax._backend.experimental.lineage import ragged_quantization
 
 
 def _finfo_max(qtype: Any) -> float:

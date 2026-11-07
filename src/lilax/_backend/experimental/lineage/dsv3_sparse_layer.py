@@ -18,7 +18,7 @@ from lilax._backend.experimental.lineage import dsv3_experts
 from lilax._backend.experimental.lineage import dsv3_mla
 from lilax._backend.experimental.lineage import dsv3_router
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import microbatching
 from lilax._backend.experimental.lineage import quantization
 from lilax._backend.experimental.lineage.scan import weight_scan_prologue_epilogue
 from lilax._backend.experimental.lineage.sharding import axis_collectives
@@ -136,8 +136,8 @@ def _merge_router_aux(
   elif aux1.group_sizes is not None:
     group_sizes = aux1.group_sizes
   return dsv3_types.DSv3RouterAux(
-      group_sizes=group_sizes, selected_experts=ops.merge_microbatches(aux0.selected_experts, aux1.selected_experts, mesh=mesh),
-      logits=ops.merge_microbatches(aux0.logits, aux1.logits, mesh=mesh),
+      group_sizes=group_sizes, selected_experts=microbatching.merge_microbatches(aux0.selected_experts, aux1.selected_experts, mesh=mesh),
+      logits=microbatching.merge_microbatches(aux0.logits, aux1.logits, mesh=mesh),
   )
 
 
@@ -970,7 +970,7 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_logits = grad_aux.logits
     if jax.typeof(grad_logits).sharding != logits_sharding:
       grad_logits = jax.reshard(grad_logits, logits_sharding)
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits, mesh=mesh)
+    grad_logits_0, grad_logits_1 = microbatching.split_microbatches(grad_logits, mesh=mesh)
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=getattr(grad_aux, "group_sizes", None),
         selected_experts=getattr(grad_aux, "selected_experts", None), logits=grad_logits_0,
@@ -1404,7 +1404,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_logits_curr = grad_aux_curr.logits
     if jax.typeof(grad_logits_curr).sharding != logits_sharding:
       grad_logits_curr = jax.reshard(grad_logits_curr, logits_sharding)
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits_curr, mesh=mesh)
+    grad_logits_0, grad_logits_1 = microbatching.split_microbatches(grad_logits_curr, mesh=mesh)
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=grad_aux_curr.group_sizes, selected_experts=grad_aux_curr.selected_experts, logits=grad_logits_0,
     )
@@ -1689,9 +1689,9 @@ def _dsv3_sparse_layer_fwd(
     rope_factor, mesh, norm_fn, rope_fn, gmm_fn, axis_mapping, expert_axis_name, capacity_factor,
     router_dtype, ragged_buffer_factor, quant,
 ):
-  mb0, mb1 = ops.split_microbatches(x, mesh=mesh)
-  yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
-  segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
+  mb0, mb1 = microbatching.split_microbatches(x, mesh=mesh)
+  yarn_freqs_0, yarn_freqs_1 = microbatching.split_microbatches(yarn_freqs, mesh=mesh)
+  segment_ids_0, segment_ids_1 = microbatching.split_microbatches(segment_ids, mesh=mesh)
   (bank_0, bank_offset_0), (bank_1, bank_offset_1) = init_activation_bank(
       mb0, w, num_layers=1, num_experts_per_tok=num_experts_per_tok, ragged_buffer_factor=ragged_buffer_factor,
       capacity_factor=capacity_factor, expert_axis_name=expert_axis_name, axis_mapping=axis_mapping, mesh=mesh,
@@ -1716,7 +1716,7 @@ def _dsv3_sparse_layer_fwd(
       expert_axis_name=expert_axis_name, capacity_factor=capacity_factor, router_dtype=router_dtype,
       segment_ids=(segment_ids_0, segment_ids_1), quant=quant, expert_permutations=expert_permutations,
   )
-  out = ops.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
+  out = microbatching.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
   res = (res_prologue, res_epilogue, w, yarn_freqs, splash_kernel, segment_ids)
   return (out, aux), res
 
@@ -1730,9 +1730,9 @@ def _dsv3_sparse_layer_bwd(
   del ragged_buffer_factor
   res_prologue, res_epilogue, w, yarn_freqs, splash_kernel, segment_ids = res
   grad_out, grad_aux = grad_outputs
-  grad_mb0, grad_mb1 = ops.split_microbatches(grad_out, mesh=mesh)
-  yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
-  segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
+  grad_mb0, grad_mb1 = microbatching.split_microbatches(grad_out, mesh=mesh)
+  yarn_freqs_0, yarn_freqs_1 = microbatching.split_microbatches(yarn_freqs, mesh=mesh)
+  segment_ids_0, segment_ids_1 = microbatching.split_microbatches(segment_ids, mesh=mesh)
   grad_carry, grad_w_epilogue = dsv3_sparse_layer_epilogue_bwd(
       res_epilogue, ((grad_mb0, grad_mb1), grad_aux), w, yarn_freqs=(yarn_freqs_0, yarn_freqs_1),
       splash_kernel=splash_kernel, num_experts=num_experts, num_experts_per_tok=num_experts_per_tok,
@@ -1752,7 +1752,7 @@ def _dsv3_sparse_layer_bwd(
       mesh=mesh, norm_fn=norm_fn, rope_fn=rope_fn, axis_mapping=axis_mapping,
       segment_ids=(segment_ids_0, segment_ids_1), quant=quant,
   )
-  grad_x = ops.merge_microbatches(grad_mb0_in, grad_mb1_in, mesh=mesh)
+  grad_x = microbatching.merge_microbatches(grad_mb0_in, grad_mb1_in, mesh=mesh)
   grad_w = weight_scan_prologue_epilogue.combine_w_grads(grad_w_prologue, grad_w_epilogue)
   return grad_x, grad_w, None, None, None, None
 

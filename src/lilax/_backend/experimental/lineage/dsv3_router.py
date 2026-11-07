@@ -14,7 +14,11 @@ import typeguard
 
 from lilax._backend.experimental.lineage import dsv3_expert_shuffle
 from lilax._backend.experimental.lineage import dsv3_types
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import ragged_gather
+from lilax._backend.experimental.lineage import ragged_gather_reduce
+from lilax._backend.experimental.lineage import ragged_gather_reduce_metadata
+from lilax._backend.experimental.lineage import token_absmax
+from lilax._backend.experimental.lineage.sc_reduce_scatter import reduce_scatter
 from lilax._backend.experimental.lineage.sharding import axis_collectives
 from lilax._backend.experimental.lineage.sharding import partition_specs
 
@@ -95,8 +99,8 @@ def _quantized_reduce_scatter_sc0(
   if qtype != jnp.float8_e4m3fn:
     raise ValueError(f"ops.reduce_scatter_sc0 only sends jnp.float8_e4m3fn, got {qtype!r}.")
   ring_axis, core_axis = axis_name
-  token_amax = None if per_hop_scaling else ops.token_absmax(y_ag)
-  return ops.reduce_scatter_sc0(
+  token_amax = None if per_hop_scaling else token_absmax.token_absmax(y_ag)
+  return reduce_scatter.reduce_scatter_sc0(
       y_ag, token_amax=token_amax, per_hop_scaling=per_hop_scaling, ring_axis=ring_axis, core_axis=core_axis,
   )
 
@@ -154,7 +158,7 @@ class RouterMetadata(Generic[T]):
   sort_indices: T
   group_sizes: T
   sorted_coeffs: T
-  reduce_metadata: ops.RaggedGatherReduceMetadata | T
+  reduce_metadata: ragged_gather_reduce_metadata.RaggedGatherReduceMetadata | T
   selected_experts: T
   probs: T
   capacity: int = jax.tree.static()
@@ -177,8 +181,8 @@ def chunk_group_sizes(
 def chunk_reduce_metadata(
     sort_indices: jt.Int[jax.Array, "kNBT"], start: jt.Int[jax.Array, ""] | int,
     num_tokens: jt.Int[jax.Array, ""], *, capacity: int, num_experts_per_tok: int,
-) -> ops.RaggedGatherReduceMetadata:
-  return ops.ragged_gather_reduce_tc_metadata(
+) -> ragged_gather_reduce_metadata.RaggedGatherReduceMetadata:
+  return ragged_gather_reduce_metadata.ragged_gather_reduce_tc_metadata(
       sort_indices // num_experts_per_tok, start=start, num_tokens=num_tokens,
       top_k=num_experts_per_tok, max_num_tokens=capacity,
   )
@@ -189,18 +193,18 @@ def permute_chunk(
     start: jt.Int[jax.Array, ""] | int, num_tokens: jt.Int[jax.Array, ""],
     *, capacity: int, num_experts_per_tok: int, with_absmax: bool = False,
 ) -> Any:
-  return ops.ragged_gather_tc(
+  return ragged_gather.ragged_gather_tc(
       x_ag, sort_indices // num_experts_per_tok, start=start, num_tokens=num_tokens,
       max_out_tokens=capacity, with_absmax=with_absmax,
   )
 
 
 def unpermute_chunk(
-    x: jt.Num[jax.Array, "C D0 D1"], reduce_metadata: ops.RaggedGatherReduceMetadata,
+    x: jt.Num[jax.Array, "C D0 D1"], reduce_metadata: ragged_gather_reduce_metadata.RaggedGatherReduceMetadata,
     *, num_out_tokens: int, num_experts_per_tok: int, out: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
     zero_initialized: bool | None = None,
 ) -> jt.Num[jax.Array, "NBT D0 D1"]:
-  return ops.ragged_gather_reduce_tc(
+  return ragged_gather_reduce.ragged_gather_reduce_tc(
       x, reduce_metadata, num_out_tokens=num_out_tokens, top_k=num_experts_per_tok,
       out=out, zero_initialized=zero_initialized,
   )

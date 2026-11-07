@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
 
-from lilax._backend.experimental.lineage import dsv3_types, ops
+from lilax._backend.experimental.lineage import dsv3_types, normalization
 from lilax._backend.experimental.lineage.sharding import partition_specs
 
 ArrayType = dsv3_types.ArrayType
@@ -84,7 +84,7 @@ def embed_single_token(table: jt.Num[jax.Array, "V D"], token_id: int, *, dtype:
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def final_norm(x: jt.Num[jax.Array, "*batch D"], scale: jt.Num[jax.Array, "D"], *,
                epsilon: float) -> jt.Num[jax.Array, "*batch D"]:
-  return ops.rms_norm(x, jnp.asarray(scale, x.dtype), epsilon=epsilon)
+  return normalization.rms_norm(x,jnp.asarray(scale, x.dtype), epsilon=epsilon)
 
 
 @jax.named_call

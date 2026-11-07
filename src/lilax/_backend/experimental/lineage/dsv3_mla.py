@@ -16,7 +16,7 @@ import typeguard
 from lilax._backend.experimental.lineage import dsv3_types
 from lilax._backend.experimental.lineage import mla_qkv_up_bwd_kernels
 from lilax._backend.experimental.lineage import mla_qkv_up_kernel
-from lilax._backend.experimental.lineage import ops
+from lilax._backend.experimental.lineage import normalization
 from lilax._backend.experimental.lineage import quantization
 from lilax._backend.experimental.lineage import tokamax_splash_attention_kernel
 from lilax._backend.experimental.lineage.sharding import partition_specs
@@ -408,7 +408,7 @@ def kv_up_from_kv_down_bwd(
 
 def _rms_norm_epsilon(norm_fn: NormFn) -> float | None:
   if (
-      isinstance(norm_fn, functools.partial) and norm_fn.func is ops.rms_norm and not norm_fn.args
+      isinstance(norm_fn, functools.partial) and norm_fn.func is normalization.rms_norm and not norm_fn.args
       and set(norm_fn.keywords) == {"epsilon"}
   ):
     return float(norm_fn.keywords["epsilon"])
