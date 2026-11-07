@@ -37,8 +37,8 @@ from lilax._backend.observability.diagnostics import sharding_report
 from lilax._backend.models.creation import nnx_abstract_model
 from lilax._backend.integration.transformer_engine import moe_bootstrap
 from lilax._backend.trainers.setup import state_setup
-from lilax._backend.utils.training.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
-from lilax._backend.utils.training.rampup_batch import create_rampup_manager
+from lilax._backend.trainers.setup.compilation import jit_eval_step, jit_train_and_eval_step, jit_train_step
+from lilax._backend.trainers.setup.rampup_batch import create_rampup_manager
 
 
 def prepare_before_run_start(
