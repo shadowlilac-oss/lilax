@@ -15,7 +15,7 @@ from lilax._backend.layers.quantization.configure import configure_kv_quant
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
 from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import DenseGeneral
-from lilax._backend.utils import model_mode_shapes
+from lilax._backend.models import model_mode_shapes
 from lilax._backend.models.qwen3 import AttentionWithNorm
 from lilax._backend.layers.normalizations import RMSNorm
 

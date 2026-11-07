@@ -14,7 +14,7 @@ from lilax._backend.layers.attentions import Attention
 from lilax._backend.layers.linears import Dropout
 from lilax._backend.layers.normalizations import RMSNorm
 from lilax._backend.layers.quantization.aqt import AqtQuantization as Quant
-from lilax._backend.utils import model_mode_shapes
+from lilax._backend.models import model_mode_shapes
 from lilax._backend.distributed.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
 
 

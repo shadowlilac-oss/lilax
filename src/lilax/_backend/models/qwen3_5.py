@@ -10,7 +10,7 @@ from lilax._backend.models.qwen3 import (
     Qwen3NextSparseMoeBlock,
 )
 from lilax._backend.models.qwen3_next.gated_delta_net import Qwen3NextGatedDeltaNet
-from lilax._backend.utils import model_mode_shapes
+from lilax._backend.models import model_mode_shapes
 
 
 class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):

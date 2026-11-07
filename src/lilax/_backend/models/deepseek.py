@@ -47,7 +47,7 @@ from lilax._backend.models.deepseek_batchsplit.weights import gather as deepseek
 from lilax._backend.models.deepseek_batchsplit_fp8 import microbatch as deepseek_batchsplit_fp8_microbatch
 from lilax._backend.models.deepseek_batchsplit_fp8 import schedule as deepseek_batchsplit_fp8_schedule
 from lilax._backend.models.deepseek_batchsplit_fp8.weights import fetch as deepseek_batchsplit_fp8_weight_fetch
-from lilax._backend.utils import model_mode_shapes
+from lilax._backend.models import model_mode_shapes
 from lilax._backend.distributed.sharding import create_sharding
 from lilax._backend.distributed.sharding import maybe_shard_with_logical
 from lilax._backend.distributed.sharding import get_logical_axis_rules
