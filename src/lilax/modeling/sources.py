@@ -11,6 +11,7 @@ from huggingface_hub.constants import HF_HUB_CACHE
 import jax
 
 from lilax._backend.checkpoint_conversion.cpu_bootstrap import conversion_provenance, convert_on_cpu
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_format, model_checkpoint_path
 from lilax.configuration import AutoConfig
 from lilax.configuration.model_architecture import ArchitectureConfig
 from lilax.configuration.model_mapping import project_model_config
@@ -35,6 +36,9 @@ def resolve_pretrained_source(
       or (local_path / "pytorch_model.bin.index.json").is_file()
       or (local_path / "pytorch_model.bin").is_file()
   )
+  if (is_hf and local_path.is_dir() and model_checkpoint_path(local_path) != epath.Path(local_path)
+      and model_checkpoint_format(local_path) != "huggingface"):
+    is_hf = False
   if is_hf:
     supplied_config = config if config is not None else runtime.public_config if runtime is not None else None
     snapshot = resolve_model_snapshot(

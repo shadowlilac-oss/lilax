@@ -4,7 +4,6 @@ import pathlib
 import re
 import sys
 
-from etils import epath
 from flax import nnx
 import jax
 import orbax.checkpoint as ocp
@@ -13,6 +12,7 @@ import torch
 
 from lilax._backend.checkpoint_conversion.checkpoint_cpu_bootstrap import run_on_cpu
 from lilax._backend.checkpoint_conversion.utils.utils import param_key_parts_from_path
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_path
 from lilax._backend.distributed import device_mesh
 from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.models.creation.nnx_abstract_model import create_nnx_abstract_model
@@ -85,7 +85,7 @@ def _inspect_maxtext(config, check_dtype=False, output_file=""):
 
 
 def inspect_orbax(path, check_dtype=False, output_file=""):
-  metadata = ocp.StandardCheckpointer().metadata(epath.Path(path))
+  metadata = ocp.StandardCheckpointer().metadata(model_checkpoint_path(path))
   tree = metadata.item_metadata.tree
   has_params = isinstance(tree, dict) and "params" in tree
   params = {}

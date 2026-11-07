@@ -3,12 +3,14 @@
 import dataclasses
 from typing import Any
 
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_path
+
 
 def _normalize_checkpoint_root(path_str):
   path_str = str(path_str).rstrip("/")
   if path_str == "items":
     return "."
-  return path_str.removesuffix("/items")
+  return str(model_checkpoint_path(path_str.removesuffix("/items")))
 
 
 @dataclasses.dataclass(frozen=True)

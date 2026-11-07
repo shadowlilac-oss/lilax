@@ -16,6 +16,7 @@ from lilax._backend.checkpoint_conversion.model_families.qwen3_vl import fused a
 from lilax._backend.checkpoint_conversion.model_families.qwen3_omni import fused as fused_qwen3_omni
 from lilax._backend.configs.runtime import resolve_runtime_config
 from lilax._backend.configs.inert import MaxTextConfig
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_format, model_checkpoint_path
 from lilax.configuration.loading import AutoConfig
 from lilax.configuration.conversion import project_cpu_conversion_config
 from lilax.configuration.model_mapping import model_config_from_source, project_model_config
@@ -29,7 +30,8 @@ def convert_checkpoint(source, destination, *, fused_qkv=None, fused_mlp=None, c
   if destination.exists():
     raise ValueError(f"Destination already exists: {destination}")
   source_path = Path(source).expanduser()
-  if source_path.is_dir() and (source_path / "maxtext_easy_config_metadata.json").is_file():
+  if (source_path.is_dir() and (source_path / "maxtext_easy_config_metadata.json").is_file()
+      and model_checkpoint_format(source_path) != "huggingface"):
     if config is not None and config.model_dump() != CheckpointConversionConfig().model_dump():
       raise ValueError("CheckpointConversionConfig worker settings apply to Hugging Face import only.")
     return _convert_native_checkpoint(source, destination, fused_qkv=fused_qkv, fused_mlp=fused_mlp)
@@ -85,7 +87,7 @@ def _convert_native_checkpoint(source, destination, *, fused_qkv=None, fused_mlp
   checkpointer = ocp.PyTreeCheckpointer(
       use_ocdbt=config.checkpoint_storage_use_ocdbt, use_zarr3=config.checkpoint_storage_use_zarr3,
   )
-  state = checkpointer.restore(source)
+  state = checkpointer.restore(model_checkpoint_path(source))
   if any(key in state for key in ("step", "opt_state", "optimizer", "iter")):
     raise ValueError("Full training checkpoints cannot be converted as model weights.")
 

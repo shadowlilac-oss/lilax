@@ -6,6 +6,7 @@ from pathlib import Path
 
 from lilax.configuration.schema import MaxTextConfig
 from lilax._backend.configs.inert import MaxTextConfig as InertConfig
+from lilax._backend.common.checkpoints.model_path import MODEL_CHECKPOINT_DIRECTORY
 from lilax.configuration.model_mapping import model_config_from_source
 from lilax.configuration.values import load_config_values
 from lilax.modeling.hub import resolve_model_name, resolve_model_snapshot
@@ -49,7 +50,11 @@ class AutoConfig:
         if metadata_path.is_file():
           with metadata_path.open(encoding="utf-8") as metadata_file:
             metadata = json.load(metadata_file)
-          if (not isinstance(metadata, dict) or set(metadata) != {"explicit_keys", "checkpoint_layout"}
+          if (not isinstance(metadata, dict)
+              or set(metadata) - {"model_checkpoint_directory", "model_checkpoint_format"}
+              != {"explicit_keys", "checkpoint_layout"}
+              or metadata.get("model_checkpoint_directory", MODEL_CHECKPOINT_DIRECTORY) != MODEL_CHECKPOINT_DIRECTORY
+              or metadata.get("model_checkpoint_format", "maxtext") not in ("maxtext", "huggingface")
               or not isinstance(metadata["explicit_keys"], list)
               or any(not isinstance(key, str) for key in metadata["explicit_keys"])):
             raise ValueError("Model checkpoint metadata must contain explicit_keys and checkpoint_layout")

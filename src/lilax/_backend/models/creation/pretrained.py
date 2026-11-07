@@ -3,6 +3,8 @@
 from flax import nnx
 
 from lilax._backend.common.common_types import MODEL_MODE_TRAIN
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_path
+from lilax._backend.configs import pyconfig
 from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.utils import maxtext_utils_nnx
@@ -28,6 +30,11 @@ def from_pretrained(
   """Create an NNX model with sharded parameters, optionally restoring a checkpoint."""
   original_mesh = mesh
   config = use_converted_checkpoint_if_possible(config)
+  if config.load_parameters_path:
+    checkpoint_path = str(model_checkpoint_path(config.load_parameters_path))
+    if checkpoint_path != config.load_parameters_path:
+      pydantic_config = getattr(config, "_pydantic_config", config)
+      config = pyconfig.HyperParameters(pydantic_config.model_copy(update={"load_parameters_path": checkpoint_path}))
   config = verify_and_sync_scan_layers(config)
   create_model_fn, abstract_model = create_nnx_abstract_model(
       config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str

@@ -36,6 +36,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_N
 from lilax._backend.checkpoint_conversion.utils._memory_monitor import MemoryMonitorTqdm, print_peak_memory, print_ram_usage
 from lilax._backend.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from lilax._backend.common.checkpoints import checkpointing
+from lilax._backend.common.checkpoints.model_path import model_checkpoint_path
 from lilax._backend.observability import max_logging
 
 SAFE_TENSORS_CONFIG_FILE = "config.json"
@@ -399,6 +400,13 @@ def save_model_files(weight_arrays: dict, config, tokenizer: None | Any, process
     gc.collect()
     save_weight_files(shards, index, current_save_path, output_dir, parallel_threads, remove_local_copy)
   if jax.process_index() == 0:
+    if not output_dir.startswith("hf://"):
+      metadata_path = epath.Path(output_dir) / "maxtext_easy_config_metadata.json"
+      if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if "checkpoint_layout" in metadata:
+          metadata["model_checkpoint_format"] = "huggingface"
+          metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     max_logging.log(f"✅ Model and tokenizer (if provided) successfully processed for {output_dir}")
 
 
@@ -500,7 +508,7 @@ def load_orbax_checkpoint(config) -> dict:
   paths = [path for path in [config.load_parameters_path, lora_path] if path]
   merged_dict = {}
   for index, path in enumerate(paths):
-    checkpoint_path = epath.Path(path)
+    checkpoint_path = model_checkpoint_path(path)
     metadata = ckptr.metadata(checkpoint_path)
     checkpoint_tree = metadata.item_metadata.tree
     if isinstance(checkpoint_tree, dict):

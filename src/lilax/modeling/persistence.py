@@ -16,6 +16,7 @@ from lilax._backend.checkpoint_conversion.projection_layout import (
     is_hybrid_qwen_adapter, projection_layout_adapter, supports_mlp_layout, validate_huggingface_projection_layout,
     validate_mlp_only_layout,
 )
+from lilax._backend.common.checkpoints.model_path import MODEL_CHECKPOINT_DIRECTORY, model_checkpoint_path
 from lilax._backend.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from lilax._backend.integration.vllm.convert_utils import _partition_size
 from lilax.configuration import QwixQATConfig
@@ -41,6 +42,7 @@ def checkpoint_qat_config(path):
 
 
 def restore_qat_checkpoint(model, runtime, config, checkpoint_path):
+  checkpoint_path = model_checkpoint_path(checkpoint_path)
   native_model = model.base if isinstance(model, TunixMaxTextAdapter) else model
   state = nnx.state(native_model).filter(
       lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
@@ -187,7 +189,10 @@ def save_pretrained(
       use_ocdbt=model.runtime.config.checkpoint_storage_use_ocdbt,
       use_zarr3=model.runtime.config.checkpoint_storage_use_zarr3,
   )
-  checkpointer.save(save_directory, wrap_value(state), force=True)
+  checkpoint_directory = epath.Path(save_directory) / MODEL_CHECKPOINT_DIRECTORY
+  checkpointer.save(
+      checkpoint_directory, wrap_value(state), force=model_checkpoint_path(save_directory) == checkpoint_directory,
+  )
   (epath.Path(save_directory) / "config.json").write_text(config_json, encoding="utf-8")
   explicit_keys = public_config._explicit_keys | {"scan_layers"}
   if decoder == "gpt_oss" and config.prefuse_moe_weights:
@@ -197,6 +202,8 @@ def save_pretrained(
   if model.existing_graph_qat_config is not None:
     explicit_keys |= {"qwix_qat_config"}
   metadata = {
+      "model_checkpoint_directory": MODEL_CHECKPOINT_DIRECTORY,
+      "model_checkpoint_format": "maxtext",
       "explicit_keys": sorted(explicit_keys - {"hf_access_token"}),
       "checkpoint_layout": {"scan_layers": config.scan_layers, "param_scan_axis": config.param_scan_axis},
   }
