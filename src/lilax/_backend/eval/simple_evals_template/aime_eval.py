@@ -37,23 +37,25 @@ def extract_answer(response_text: str) -> str | None:
 
 class AIMEEval(Eval):
 
-  def __init__(self, year: int, num_examples: int | None = None, n_repeats: int = 1):
+  def __init__(self, year: int, num_examples: int | None = None, n_repeats: int = 1, *, dataset=None):
     if year not in _DATASET_BY_YEAR:
       raise ValueError(f"Unsupported AIME year: {year}. Supported: {sorted(_DATASET_BY_YEAR)}.")
     url, problem_col, answer_col = _DATASET_BY_YEAR[year]
-    try:
-      if "AIME_2024" in url:
-        parquet_path = hf_hub_download(
-            repo_id="Maxwell-Jia/AIME_2024", repo_type="dataset", filename="default/train/0000.parquet"
-        )
-      else:
-        parquet_path = hf_hub_download(
-            repo_id="math-ai/aime25", repo_type="dataset", filename="default/test/0000.parquet"
-        )
-    except Exception as exc:
-      raise RuntimeError(f"Could not download AIME dataset: {exc}") from exc
-    df = pandas.read_parquet(parquet_path)
-    examples = [{"problem": row[problem_col], "answer": str(int(row[answer_col]))} for _, row in df.iterrows()]
+    if dataset is None:
+      try:
+        if "AIME_2024" in url:
+          parquet_path = hf_hub_download(
+              repo_id="Maxwell-Jia/AIME_2024", repo_type="dataset", filename="default/train/0000.parquet"
+          )
+        else:
+          parquet_path = hf_hub_download(
+              repo_id="math-ai/aime25", repo_type="dataset", filename="default/test/0000.parquet"
+          )
+      except Exception as exc:
+        raise RuntimeError(f"Could not download AIME dataset: {exc}") from exc
+      df = pandas.read_parquet(parquet_path)
+      dataset = [row.to_dict() for _, row in df.iterrows()]
+    examples = [{"problem": row[problem_col], "answer": str(int(row[answer_col]))} for row in dataset]
     rng = random.Random(0)
     if num_examples:
       assert n_repeats == 1, "n_repeats only supported for num_examples = None"

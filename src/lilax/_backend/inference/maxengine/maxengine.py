@@ -35,7 +35,10 @@ from lilax._backend.inference.maxengine import model as maxengine_model
 from lilax._backend.inference.maxengine import model_transfer as maxengine_model_transfer
 from lilax._backend.inference.maxengine import multimodal as maxengine_multimodal
 from lilax._backend.inference.maxengine import params as maxengine_params
+from lilax._backend.inference.maxengine import prefill as maxengine_prefill
 from lilax._backend.inference.maxengine import prefill_cache as maxengine_prefill_cache
+from lilax._backend.inference.maxengine import prefix_insertion as maxengine_prefix_insertion
+from lilax._backend.inference.maxengine import result_tokens as maxengine_result_tokens
 from lilax._backend.inference.maxengine import tokenizer as maxengine_tokenizer
 from lilax._backend.distributed import device_mesh
 from lilax._backend.utils import lora_utils
@@ -401,32 +404,20 @@ class MaxEngine(engine_api.Engine):
           token to begin decoding.
     """
 
-    start_position = 0
-    previous_chunk = None
     input_params = params
     if existing_prefix is not None:
       if not self.use_chunked_prefill:
         raise ValueError("Using chunked prefill is needed for existing_prefix.")
-      start_position = existing_prefix.common_prefix_tokens.shape[0]
-      previous_chunk = jnp.expand_dims(existing_prefix.common_prefix_tokens, 0)
-
-    full_true_length = start_position + true_length
-
-    input_tokens = jnp.expand_dims(padded_tokens, 0)
-
-    if positions is not None:
-      if positions.ndim == 2:
-        positions = jnp.expand_dims(positions, 1)
-    else:
-      positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
+    start_position, previous_chunk, full_true_length, input_tokens, positions = maxengine_prefill.prefill_inputs(
+        existing_prefix, padded_tokens, positions, true_length
+    )
 
     if self.config.use_multimodal and images is not None:
       images, image_masks = maxengine_multimodal.prepare_images(images, image_masks)
 
-    start_to_n = jnp.arange(start_position, start_position + input_tokens.shape[1])
-    ones_to_keep = start_to_n < full_true_length
-    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    sequence_indicator = maxengine_prefill.active_sequence_indicator(
+        start_position, input_tokens.shape[1], full_true_length
+    )
 
     rng, new_rng = jax.random.split(rng)
     nnx_cache = (
@@ -458,11 +449,7 @@ class MaxEngine(engine_api.Engine):
       prompt_logp = None
 
     generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits,
-        (0, true_length - 1, 0),
-        (flat_logits.shape[0], 1, flat_logits.shape[2]),
-    )
+    selected_logits = maxengine_prefill.select_logits(flat_logits, true_length - 1)
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     rng, new_rng = jax.random.split(rng)
@@ -480,14 +467,7 @@ class MaxEngine(engine_api.Engine):
       token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
     else:
       token_logp = jnp.zeros(first_generated_token.shape, dtype=jnp.float32)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        log_prob=token_logp,
-        samples_per_slot=1,
-    )
+    result = maxengine_result_tokens.result_tokens(first_generated_token, all_valid, generated_tokens, token_logp, 1)
 
     cache = new_vars["cache"]
     cache = self._maybe_stack_prefill_result_cache(cache)
@@ -645,10 +625,7 @@ class MaxEngine(engine_api.Engine):
     input_tokens = jnp.expand_dims(padded_tokens, 0)
     positions = jnp.expand_dims(jnp.arange(0, input_tokens.shape[1]), 0)
 
-    zero_to_n = jnp.arange(0, padded_tokens.shape[0])
-    ones_to_keep = zero_to_n < true_length
-    one_d_output = ones_to_keep * DECODING_ACTIVE_SEQUENCE_INDICATOR
-    sequence_indicator = jnp.expand_dims(one_d_output, 0)
+    sequence_indicator = maxengine_prefill.active_sequence_indicator(0, padded_tokens.shape[0], true_length)
 
     rng, new_rng = jax.random.split(rng)
     with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
@@ -664,11 +641,7 @@ class MaxEngine(engine_api.Engine):
     new_vars = {"cache": new_cache_dict}
 
     next_pos = jnp.full((1, 1), true_length, dtype=jnp.int32)
-    selected_logits = jax.lax.dynamic_slice(
-        flat_logits,
-        (0, true_length - 1, 0),
-        (flat_logits.shape[0], 1, flat_logits.shape[2]),
-    )
+    selected_logits = maxengine_prefill.select_logits(flat_logits, true_length - 1)
     selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
 
     first_generated_tokens = []
@@ -693,13 +666,8 @@ class MaxEngine(engine_api.Engine):
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
-    result = engine_api.ResultTokens(
-        data=jnp.concatenate((first_generated_tokens, all_valid, generated_tokens), axis=1),
-        tokens_idx=(0, 1),
-        valid_idx=(1, 2),
-        length_idx=(2, 3),
-        log_prob=token_logps,
-        samples_per_slot=num_samples,
+    result = maxengine_result_tokens.result_tokens(
+        first_generated_tokens, all_valid, generated_tokens, token_logps, num_samples
     )
 
     cache = new_vars["cache"]
@@ -711,6 +679,7 @@ class MaxEngine(engine_api.Engine):
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_tokens,
+        "token_logp": token_logps if token_logps is not None else jnp.zeros(first_generated_tokens.shape, dtype=jnp.float32),
     }, result
 
   @functools.partial(
@@ -770,11 +739,7 @@ class MaxEngine(engine_api.Engine):
     def process_packed_logits_and_caches(packed_flat_logits, idx):
       next_pos = jnp.full((1, 1), true_lengths[idx], dtype=jnp.int32)
       generated_tokens = jnp.zeros((1, 1), dtype=jnp.int32)
-      selected_logits = jax.lax.dynamic_slice(
-          packed_flat_logits,
-          (0, start_pos[idx] + true_lengths[idx] - 1, 0),
-          (packed_flat_logits.shape[0], 1, packed_flat_logits.shape[2]),
-      )
+      selected_logits = maxengine_prefill.select_logits(packed_flat_logits, start_pos[idx] + true_lengths[idx] - 1)
       selected_logits = jax.lax.with_sharding_constraint(selected_logits, self.replicated_sharding)
       first_generated_token = inference_utils.sampling(
           selected_logits,
@@ -789,20 +754,14 @@ class MaxEngine(engine_api.Engine):
         token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
       else:
         token_logp = None
-      result = engine_api.ResultTokens(
-          data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
-          tokens_idx=(0, 1),
-          valid_idx=(1, 2),
-          length_idx=(2, 3),
-          log_prob=token_logp,
-          samples_per_slot=1,
-      )
+      result = maxengine_result_tokens.result_tokens(first_generated_token, all_valid, generated_tokens, token_logp, 1)
 
       return {
           "logits": selected_logits,
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": first_generated_token,
+          "token_logp": token_logp if token_logp is not None else jnp.zeros(first_generated_token.shape, dtype=jnp.float32),
       }, result
 
     prefill_results = defaultdict(list)
@@ -885,40 +844,10 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix = partitioning.unbox_logicallypartioned(prefix)
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
-    def copy(path, partial_cache, full_cache, annotations):
-      return maxengine_insertion.copy_cache_leaf(path, partial_cache, full_cache, annotations, slots)
-
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy,
-        unboxed_prefix["cache"],
-        decode_state["cache"],
-        self.kv_cache_annotations_named,
+    inserted_cache = maxengine_prefix_insertion.insert_slots_cache(
+        unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named, slots
     )
-    for i, slot in enumerate(slots):
-      decode_state["logits"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["logits"], unboxed_prefix["logits"], slot, 0
-      )
-      decode_state["next_pos"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["next_pos"], unboxed_prefix["next_pos"], slot, 0
-      )
-      decode_state["generated_tokens"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["generated_tokens"],
-          jnp.expand_dims(unboxed_prefix["generated_tokens"][i], axis=0),
-          slot,
-          0,
-      )
-      decode_state["tokens"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["tokens"],
-          jnp.expand_dims(unboxed_prefix["tokens"][i], axis=0),
-          slot,
-          0,
-      )
-      decode_state["token_logp"] = jax.lax.dynamic_update_index_in_dim(
-          decode_state["token_logp"],
-          jnp.expand_dims(unboxed_prefix["token_logp"][i], axis=0),
-          slot,
-          0,
-      )
+    maxengine_prefix_insertion.bulk_insert_slot_fields(unboxed_prefix, decode_state, slots)
 
     inserted_logits = jax.lax.with_sharding_constraint(decode_state["logits"], self.replicated_sharding)
     inserted_generated_tokens = jax.lax.with_sharding_constraint(
@@ -1027,29 +956,12 @@ class MaxEngine(engine_api.Engine):
     unboxed_prefix = partitioning.unbox_logicallypartioned(prefix)
     unboxed_prefix["cache"] = self._maybe_unstack_prefill_result_cache(unboxed_prefix["cache"])
 
-    def copy(path, partial_cache, full_cache, annotations):
-      return maxengine_insertion.copy_cache_leaf(path, partial_cache, full_cache, annotations, (slot,))
-
-    inserted_cache = jax.tree_util.tree_map_with_path(
-        copy,
-        unboxed_prefix["cache"],
-        decode_state["cache"],
-        self.kv_cache_annotations_named,
+    inserted_cache = maxengine_prefix_insertion.insert_slots_cache(
+        unboxed_prefix["cache"], decode_state["cache"], self.kv_cache_annotations_named, (slot,)
     )
 
-    inserted_logits = jax.lax.dynamic_update_index_in_dim(decode_state["logits"], unboxed_prefix["logits"], slot, 0)
-    inserted_next_pos = jax.lax.dynamic_update_index_in_dim(
-        decode_state["next_pos"], jnp.asarray(unboxed_prefix["next_pos"], dtype=decode_state["next_pos"].dtype), slot, 0
-    )
-    inserted_generated_tokens = jax.lax.dynamic_update_index_in_dim(
-        decode_state["generated_tokens"],
-        unboxed_prefix["generated_tokens"],
-        slot,
-        0,
-    )
-    inserted_tokens = jax.lax.dynamic_update_index_in_dim(decode_state["tokens"], unboxed_prefix["tokens"], slot, 0)
-    inserted_token_logp = jax.lax.dynamic_update_index_in_dim(
-        decode_state["token_logp"], unboxed_prefix["token_logp"], slot, 0
+    inserted_logits, inserted_next_pos, inserted_generated_tokens, inserted_tokens, inserted_token_logp = (
+        maxengine_prefix_insertion.insert_slot_fields(unboxed_prefix, decode_state, slot)
     )
 
     inserted_logits = jax.lax.with_sharding_constraint(inserted_logits, self.replicated_sharding)

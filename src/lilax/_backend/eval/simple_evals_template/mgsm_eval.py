@@ -92,7 +92,7 @@ def get_all_examples() -> list[dict[str, str]]:
 
 class MGSMEval(Eval):
 
-  def __init__(self, num_examples_per_lang: int = 250, languages: Optional[list[str]] = ALL_LANGUAGES):
+  def __init__(self, num_examples_per_lang: int = 250, languages: Optional[list[str]] = ALL_LANGUAGES, *, dataset=None):
     if languages is None:
       languages = ALL_LANGUAGES
     else:
@@ -102,8 +102,9 @@ class MGSMEval(Eval):
     self._languages = languages
     self._num_examples_per_lang = num_examples_per_lang
     examples = []
+    supplied = None if dataset is None else list(dataset)
     for lang in self._languages:
-      lang_examples = get_lang_examples(lang)
+      lang_examples = get_lang_examples(lang) if supplied is None else [row for row in supplied if row["lang"] == lang]
       examples.extend(lang_examples[: self._num_examples_per_lang])
     self.examples = examples
 

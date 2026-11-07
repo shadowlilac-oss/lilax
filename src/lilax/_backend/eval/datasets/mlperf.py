@@ -12,8 +12,8 @@ _SYSTEM_PROMPT = "You are a helpful assistant. Summarize the following conversat
 class MlperfOpenOrcaDataset(BenchmarkDataset):
   name = "mlperf_openorca"
 
-  def sample_requests(self, num_samples, tokenizer) -> list[SampleRequest]:
-    ds = hf_datasets.load_dataset("Open-Orca/OpenOrca", split="train", streaming=True)
+  def sample_requests(self, num_samples, tokenizer, *, dataset=None) -> list[SampleRequest]:
+    ds = hf_datasets.load_dataset("Open-Orca/OpenOrca", split="train", streaming=True) if dataset is None else dataset
     requests = []
     for row in ds:
       if not row.get("response", "").strip():

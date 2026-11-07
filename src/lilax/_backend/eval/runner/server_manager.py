@@ -172,6 +172,7 @@ def _build_app(llm: Any, enable_chat_api: bool = False, request_concurrency: int
     stop = body.get("stop")
 
     sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
+    sp_kwargs.update({key: body[key] for key in ("top_k", "top_p", "stop_token_ids") if key in body})
     if logprobs_n is not None:
       sp_kwargs["logprobs"] = int(logprobs_n)
     if echo and logprobs_n is not None:
@@ -307,6 +308,7 @@ def _build_app(llm: Any, enable_chat_api: bool = False, request_concurrency: int
       prompt = {"prompt_token_ids": list(prompt_token_ids)}
 
       sp_kwargs: dict = {"max_tokens": max_tokens, "temperature": temperature}
+      sp_kwargs.update({key: body[key] for key in ("top_k", "top_p", "stop_token_ids") if key in body})
       if stop:
         sp_kwargs["stop"] = [stop] if isinstance(stop, str) else list(stop)
       if app.state.use_harmony:

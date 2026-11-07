@@ -47,8 +47,8 @@ def _load_gsm8k_examples() -> list[dict]:
 
 class GSM8KEval(Eval):
 
-  def __init__(self, num_examples: int | None = None):
-    examples = _load_gsm8k_examples()
+  def __init__(self, num_examples: int | None = None, *, dataset=None):
+    examples = _load_gsm8k_examples() if dataset is None else [dict(row) for row in dataset]
     for example in examples:
       example["target"] = example["answer"].split("####")[-1].strip().replace(",", "")
     if num_examples:

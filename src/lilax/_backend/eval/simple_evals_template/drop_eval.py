@@ -183,18 +183,24 @@ def drop_metric(sample: str, reference: list[str]) -> Tuple[float, float]:
 
 class DropEval(Eval):
 
-  def __init__(self, num_examples: int | None = None, train_samples_per_prompt: int = 3):
+  def __init__(self, num_examples: int | None = None, train_samples_per_prompt: int = 3, *, dataset=None):
     self.seed = 42
     self._num_examples = num_examples
     self._train_samples_per_prompt = train_samples_per_prompt
     self.train_jsonl = "https://openaipublic.blob.core.windows.net/simple-evals/drop_v0_train.jsonl.gz"
     self.test_jsonl = "https://openaipublic.blob.core.windows.net/simple-evals/drop_v0_dev.jsonl.gz"
-    with gzip.GzipFile(fileobj=common.url_to_fileobj(self.train_jsonl, binary=True), mode="rb") as f:
-      self.train_samples = list(map(json.loads, f.readlines()))
-    with gzip.GzipFile(fileobj=common.url_to_fileobj(self.test_jsonl, binary=True), mode="rb") as f:
-      self.test_samples = list(map(json.loads, f.readlines()))
-      if self._num_examples:
-        self.test_samples = random.Random(self.seed).sample(self.test_samples, self._num_examples)
+    if isinstance(dataset, dict) and "train" in dataset:
+      self.train_samples = list(dataset["train"])
+    else:
+      with gzip.GzipFile(fileobj=common.url_to_fileobj(self.train_jsonl, binary=True), mode="rb") as f:
+        self.train_samples = list(map(json.loads, f.readlines()))
+    if dataset is None:
+      with gzip.GzipFile(fileobj=common.url_to_fileobj(self.test_jsonl, binary=True), mode="rb") as f:
+        self.test_samples = list(map(json.loads, f.readlines()))
+    else:
+      self.test_samples = list(dataset["test"] if isinstance(dataset, dict) else dataset)
+    if self._num_examples:
+      self.test_samples = random.Random(self.seed).sample(self.test_samples, self._num_examples)
 
   def __call__(self, sampler: SamplerBase) -> EvalResult:
     rng = random.Random(self.seed)

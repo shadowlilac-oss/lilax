@@ -12,9 +12,12 @@ from .types import Eval, EvalResult, SamplerBase, SingleEvalResult
 
 class GPQAEval(Eval):
 
-  def __init__(self, n_repeats: int = 4, variant: str = "diamond", num_examples: int | None = None):
-    df = pandas.read_csv(f"https://openaipublic.blob.core.windows.net/simple-evals/gpqa_{variant}.csv")
-    examples = [row.to_dict() for _, row in df.iterrows()]
+  def __init__(self, n_repeats: int = 4, variant: str = "diamond", num_examples: int | None = None, *, dataset=None):
+    if dataset is None:
+      df = pandas.read_csv(f"https://openaipublic.blob.core.windows.net/simple-evals/gpqa_{variant}.csv")
+      examples = [row.to_dict() for _, row in df.iterrows()]
+    else:
+      examples = [dict(row) for row in dataset]
     rng = random.Random(0)
     if num_examples:
       assert n_repeats == 1, "n_repeats only supported for num_examples = None"
