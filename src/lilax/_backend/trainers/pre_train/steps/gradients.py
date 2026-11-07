@@ -9,7 +9,7 @@ from lilax._backend.experimental.lineage import lineage_adapter
 from lilax._backend.trainers.pre_train.steps.loss import loss_fn
 from lilax._backend.utils import maxtext_utils_nnx
 from lilax._backend.distributed import sharding
-from lilax._backend.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
+from lilax._backend.trainers.pre_train.steps.gradient_accumulation import gradient_accumulation_loss_and_grad
 from lilax._backend.compiler.xla_options import loop_unrolling
 
 

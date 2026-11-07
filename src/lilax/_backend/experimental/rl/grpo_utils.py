@@ -26,7 +26,7 @@ from flax import nnx
 from lilax._backend.inference.offline_engine import InputData
 from lilax._backend.common.common_types import DecoderBlockType
 from lilax._backend.observability import max_logging
-from lilax._backend.utils.training import param_scanning
+from lilax._backend.experimental.rl import param_scanning
 
 from pathwaysutils.experimental import reshard as experimental_reshard
 from pathwaysutils.experimental import split_by_mesh_axis

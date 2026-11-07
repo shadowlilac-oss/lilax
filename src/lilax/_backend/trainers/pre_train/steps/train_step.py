@@ -14,7 +14,8 @@ from lilax._backend.trainers.pre_train.steps.gradients import compute_loss_and_g
 from lilax._backend.trainers.pre_train.steps.train_metrics import (
     loss_scalar_metrics, train_step_metrics, update_norm_metrics, update_skip_step_metric,
 )
-from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx, qk_clip_utils
+from lilax._backend.utils import maxtext_utils, maxtext_utils_nnx
+from lilax._backend.trainers.pre_train.steps import qk_clip
 from lilax._backend.device_memory import memory_kinds
 from lilax._backend.pytree import numerics
 
@@ -65,8 +66,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   scalar_metrics.update(moe_capacity_scalar_metrics(config, aux))
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
-    new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
-    global_max_logit = qk_clip_utils.calculate_max_logit_metric(intermediate_outputs)
+    new_state = qk_clip.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
+    global_max_logit = qk_clip.calculate_max_logit_metric(intermediate_outputs)
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
   update_norm_metrics(scalar_metrics, config, grads, raw_grads, new_state.model)

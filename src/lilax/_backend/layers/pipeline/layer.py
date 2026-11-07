@@ -39,7 +39,7 @@ from lilax._backend.distributed.sharding import (
     logical_to_mesh_axes,
     logical_to_mesh,
 )
-from lilax._backend.utils import pipeline_utils
+from lilax._backend.layers.pipeline import pipeline_utils
 
 
 class PipelineBase(nnx.Module):
