@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 from packaging.tags import sys_tags
 from packaging.requirements import Requirement
@@ -45,7 +46,9 @@ NATIVE_FILES = (
     "/usr/local/lib/python3.12/dist-packages/transformer_engine/libtransformer_engine.so",
     "/usr/local/lib/python3.12/dist-packages/transformer_engine/libnccl_ep.so",
 )
-FORBIDDEN = {"jax-cuda12-plugin", "jax-cuda12-pjrt", "transformer-engine-jax", "transformer-engine-cu12"}
+FORBIDDEN = {"jax-cuda12-plugin", "jax-cuda12-pjrt", "transformer-engine-jax", "transformer-engine-cu12",
+             "tensorflow", "nvidia-cudnn-cu13"}
+TF_CHAIN = {"tensorflow-text", "seqio", "google-jetstream"}
 TUNIX_URL = "https://github.com/google/tunix/archive/385551df4643ee3ac3205e813a93c2ff217dffa5.zip"
 TORCH_URL = ("https://download-r2.pytorch.org/whl/cu134/"
              "torch-2.15.0%2Bcu134-cp312-cp312-manylinux_2_28_x86_64.whl")
@@ -150,7 +153,61 @@ def _install(arguments, report, env):
   replaced = {item["metadata"]["name"].lower().replace("_", "-") for item in installed} & PROTECTED.keys()
   if replaced:
     raise RuntimeError(f"The installation replaced protected distributions: {sorted(replaced)}")
+  forbidden = {item["metadata"]["name"].lower().replace("_", "-") for item in installed} & FORBIDDEN
+  if forbidden:
+    raise RuntimeError(f"The installation selected prohibited distributions: {sorted(forbidden)}")
   return installed
+
+
+def _install_image_dependencies(source, report, env):
+  project = tomllib.loads((source / "pyproject.toml").read_text())
+  files = project["tool"]["hatch"]["metadata"]["hooks"]["requirements_txt"]["optional-dependencies"]["ngc-image"]
+  ordinary, chain, tensorflow = list(project["project"]["dependencies"]), [], []
+  for filename in files:
+    for line in (source / filename).read_text().splitlines():
+      line = line.strip()
+      if not line or line.startswith("#"):
+        continue
+      requirement = Requirement(line)
+      name = requirement.name.lower().replace("_", "-")
+      if name == "tensorflow":
+        tensorflow.append(requirement)
+      elif name in TF_CHAIN:
+        chain.append(line)
+      else:
+        ordinary.append(line)
+  if len(tensorflow) != 1 or str(tensorflow[0].specifier) != "==2.20.0":
+    raise RuntimeError("Expected the pinned TensorFlow 2.20.0 requirement")
+  if {Requirement(item).name.lower().replace("_", "-") for item in chain} != TF_CHAIN:
+    raise RuntimeError("Expected the pinned TensorFlow Text, SeqIO and JetStream requirements")
+
+  _install(["--no-deps", f"{source}[ngc-image]", *chain], report, env)
+  for name in TF_CHAIN:
+    for item in metadata.distribution(name).requires or []:
+      requirement = Requirement(item)
+      dependency = requirement.name.lower().replace("_", "-")
+      if dependency not in TF_CHAIN | {"tensorflow"} and (
+          requirement.marker is None or requirement.marker.evaluate({"extra": ""})):
+        ordinary.append(item)
+  ordinary.extend(["tensorflow-cpu==2.20.0", "flax==0.12.12", "nvidia-nvshmem-cu13==3.7.2"])
+  constraints = report.with_name("constraints.txt")
+  constraints.write_text("".join(f"{name}<0\n" for name in sorted(FORBIDDEN)) +
+                         "".join(f"{name}=={version}\n" for name, version in sorted(PROTECTED.items())))
+  arguments = ["--constraint", str(constraints), *ordinary]
+  _install(["--dry-run", *arguments], report, env)
+  _install(arguments, report, env)
+
+  for name in TF_CHAIN:
+    for item in metadata.distribution(name).requires or []:
+      requirement = Requirement(item)
+      if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
+        continue
+      dependency = requirement.name.lower().replace("_", "-")
+      if dependency == "tensorflow":
+        dependency = "tensorflow-cpu"
+      version = metadata.version(dependency)
+      if not requirement.specifier.contains(version, prereleases=True):
+        raise RuntimeError(f"Installed {dependency}=={version} does not satisfy {requirement}")
 
 
 def _torch_snapshot():
@@ -223,9 +280,10 @@ def main():
     if _read_snapshot(env) != before:
       raise RuntimeError("Installing Grain changed protected image artifacts or import origins")
     grain_before = _grain_snapshot(wheel)
-    _install([f"{source}[ngc]", "flax==0.12.12"], report, env)
+    _install_image_dependencies(source, report, env)
     if _grain_snapshot(wheel) != grain_before:
       raise RuntimeError("The installation changed the built Grain wheel or its import origin")
+    _install(["--no-deps", f"torch @ {TORCH_URL}"], report, env)
     torch_before = _torch_snapshot()
     installed = _install(["--no-deps", f"google-tunix @ {TUNIX_URL}"], report, env)
     if len(installed) != 1 or installed[0]["metadata"]["name"].lower().replace("_", "-") != "google-tunix":

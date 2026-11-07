@@ -17,7 +17,6 @@ setuptools>=84.0.0
 sqlalchemy
 tenacity
 tensorflow_datasets
-torch @ https://download-r2.pytorch.org/whl/cu134/torch-2.15.0%2Bcu134-cp312-cp312-manylinux_2_28_x86_64.whl
 transformers!=4.57.2
 urllib3>=2.8.0
 werkzeug>=3.1.9

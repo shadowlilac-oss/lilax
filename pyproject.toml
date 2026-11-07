@@ -52,7 +52,8 @@ allow-direct-references = true
 
 [tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]
 tpu = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/tpu-requirements.txt"]
-ngc = ["requirements/base.txt", "requirements/ngc.txt", "src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt"]
+ngc = ["requirements/base.txt", "requirements/ngc.txt", "requirements/ngc-torch.txt", "src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt"]
+ngc-image = ["requirements/base.txt", "requirements/ngc.txt", "src/lilax/_backend/assets/dependencies/extra_deps/tf_requirements.txt"]
 tpu-post-train = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt"]
 runner = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/runner-requirements.txt"]
 decoupled = ["src/lilax/_backend/assets/dependencies/requirements/generated_requirements/decoupled-requirements.txt"]
