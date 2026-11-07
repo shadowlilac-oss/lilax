@@ -8,6 +8,7 @@ import os
 from typing import Any
 
 from absl import logging
+from lilax._logging import logger as lilax_logger
 import jax
 import jax.numpy as jnp
 from lilax._backend.configs import pyconfig
@@ -210,11 +211,11 @@ class MetricsLogger:
         if name in metrics:
           log_message.append(f"{name}: {metrics[name]:.3f}")
       if len(log_message) > 1:
-        logging.info(", ".join(log_message))
+        lilax_logger.info(", ".join(log_message))
     elif mode == Mode.EVAL:
       loss = metrics.get("loss")
       if loss is not None:
-        logging.info("Eval step %d evaluation loss: %f", step, loss)
+        lilax_logger.info("Eval step %d evaluation loss: %f", step, loss)
 
   def write_metrics(self, metrics: abstract_engine.MetricsBuffer, mode: Mode = Mode.TRAIN) -> None:
     processed_metrics = self.process_metrics(metrics)

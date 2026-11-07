@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from absl import logging
+from lilax._logging import logger as lilax_logger
 import grain.python as grain
 import jax
 from sentencepiece import SentencePieceTrainer
@@ -104,13 +105,13 @@ def _train_sentencepiece(
   if jax.process_index() == 0:
     if abs_model_path.startswith("gs://"):
       gcs_utils.upload_blob(abs_model_path, model_fp.name + ".model")
-      logging.info("Uploaded %s to %s", model_fp.name + ".model", abs_model_path)
+      lilax_logger.info("Uploaded %s to %s", model_fp.name + ".model", abs_model_path)
     else:
       parent = os.path.dirname(abs_model_path)
       if parent:
         os.makedirs(parent, exist_ok=True)
       shutil.copy(model_fp.name + ".model", abs_model_path)
-      logging.info("Copied %s to %s", model_fp.name + ".model", abs_model_path)
+      lilax_logger.info("Copied %s to %s", model_fp.name + ".model", abs_model_path)
   else:
     if abs_model_path.startswith("gs://"):
       while not gcs_utils.gcs_path_exists(abs_model_path):
@@ -130,4 +131,4 @@ def train_tokenizer(
   vocab_path = _train_sentencepiece(
       dataset_iter, vocab_size=vocab_size, maxchars=max_corpus_chars, model_path=vocab_path, data_keys=data_keys
   )
-  logging.info("Model saved at %s", vocab_path)
+  lilax_logger.info("Model saved at %s", vocab_path)

@@ -1,7 +1,7 @@
 """Logging utilities."""
 
 import logging as std_logging
-from absl import logging
+from lilax._logging import logger as logging
 
 
 def log(user_str):

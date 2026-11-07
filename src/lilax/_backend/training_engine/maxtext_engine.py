@@ -7,6 +7,7 @@ import contextlib
 from typing import Any
 
 from absl import logging
+from lilax._logging import logger as lilax_logger
 from flax import nnx
 from flax.core.spmd import logical_axis_rules
 import jax
@@ -529,7 +530,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         force=force,
     )
     if ckpt_saved:
-      logging.info("Checkpoint saved at step %d.", step)
+      lilax_logger.info("Checkpoint saved at step %d.", step)
 
   def restore_checkpoint(self, *, step: int | None = None) -> Any:
     restored_step, _, restored_metadata = self._checkpoint_manager.restore_checkpoint(
@@ -537,7 +538,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     )
     if restored_step is None:
       return None
-    logging.info("Checkpoint restored from step %d.", restored_step)
+    lilax_logger.info("Checkpoint restored from step %d.", restored_step)
     self._pure_state.invalidate()
     self.train_step = restored_step
     self._metrics_recorder.cleanup()
