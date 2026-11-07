@@ -497,7 +497,8 @@ class NNXDecoder(nnx.Module):
     """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
     # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
     save_names, offload_names = maxtext_utils.get_save_and_offload_names(self.config)
-    if save_names or offload_names:
+    remat_policy = getattr(self, "remat_policy_override", None) or self.config.remat_policy
+    if remat_policy == self.config.remat_policy and (save_names or offload_names):
       policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
     else:
       policy = self.get_remat_policy()
@@ -947,6 +948,7 @@ class NNXDecoder(nnx.Module):
       max_logging.info("prefetch_fsdp_weights: no FSDP mesh axis spans more than one device; using the regular scan.")
     elif (
         self.config.prefetch_fsdp_weights
+        and (getattr(self, "remat_policy_override", None) or self.config.remat_policy) not in (None, "none")
         and kv_caches_stacked is None
         and forced_routed_experts_scanned is None
         and not self.config.parameter_memory_host_offload
@@ -1052,9 +1054,8 @@ class NNXDecoder(nnx.Module):
         new_carry = new_carry.astype(carry.dtype)
       return new_carry, new_current_state
 
-    if skip_block_remat:
-      # The scanned module applies its own remat internally; wrapping the whole
-      # body again would double-remat and recompute the entire block.
+    remat_policy = getattr(self, "remat_policy_override", None) or self.config.remat_policy
+    if skip_block_remat or remat_policy is None or remat_policy == "none":
       layer_fn_wrapped = layer_fn
     else:
       layer_fn_wrapped = jax.checkpoint(layer_fn, policy=policy, prevent_cse=prevent_cse)
@@ -1800,6 +1801,7 @@ class NNXDecoder(nnx.Module):
             return out_y, out_kv, out_indexer_mask, state_out, graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
+        remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
         prev_indexer_mask = None
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
@@ -1862,7 +1864,7 @@ class NNXDecoder(nnx.Module):
             )
           if self.is_hy4:
             current_kwargs["prev_indexer_mask"] = prev_indexer_mask
-          if cfg.remat_policy != "none":
+          if remat_policy is not None and remat_policy != "none":
             y, kv_cache, prev_indexer_mask, new_state, new_graphdef = checkpointed_fn(
                 graphdef, state, y, kv_cache, current_kwargs
             )
@@ -1969,7 +1971,8 @@ class NNXDecoder(nnx.Module):
 
     # 1. Unrolled prefix layers (0, 1, 2)
     is_training = model_mode == MODEL_MODE_TRAIN
-    has_remat_policy = cfg.remat_policy is not None and cfg.remat_policy != "none"
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    has_remat_policy = remat_policy is not None and remat_policy != "none"
     use_remat = is_training and has_remat_policy
     remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
     for layer_idx in range(num_hash_layers):
@@ -2020,7 +2023,8 @@ class NNXDecoder(nnx.Module):
     """Applies Ming scanned decoder blocks: unrolled prefix layers, scanned full cycles, unrolled remainder."""
     cfg = self.config
     num_prefix_layers, num_blocks, remainder_start = ming.scan_layout(cfg)
-    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    use_remat = bool(remat_policy and remat_policy != "none")
     policy = self.get_remat_policy() if use_remat else None
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
 
@@ -2065,7 +2069,8 @@ class NNXDecoder(nnx.Module):
     """Applies Hy4 scanned decoder blocks: unrolled prefix layers, scanned 4-layer cycles, unrolled remainder."""
     cfg = self.config
     num_prefix_layers, num_blocks, remainder_start = hy4.scan_layout(cfg)
-    use_remat = bool(cfg.remat_policy and cfg.remat_policy != "none")
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    use_remat = bool(remat_policy and remat_policy != "none")
     policy = self.get_remat_policy() if use_remat else None
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg) if use_remat else False
 
@@ -2161,7 +2166,10 @@ class NNXDecoder(nnx.Module):
           out_kv = None
         return out_y, out_kv, nnx.state(merged_layer)
 
-      checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
+      remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+      checkpointed_gemma_fn = pure_gemma_fn
+      if remat_policy is not None and remat_policy != "none":
+        checkpointed_gemma_fn = jax.checkpoint(pure_gemma_fn, policy=policy, prevent_cse=prevent_cse)
 
       graphdef, state = nnx.split(self.layers_remainder)
       y, updated_remainder_kv, new_state = checkpointed_gemma_fn(graphdef, state, y, remainder_kv)
@@ -2376,11 +2384,14 @@ class NNXDecoder(nnx.Module):
         nnx.pop(merged_layer, (nnx.RngState, nnx.Intermediate))
         return out_y, out_kv, nnx.state(merged_layer)
 
-      checkpointed_block_fn = jax.checkpoint(
-          pure_block_fn,
-          policy=self.get_remat_policy(),
-          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
-      )
+      remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+      checkpointed_block_fn = pure_block_fn
+      if remat_policy is not None and remat_policy != "none":
+        checkpointed_block_fn = jax.checkpoint(
+            pure_block_fn,
+            policy=self.get_remat_policy(),
+            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+        )
 
       graphdef, state = nnx.split(block)
       y, updated_remainder_kv, new_state = checkpointed_block_fn(graphdef, state, y, remainder_kv)
@@ -2422,6 +2433,7 @@ class NNXDecoder(nnx.Module):
 
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
     for lyr in range(cfg.num_decoder_layers):
       layer = getattr(self, f"layers_{lyr}")
       donor_idx = gemma4_small.kv_donor_layer_idx(lyr, layer_types, num_kv_shared)
@@ -2452,7 +2464,7 @@ class NNXDecoder(nnx.Module):
       # When activation rematerialization is enabled (e.g. remat_policy='full' or 'minimal'
       # during training), wrap each unscanned layer in jax.checkpoint to prevent OOMs. When
       # remat is disabled (remat_policy='none' or None), call the layer directly.
-      if cfg.remat_policy and cfg.remat_policy != "none":
+      if remat_policy and remat_policy != "none":
         y, kv_cache = self._apply_layer_with_remat(
             layer,
             y,

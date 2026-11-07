@@ -16,6 +16,11 @@ def build_dropless_graphdef(config, jit_model, state):
       module.moe_chunk_barrier = True
     elif hasattr(module, "get_remat_policy"):
       module.remat_policy_override = "full"
+      policy = module.get_remat_policy()
+      for _, block in nnx.iter_graph(module):
+        if hasattr(block, "remat_policy_fn"):
+          block.remat_policy_override = module.remat_policy_override
+          block.remat_policy_fn = policy
   jit_model_dropless, _ = nnx.split(reconstructed)
   del reconstructed, _
   gc.collect()

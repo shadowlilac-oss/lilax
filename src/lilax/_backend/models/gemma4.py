@@ -574,7 +574,8 @@ class Gemma4ScannableBlock(nnx.Module):
     is ``None`` for both ``"none"`` and ``"full"``, so it
     cannot distinguish "no remat" from "full remat" on its own.
     """
-    return self.apply_internal_remat and bool(self.config.remat_policy) and self.config.remat_policy != "none"
+    remat_policy = getattr(self, "remat_policy_override", None) or self.config.remat_policy
+    return self.apply_internal_remat and bool(remat_policy) and remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs):
     """Runs the local (sliding-window) layers via a per-layer rematerialized ``jax.lax.scan``."""
@@ -627,7 +628,8 @@ class Gemma4ScannableBlock(nnx.Module):
     # the local-layer scan (a real multi-iteration scan) still offloads.
     global_remat_policy = self.remat_policy_fn
     offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
+    remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    if remat_policy == cfg.remat_policy and (offload_names[0] or offload_names[1]):
       save_names, offload_to_device = offload_names
       global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
