@@ -17,7 +17,7 @@ from lilax._backend.trainers.pre_train.loop.run_clock import start_run_clock
 from lilax._backend.trainers.pre_train.loop.te_moe_overflow import track_te_moe_overflow
 from lilax._backend.trainers.pre_train.loop.warmup import build_warmup_fn
 from lilax._backend.trainers.pre_train.start_step import get_first_step
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.trainers import stop_training as exceptions
 from lilax._backend.observability import max_logging
 from lilax._backend.utils import train_utils

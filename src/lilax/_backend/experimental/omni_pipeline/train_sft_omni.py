@@ -13,7 +13,7 @@ from lilax._backend.common.goodput import (
 from lilax._backend.common.vertex_tensorboard import VertexTensorboardManager
 from lilax._backend.configs.types import TeCommGemmOverlapPolicy
 from lilax._backend.trainers.pre_train import train
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.observability import max_logging
 from lilax._backend.utils.gpu_collective_overlap_pass.registration import (
     register as register_gpu_collective_overlap_pass,
@@ -77,22 +77,22 @@ def train_sft_omni(config_path, *, devices=None, **overrides):
 
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
-    retry_cache = elastic_utils.RetryCache()
+    retry_cache = elastic.RetryCache()
     retry_cache.snapshotter = snapshotting.create_snapshotter(config)
 
     def on_elastic_event(scale_up):
-      elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
+      elastic.record_elastic_event_start(recorder, scale_up=scale_up)
       if retry_cache.snapshotter is not None and not scale_up:
         retry_cache.snapshotter = snapshotting.reset_snapshotter(retry_cache.snapshotter)
 
     def on_slices_ready():
-      elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
+      elastic.record_elastic_wait_end_and_reinit_start(recorder)
 
     def elastic_attempt():
-      attempt_runtime, attempt_recorder = elastic_utils.get_or_build(retry_cache, "initialize", initialize)
+      attempt_runtime, attempt_recorder = elastic.get_or_build(retry_cache, "initialize", initialize)
       return run_attempt(attempt_runtime, attempt_recorder)
 
-    train_func = elastic_utils.elastic_retry(
+    train_func = elastic.elastic_retry(
         config, callback_fn=on_elastic_event, pre_callback_fn=on_slices_ready, retry_cache=retry_cache,
     )(elastic_attempt)
   else:

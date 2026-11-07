@@ -12,7 +12,7 @@ from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
 
 from lilax._backend.input_pipeline.multihost_dataloading import cleanup_all_iterators
-from lilax._backend.storage import gcs as gcs_utils
+from lilax._backend.storage import gcs
 from lilax._backend.observability import max_logging
 
 elastic_manager: manager.Manager | None = None
@@ -105,8 +105,8 @@ def clean_up_incomplete_checkpoints(checkpoint_dir: str):
     max_logging.log(f"Elastic utils: Not checking {checkpoint_dir} for incomplete checkpoints: it is not on GCS.")
     return
   max_logging.log("Elastic utils: Checking for incomplete checkpoint after an elastic event...")
-  checkpoint_dir = gcs_utils.add_trailing_slash(checkpoint_dir)
-  checkpoints = gcs_utils.gcs_list_directories(checkpoint_dir)
+  checkpoint_dir = gcs.add_trailing_slash(checkpoint_dir)
+  checkpoints = gcs.gcs_list_directories(checkpoint_dir)
   checkpoints = [cp for cp in checkpoints if cp.isdigit()]
   if not checkpoints:
     max_logging.log("Found no existing checkpoints. Continuing")
@@ -115,10 +115,10 @@ def clean_up_incomplete_checkpoints(checkpoint_dir: str):
   latest_checkpoint_name = checkpoints[-1]
   latest_checkpoint_path = f"{checkpoint_dir}{latest_checkpoint_name}/"
   max_logging.log(f"Checking latest checkpoint: {latest_checkpoint_path}")
-  success_markers = gcs_utils.gcs_glob_pattern(f"{latest_checkpoint_path}commit_success*")
+  success_markers = gcs.gcs_glob_pattern(f"{latest_checkpoint_path}commit_success*")
   if not success_markers:
     max_logging.log(f"No commit_success file found. Deleting {latest_checkpoint_path}...")
-    gcs_utils.gcs_delete_directory(latest_checkpoint_path)
+    gcs.gcs_delete_directory(latest_checkpoint_path)
   else:
     max_logging.log(f"Found commit_success file. Keeping {latest_checkpoint_path}.")
 

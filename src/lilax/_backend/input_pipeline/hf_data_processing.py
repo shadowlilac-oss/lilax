@@ -28,7 +28,7 @@ from lilax._backend.input_pipeline.transforms import target_shift
 from lilax._backend.input_pipeline.packing import reformat_packing
 from lilax._backend.input_pipeline import instruction_data_processing
 from lilax._backend.input_pipeline import multihost_dataloading
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 
 
 def _get_pad_id(tokenizer):

@@ -27,7 +27,7 @@ from lilax._backend.common.checkpoints.save_receipt import save_receipt
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
 from lilax._backend.trainers.diloco import checkpointing as diloco_checkpoint_utils
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.trainers import stop_training as exceptions
 from lilax._backend.storage import gcs
 from lilax._backend.utils import globals as maxtext_globals

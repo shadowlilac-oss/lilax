@@ -93,7 +93,7 @@ from lilax._backend.configs.lineage_validation import validate_lineage
 from lilax._backend.common.common_types import DecoderBlockType, ShardMode, CustomRule, is_fp8_dtype
 from lilax._backend.storage import gcs
 from lilax._backend.observability import max_logging
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from lilax._backend.distributed.mesh_topology import accelerator_to_spec_map
 from lilax._backend.distributed.mesh_topology import slice_count

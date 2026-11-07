@@ -6,7 +6,7 @@ from enum import Enum
 import jax
 from ml_goodput_measurement import goodput, goodput_elastic, monitoring, monitoring_elastic
 
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.observability import max_logging
 
 
@@ -30,7 +30,7 @@ def _construct_goodput_monitor(config, common_kwargs):
   job_name = common_kwargs["job_name"]
   if config.elastic_enabled:
     try:
-      if elastic_utils.should_use_elastic(config):
+      if elastic.should_use_elastic(config):
         monitor = monitoring_elastic.ElasticGoodputMonitor(include_slice_efficiency=True, **common_kwargs)
         max_logging.log(f"Goodput: using ElasticGoodputMonitor for job: {job_name}")
         return monitor
@@ -126,9 +126,9 @@ def create_goodput_recorder(config):
   logger_name = f"goodput_{job_name}"
   if config.elastic_enabled:
     try:
-      if elastic_utils.should_use_elastic(config):
+      if elastic.should_use_elastic(config):
         recorder = goodput_elastic.ElasticGoodputRecorder(job_name, logger_name, jax.process_index() == 0)
-        elastic_utils.record_slice_state(recorder)
+        elastic.record_slice_state(recorder)
         max_logging.log(f"Goodput: created ElasticGoodputRecorder for job: {job_name}")
         return recorder
     except Exception as e:

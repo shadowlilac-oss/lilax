@@ -12,7 +12,7 @@ from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.common.goodput import GoodputEvent, maybe_record_goodput
 from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.trainers.pre_train.loop.evaluation import run_evaluation
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.storage import gcs
 from lilax._backend.observability import max_logging
 from lilax._backend.observability.diagnostics import pytree

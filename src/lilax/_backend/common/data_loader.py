@@ -20,7 +20,7 @@ from jax.experimental import checkify
 import jax.numpy as jnp
 from lilax._backend.common.goodput import GoodputEvent, maybe_record_goodput
 from lilax._backend.trainers.diloco import diloco_sharding
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.trainers import stop_training as exceptions
 from lilax._backend.distributed.sharding import get_input_data_sharding
 
@@ -31,7 +31,7 @@ def loader_exception_guard(config):
   try:
     yield
   except Exception as e:
-    elastic_utils.maybe_bubble_elastic_exception(config, e)
+    elastic.maybe_bubble_elastic_exception(config, e)
     if isinstance(e, StopIteration):
       raise exceptions.StopTraining(
           f"You may have run out of training data. Received {type(e)}" f" exception: ({e})"

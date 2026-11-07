@@ -38,7 +38,7 @@ from lilax._backend.common.telemetry import mllog_utils
 from lilax._backend.storage import gcs
 from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.observability.tensorboard_logging import config_summary
 from lilax._backend.observability.diagnostics import pytree
 from lilax._backend.observability.tensorboard_logging import summary_writing

@@ -8,7 +8,7 @@ from lilax._backend.common.checkpoints import checkpointing
 from lilax._backend.common.checkpoints import full_state_restore
 from lilax._backend.common import train_state_nnx
 from lilax._backend.input_pipeline import multihost_dataloading, synthetic_data_processing
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.observability import max_logging
 from orbax.checkpoint import v1 as ocp
 
@@ -17,7 +17,7 @@ Snapshotter = ocp.training.pathways.Snapshotter
 
 def create_snapshotter(config) -> Snapshotter | None:
   """Returns a new snapshotter in snapshot mode, and None otherwise."""
-  if not elastic_utils.elastic_snapshot(config):
+  if not elastic.elastic_snapshot(config):
     return None
   if config.shard_optimizer_over_data:
     max_logging.log(
@@ -152,7 +152,7 @@ def maybe_back_up_and_scale_up(
     snapshotter: Snapshotter | None, config, state, step: int, checkpoint_manager, data_iterator
 ) -> None:
   """Backs up the step before interrupting an attempt for scale-up."""
-  if not elastic_utils.is_scale_up_event(config):
+  if not elastic.is_scale_up_event(config):
     return
   if snapshotter is None and checkpoint_manager is None:
     logging.log_first_n(
@@ -176,7 +176,7 @@ def maybe_back_up_and_scale_up(
             f"WARNING: the in-memory snapshot of step {step} did not complete before the scale-up. The next attempt"
             f" resumes from the latest snapshot (step {latest_snapshot_step(snapshotter)}) or checkpoint."
         )
-  elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
+  elastic.maybe_elastic_scale_up(config, checkpoint_manager)
 
 
 def should_restore_snapshot(snapshotter: Snapshotter | None, checkpoint_manager) -> bool:
@@ -227,7 +227,7 @@ def load_snapshot(
   try:
     state, iterator_state = _load_snapshot(snapshotter, abstract_state, config, abstract_iterator_state)
   except (jax.errors.JaxRuntimeError, RuntimeError) as e:
-    if isinstance(e, jax.errors.JaxRuntimeError) and elastic_utils.is_slice_down_error(e):
+    if isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_slice_down_error(e):
       raise
     max_logging.log(f"Restoring the in-memory snapshot at step {step} failed: {e}")
     return None

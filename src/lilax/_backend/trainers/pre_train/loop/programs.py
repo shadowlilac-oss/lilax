@@ -9,7 +9,7 @@ from lilax._backend.trainers.pre_train.moe.graphdefs import (
 )
 from lilax._backend.trainers.pre_train.steps.eval_step import eval_step
 from lilax._backend.trainers.pre_train.steps.train_step import train_step
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.distributed import sharding
 from lilax._backend.utils import train_utils
 
@@ -35,7 +35,7 @@ def build_step_programs(config, model, mesh, state, state_mesh_shardings, eval_d
     params_shardings = state_mesh_shardings.params
   else:
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
-  p_train_step, p_eval_step = elastic_utils.get_or_build(
+  p_train_step, p_eval_step = elastic.get_or_build(
       elastic_retry_cache,
       "train_and_eval_step",
       functools.partial(

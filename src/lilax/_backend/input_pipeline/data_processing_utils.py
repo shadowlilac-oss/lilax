@@ -15,7 +15,7 @@ from lilax._backend.input_pipeline.sources import example_parsing
 from lilax._backend.input_pipeline.transforms import feature_transforms
 from lilax._backend.input_pipeline.transforms import pad_or_trim
 from lilax._backend.input_pipeline.transforms import target_shift
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 
 
 def parse_and_keep_features(dataset, config, data_columns, tokenize):

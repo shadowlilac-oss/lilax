@@ -6,7 +6,7 @@ import jax
 import orbax.checkpoint as ocp
 from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
 
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.observability import max_logging
 from lilax._backend.distributed.jax_distributed.backend import is_cpu_backend, is_gpu_backend
 from lilax._backend.distributed.jax_distributed.cpu import initialize_jax_for_cpu

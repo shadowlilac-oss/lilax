@@ -25,7 +25,7 @@ from lilax._backend.optimizers import optimizers
 from lilax._backend.trainers.diloco import diloco
 from lilax._backend.distributed import device_mesh
 from lilax._backend.trainers.diloco import diloco_sharding
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.utils import lora_utils
 from lilax._backend.observability import max_logging
 from lilax._backend.utils import maxtext_utils
@@ -237,12 +237,12 @@ def setup_train_loop(
         runtime.initialize(elastic_retry_cache)
       mesh = runtime.mesh
     elif mesh is None:
-      mesh = elastic_utils.get_or_build(
+      mesh = elastic.get_or_build(
           elastic_retry_cache, "mesh", functools.partial(device_mesh.get_mesh_from_config, config, devices)
       )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     if model is None:
-      create_model, model = elastic_utils.get_or_build(
+      create_model, model = elastic.get_or_build(
           elastic_retry_cache, "abstract_model",
           functools.partial(nnx_abstract_model.create_nnx_abstract_model, config, mesh, devices),
       )

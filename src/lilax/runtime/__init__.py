@@ -8,7 +8,7 @@ from flax.core.spmd import logical_axis_rules
 
 from lilax._backend.configs.runtime import resolve_initialized_config, resolve_runtime_config
 from lilax._backend.distributed import device_mesh
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.trainers.post_train.rl.setup import device_allocation
 from lilax._backend.configs.inert import RLConfig
 from lilax.launch._profile import active_profile

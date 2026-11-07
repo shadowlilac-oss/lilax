@@ -8,7 +8,7 @@ import jax
 from lilax._backend.common import profiler
 from lilax._backend.common.checkpoints import snapshotting
 from lilax._backend.trainers.pre_train.train import train_loop
-from lilax._backend.utils import elastic_utils as elastic
+from lilax._backend.distributed import elastic
 from lilax._backend.integration.transformer_engine import mesh_context
 
 

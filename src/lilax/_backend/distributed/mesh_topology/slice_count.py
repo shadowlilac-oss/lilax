@@ -1,6 +1,6 @@
 """Resolution of the number of slices in the device topology."""
 
-from lilax._backend.utils import elastic_utils
+from lilax._backend.distributed import elastic
 from lilax._backend.observability import max_logging
 
 
@@ -16,6 +16,6 @@ def get_num_slices(raw_keys, config=None):
     return raw_keys["compile_topology_num_slices"]
   else:
     try:
-      return len(elastic_utils.live_slice_indices(config))
+      return len(elastic.live_slice_indices(config))
     except (ValueError, AttributeError):
       return 1
