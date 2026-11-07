@@ -18,7 +18,7 @@ from lilax._backend.utils import maxtext_utils
 from lilax._backend.distributed import sharding
 from lilax._backend.utils.globals import EPS
 from lilax._backend.losses import cross_entropy
-from lilax._backend.utils.vocabulary_tiling import vocab_tiling_nnx_loss
+from lilax._backend.losses.vocabulary_tiling import vocab_tiling_nnx_loss
 
 
 class EncoderKwargs(TypedDict, total=False):
