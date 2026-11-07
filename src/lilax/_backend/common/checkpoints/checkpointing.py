@@ -76,7 +76,7 @@ def create_orbax_checkpoint_manager(
         "Specifying dataset_type upon checkpointer creation is deprecated and"
         " will be removed soon, this is now handled dynamically by Orbax Checkpointer."
     )
-  max_logging.log(f"Creating checkpointer with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
+  max_logging.debug(f"Creating checkpointer with ocdbt={use_ocdbt} and zarr3={use_zarr3}")
   validated_path = gcs.mkdir_and_check_permissions(checkpoint_dir)
   if ocdbt_target_data_file_size_bytes is None:
     ocdbt_target_data_file_size_bytes = DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
@@ -96,7 +96,7 @@ def create_orbax_checkpoint_manager(
       logger=orbax_logger,
   )
   manager.use_async = use_async
-  max_logging.log("Checkpoint manager created!")
+  max_logging.debug("Checkpoint manager created!")
   return manager
 
 
@@ -552,9 +552,9 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
         or (getattr(config, "enable_autocheckpoint", False) and reached_preemption(checkpoint_manager, step))
     ):
       blocking_until_ready_start = time.time()
-      max_logging.log(f"Waiting for step {step} to finish before checkpoint...")
+      max_logging.debug(f"Waiting for step {step} to finish before checkpoint...")
       jax.block_until_ready(state)
-      max_logging.log(
+      max_logging.debug(
           f"Waited {time.time() - blocking_until_ready_start} seconds for step "
           f"{step} to finish before starting checkpointing."
       )

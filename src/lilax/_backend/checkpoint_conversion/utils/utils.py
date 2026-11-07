@@ -657,7 +657,7 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
         f"Actual JAX devices: {len(jax.devices())}, Requested count: {device_count}."
     )
   max_logging.log(f"Shard weights across {len(jax.devices())} devices")
-  max_logging.log("Note: Axis 0 sharding is the default and will not be logged individually.")
+  max_logging.debug("Note: Axis 0 sharding is the default and will not be logged individually.")
   mesh = jax.sharding.Mesh(jax.devices(), "checkpoint_sharding_axis")
   s0 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
   s1 = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("checkpoint_sharding_axis"))
@@ -668,15 +668,15 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
     if not isinstance(arr, (np.ndarray, jax.Array)):
       arr = np.array(arr)
     if len(arr.shape) == 0:
-      max_logging.log("0D scalar detected, replicating")
+      max_logging.debug("0D scalar detected, replicating")
       return jax.device_put(arr, device=s0)
     elif arr.shape[0] % device_count == 0:
       return jax.device_put(arr, device=s1)
     elif len(arr.shape) > 1 and arr.shape[1] % device_count == 0:
-      max_logging.log(f"Sharding axis 1. Tensor shape {arr.shape}")
+      max_logging.debug(f"Sharding axis 1. Tensor shape {arr.shape}")
       return jax.device_put(arr, device=s2)
     else:
-      max_logging.log(f"Not sharding. Tensor shape {arr.shape}")
+      max_logging.debug(f"Not sharding. Tensor shape {arr.shape}")
       return jax.device_put(arr, device=s3)
 
   start = time.time()

@@ -901,7 +901,7 @@ def convert_to_maxtext(
         filtered_map_keys, desc="Transforming weights", unit="param", leave=True, dynamic_ncols=True, smoothing=0
     ):
       if not lazy_load_tensors:
-        max_logging.log(f"maxtext param: {mt_key}")
+        max_logging.debug(f"maxtext param: {mt_key}")
       if mt_key not in param_map:
         raise ValueError(f"MaxText parameter {mt_key} not found in mapping.")
       target_indices, target_shapes = _get_maxtext_indices_and_shapes(mt_key, maxtext_abstract_dict)
@@ -934,9 +934,9 @@ def convert_to_maxtext(
 
   print_ram_usage("Before saving")
   leaves = jax.tree_util.tree_leaves(state_params)
-  max_logging.log(f"Length of state_params leaves: {len(leaves)}")
+  max_logging.debug(f"Length of state_params leaves: {len(leaves)}")
   if leaves:
-    max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
+    max_logging.debug(f"Type of first leaf before saving: {type(leaves[0])}")
   save_weights_to_checkpoint(
       output_directory, state_params, simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt, config.checkpoint_storage_use_zarr3, config=config,
