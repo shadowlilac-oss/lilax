@@ -1,6 +1,6 @@
 """Architecture-specific decoder attention and weight TFLOPs accounting."""
 
-from lilax._backend.common import flops
+from lilax._backend.flops import flops
 from lilax._backend.common.common_types import AttentionType
 from lilax._backend.models import gemma4_small
 

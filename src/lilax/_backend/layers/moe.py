@@ -16,7 +16,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from lilax._backend.common import common_types as ctypes
 from lilax._backend.common.common_types import ShardMode
-from lilax._backend.common import ffn_flops
+from lilax._backend.flops import ffn_flops
 from lilax._backend.kernels.ragged.sort import ring_ragged_sort
 from lilax._backend.kernels.ragged.sort import ring_ragged_unsort
 from lilax._backend.kernels.ragged.sort_tc import ring_ragged_sort_tc

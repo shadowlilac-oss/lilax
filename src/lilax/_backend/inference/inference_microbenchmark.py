@@ -7,7 +7,8 @@ from collections.abc import MutableMapping
 
 import jax
 
-from lilax._backend.common import flops, profiler
+from lilax._backend.flops import flops
+from lilax._backend.common import profiler
 from lilax._backend.inference.maxengine import maxengine
 from lilax._backend.input_pipeline.packing import prefill_packing
 from lilax._backend.storage import gcs as gcs_utils

@@ -30,7 +30,7 @@ import google_cloud_mldiagnostics as mldiag
 import wandb
 from lilax._backend.utils.globals import EPS
 from lilax._backend.common.cloud import is_decoupled
-from lilax._backend.common import flops, training_flops
+from lilax._backend.flops import flops, training_flops
 from lilax._backend.common.gcp_workload_monitor import GCPWorkloadMonitor
 from lilax._backend.common.managed_mldiagnostics import ManagedMLDiagnostics
 from lilax._backend.trainers import stop_training as exceptions

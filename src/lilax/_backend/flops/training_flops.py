@@ -1,6 +1,6 @@
 """Total per-device training TFLOPs for a train step."""
 
-from lilax._backend.common import decoder_flops, engram_flops, ffn_flops, flops, vision_flops
+from lilax._backend.flops import decoder_flops, engram_flops, ffn_flops, flops, vision_flops
 from lilax._backend.common.common_types import DecoderBlockType
 
 
