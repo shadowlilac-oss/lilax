@@ -80,7 +80,7 @@ def configure(output):
     print("Set replica placement in the YAML ici/dcn diloco axes for your hardware topology.")
   profile = ExecutionProfile.model_validate(settings)
   save_profile(profile, output)
-  print(f"Wrote {output}. Launch with jaxcoord launch --config-file {output} your_script.py")
+  print(f"Wrote {output}. Launch with lilax launch --config-file {output} your_script.py")
 
 
 def add_config_command(commands):

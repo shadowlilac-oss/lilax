@@ -1,4 +1,4 @@
-"""Process placement for a jaxcoord launch."""
+"""Process placement for a lilax launch."""
 
 import ipaddress
 from typing import Literal

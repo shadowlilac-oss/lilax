@@ -1,4 +1,4 @@
-"""Common parallelism controls; physical placement belongs to jaxcoord profiles."""
+"""Common parallelism controls; physical placement belongs to lilax execution profiles."""
 
 from pydantic import BaseModel, ConfigDict
 

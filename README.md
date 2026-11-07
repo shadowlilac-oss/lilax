@@ -76,8 +76,8 @@ The Trainer recognizes the dataset's `messages` column and owns packing and comp
 The example's Qwen3-8B training has not been executed. The earlier 100-step run used a different
 model and batch size and does not verify this API integration.
 
-Use `jaxcoord config` to write a reusable execution profile, then run
-`jaxcoord launch --config-file jaxcoord.yaml train.py`. See [execution profiles](EXECUTION_PROFILE.md)
+Use `lilax config` to write a reusable execution profile, then run
+`lilax launch --config-file jaxcoord.yaml train.py`. See [execution profiles](EXECUTION_PROFILE.md)
 for CPU/GPU/TPU placement, DiLoCo and Python/checkpoint precedence.
 The [public API reference](PUBLIC_API.md) lists inspected constructors and arguments.
 The [migration ledger](API_MIGRATION.md) records removed and relocated arguments.

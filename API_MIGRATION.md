@@ -690,7 +690,7 @@ Every row below originally appeared in ALL-ARGS section 8, EXAMPLES section 14, 
 | `resume_until_done.checkpoint_period` | Existing job checkpoint policy |
 | `delete` | Internal explicit resource deletion, never automatic training cleanup |
 | `delete.job` | Internal deletion target |
-| `launch` | Internal jaxcoord boundary, not public training call |
+| `launch` | `lilax launch` execution boundary, not public training call |
 | `launch.script` | Launcher program selection |
 | `launch.script_args` | Launcher program arguments |
 | `launch.num_nodes` | Deployment topology |

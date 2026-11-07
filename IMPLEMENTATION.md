@@ -18,7 +18,7 @@ Public modules use these canonical names:
 - `data_pipeline.api`: native data backends and direct Hugging Face Dataset/IterableDataset adaptation.
 - `trainers`: `Trainer`, `TrainingArguments`, SFT/DPO/GRPO/distillation classes and configs.
 - `peft`: native adapter APIs preserving supported combinations.
-- `generation`, `serving`, `evaluation`, `benchmarks`, `diagnostics`, `launch` and `provisioning`: specialized callable Python capabilities.
+- `generation`, `serving`, `evaluation`, `benchmarks`, `diagnostics`, `launch` and `provisioning`: specialized callable Python capabilities. `lilax launch` owns execution-profile launch.
 
 Peer owners (disjoint ownership, not permanent agent quotas):
 

@@ -1,4 +1,4 @@
-"""Configure execution and launch one Python process per node."""
+"""Launch one Python process per node."""
 
 import argparse
 import os
@@ -9,12 +9,11 @@ import yaml
 
 from ._process import ProcessConfig
 from ._profile import ExecutionProfile, load_profile
-from ._wizard import add_config_command
 
 
 def add_launch_command(commands):
   launch = commands.add_parser("launch", help="launch one Python process per node")
-  launch.add_argument("--config-file", help="YAML execution profile written by jaxcoord config")
+  launch.add_argument("--config-file", help="YAML execution profile written by lilax config")
   launch.add_argument("--hardware", choices=("cpu", "gpu", "tpu"))
   launch.add_argument("--num-nodes", type=int)
   launch.add_argument("--node-rank", type=int)
@@ -51,19 +50,3 @@ def run(args):
   if profile.xla_flags is not None:
     os.environ.setdefault("XLA_FLAGS", profile.xla_flags)
   os.execv(sys.executable, [sys.executable, args.script, *args.script_args])
-
-
-def main():
-  parser = argparse.ArgumentParser(prog="jaxcoord")
-  commands = parser.add_subparsers(dest="command", required=True)
-  add_config_command(commands)
-  add_launch_command(commands)
-  args = parser.parse_args()
-  try:
-    args.handler(args)
-  except (OSError, ValueError, yaml.YAMLError) as error:
-    parser.error(str(error))
-
-
-if __name__ == "__main__":
-  main()

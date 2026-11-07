@@ -3,8 +3,8 @@
 Run the conditional wizard to write a reusable YAML profile.
 
 ```sh
-jaxcoord config --output jaxcoord.yaml
-jaxcoord launch --config-file jaxcoord.yaml train.py
+lilax config --output jaxcoord.yaml
+lilax launch --config-file jaxcoord.yaml train.py
 ```
 
 The wizard asks about hardware, node placement, local GPU devices, supported controller
@@ -18,7 +18,7 @@ selected local devices. It does not spawn one process per GPU, provision machine
 environments. Script arguments follow the script path.
 
 ```sh
-jaxcoord launch --config-file jaxcoord.yaml --node-rank 1 train.py --dataset local.jsonl
+lilax launch --config-file jaxcoord.yaml --node-rank 1 train.py --dataset local.jsonl
 ```
 
 CPU, GPU and TPU placement share this process model. TPU single-controller execution is

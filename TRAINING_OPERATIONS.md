@@ -28,11 +28,11 @@ the TPU recipe has not been built or its dependency installation resolved.
 
 ## Multi-node GPU launch
 
-`jaxcoord launch` starts one Python process on the node where it is invoked. It does not
+`lilax launch` starts one Python process on the node where it is invoked. It does not
 connect to other nodes, start remote processes over SSH, or activate a virtual environment.
 Start it separately on every node from the intended environment, with the script and its
 dependencies available on each node. The launcher replaces itself with the Python interpreter
-associated with `jaxcoord`.
+associated with `lilax`.
 
 For two nodes, pass `--num-nodes 2` on both, `--node-rank 0` on one and `--node-rank 1` on
 the other, and the same `--main-process-ip` and `--main-process-port` on both. The IP must be
