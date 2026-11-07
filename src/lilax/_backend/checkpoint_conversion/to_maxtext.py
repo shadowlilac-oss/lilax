@@ -237,7 +237,7 @@ def _build_single_axis_stacked_tensor(
     is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
     is_unscanned_moe = "MoeBlock" in key_str and not any(
         s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
-    )
+    ) and not key_str.startswith("params-decoder-layers_remainder-local_layers-")
     if not (is_var_collection or is_unscanned_moe):
       axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
   else:
@@ -871,6 +871,16 @@ def convert_to_maxtext(
         config.fused_qkv or (supports_mlp_layout(layout_adapter) and config.fused_mlp)
     )
     output_config = config
+    if (getattr(config.decoder_block, "value", config.decoder_block) == "gpt_oss"
+        and (config.prefuse_moe_weights
+             or (config.padded_base_moe_mlp_dim is not None and config.padded_base_moe_mlp_dim != config.mlp_dim))):
+      if (config.padded_base_moe_mlp_dim is not None and config.padded_base_moe_mlp_dim != config.mlp_dim
+          and (config.use_2d_fsdp_sharding or config.use_batch_split_schedule)):
+        raise NotImplementedError("GPT-OSS padded expert import requires a restorable MLP output axis.")
+      native_config = getattr(config, "_pydantic_config", config)
+      output_config = pyconfig.HyperParameters(
+          native_config.model_copy(update={"prefuse_moe_weights": False, "padded_base_moe_mlp_dim": None})
+      )
     mapping_config = output_config
     if fuse_projections:
       native_config = getattr(output_config, "_pydantic_config", output_config)

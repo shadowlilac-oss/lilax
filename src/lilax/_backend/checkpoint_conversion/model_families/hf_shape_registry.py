@@ -13,6 +13,7 @@ from lilax._backend.checkpoint_conversion.model_families.hy4.hf_shape import HY4
 from lilax._backend.checkpoint_conversion.model_families.llama31.hf_shape import LLAMA31_HF_WEIGHTS_TO_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.mixtral.hf_shape import MIXTRAL_HF_WEIGHTS_TO_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.qwen.hf_shape import QWEN_HF_WEIGHTS_TO_SHAPE
+from lilax._backend.checkpoint_conversion.olmo3_hf_shape import OLMO3_HF_WEIGHTS_TO_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.qwen3_5.hf_shape import QWEN3_5_HF_WEIGHTS_TO_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.qwen3_8.hf_shape import QWEN3_8_HF_WEIGHTS_TO_SHAPE
 from lilax._backend.checkpoint_conversion.model_families.qwen3_8_flash_next.hf_shape import (
@@ -23,6 +24,9 @@ from lilax._backend.checkpoint_conversion.model_families.qwen3_vl.hf_shape impor
 
 
 HF_SHAPE = {
+    "olmo3-7b": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-7b-pt": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-32b": OLMO3_HF_WEIGHTS_TO_SHAPE,
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,

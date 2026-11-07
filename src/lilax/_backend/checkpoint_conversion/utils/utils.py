@@ -158,7 +158,7 @@ def process_maxtext_param(
       is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
       is_unscanned_moe = "MoeBlock" in key_str and not any(
           part in key_str for part in ("scanned_blocks", "moe_layers-", "decoder-layers-")
-      )
+      ) and not key_str.startswith("params-decoder-layers_remainder-local_layers-")
       weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
       if is_var_collection or is_unscanned_moe:
         axis_to_slice = 0

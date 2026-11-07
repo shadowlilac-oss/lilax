@@ -81,7 +81,8 @@ def adjust_target(target, meta_tree, is_nnx, use_value_wrapper=True):
     return target
   new_target = {}
   for key, value in target.items():
-    if key == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
+    if (key == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree
+        and (hasattr(value, "shape") or (hasattr(value, "get") and hasattr(value.get("value"), "shape")))):
       array = value["value"] if is_nnx and use_value_wrapper else value
       half_dim = array.shape[-1] // 2
       split = jax.ShapeDtypeStruct(shape=array.shape[:-1] + (half_dim,), dtype=array.dtype, sharding=array.sharding)

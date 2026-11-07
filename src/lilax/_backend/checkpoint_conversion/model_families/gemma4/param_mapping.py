@@ -97,16 +97,20 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
       mapping["params-decoder-scanned_blocks-global_layer-self_attention-value-kernel"] = [
           hf_layer(b * 6 + 5, "self_attn.v_proj.weight") for b in range(num_blocks)
       ]
-    layers = [(f"params-decoder-layers_remainder-layers_{i}", num_blocks * 6 + i) for i in range(nlayers % 6)]
+    if nlayers % 6:
+      prefix = "params-decoder-layers_remainder-local_layers"
+      for mt, hf in specs:
+        mapping[f"{prefix}-{mt}"] = [hf_layer(num_blocks * 6 + i, hf) for i in range(nlayers % 6)]
+      mapping[f"{prefix}-self_attention-value-kernel"] = [
+          hf_layer(num_blocks * 6 + i, "self_attn.v_proj.weight") for i in range(nlayers % 6)
+      ]
   else:
-    layers = [(f"params-decoder-layers_{i}", i) for i in range(nlayers)]
-  for prefix, i in layers:
-    for mt, hf in specs:
-      mapping[f"{prefix}-{mt}"] = hf_layer(i, hf)
-    if not maxtext_config.share_kv_projections or i % 6 != 5:
-      mapping[f"{prefix}-self_attention-value-kernel"] = hf_layer(i, "self_attn.v_proj.weight")
-    elif scan_layers:
-      mapping[f"{prefix}-self_attention-value-kernel"] = hf_layer(i, "self_attn.k_proj.weight")
+    for i in range(nlayers):
+      prefix = f"params-decoder-layers_{i}"
+      for mt, hf in specs:
+        mapping[f"{prefix}-{mt}"] = hf_layer(i, hf)
+      if not maxtext_config.share_kv_projections or i % 6 != 5:
+        mapping[f"{prefix}-self_attention-value-kernel"] = hf_layer(i, "self_attn.v_proj.weight")
   return mapping
 
 
@@ -219,9 +223,8 @@ def GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False
   if scan_layers:
     attach_hooks("params-decoder-scanned_blocks-local_layers", False)
     attach_hooks("params-decoder-scanned_blocks-global_layer", True)
-    for rem_idx in range(nlayers % 6):
-      real_layer_idx = 6 * (nlayers // 6) + rem_idx
-      attach_hooks(f"params-decoder-layers_remainder-layers_{rem_idx}", real_layer_idx % 6 == 5)
+    if nlayers % 6:
+      attach_hooks("params-decoder-layers_remainder-local_layers", False)
   else:
     for i in range(nlayers):
       attach_hooks(f"params-decoder-layers_{i}", i % 6 == 5)
