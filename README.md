@@ -36,40 +36,30 @@ for exact checkpoints and supported loading and export formats.
 
 ## Why Lilax?
 
-- **FP8 and NVFP4 mixed-precision training.** Use low-precision math during training, including activations,
-  rather than only storing weights in fewer bits. Choose [FP8 variants](docs/guides/models/fp8.md) or
-  [NVFP4](docs/guides/models/nvfp4.md) to use your hardware's low-precision compute.
-  Check the [hardware requirements](docs/guides/models/precision-hardware.md) for each recipe.
-- **Quantization-aware training in the usual training workflow.** Teach a model to account for the
-  rounding errors introduced by quantization. Select the layers and precision through a configuration,
-  pass it to `from_pretrained`, and train with `SFTTrainer`. See the [QAT example](docs/guides/models/qat.md).
-- **Fit larger models in memory.** Choose which intermediate values to keep, recompute, or move to CPU
-  memory. Move model weights or optimizer state to CPU memory too, trading speed for memory. See
-  [memory controls](docs/guides/training/optimization.md#offload-memory) and
-  [selective memory settings](docs/reference/execution/execution-profile-compute.md#remat).
-- **Scale the same Python workflow across GPUs or TPUs.** Split model weights, batches, long inputs,
-  and experts across devices. Keep machine-specific settings in a reusable
-  [launch profile](docs/guides/execution/launch.md) while your script owns the model, data, and training.
-- **Find what slows training.** Schedule [XProf captures](docs/guides/training/callbacks.md#capture-profiles)
-  through a callback and inspect GPU or TPU activity. Attach captures to W&B or Trackio runs. Optional
-  [cloud monitoring](docs/reference/execution/execution-profile-monitoring.md#goodput) separates useful
-  training time from overhead such as setup and data loading.
-- **Sync less often across machines.** [DiLoCo](docs/reference/execution/runtime.md#dilococonfig) runs
-  several local training steps between shared updates. Its
-  [streaming option](docs/reference/execution/execution-profile-compute.md#diloco) spreads those updates
-  across steps instead of transferring the whole model at once.
-- **Train from another model's saved predictions.** Save a teacher model's predictions, then reuse them
-  for [offline distillation](docs/guides/training/distillation.md#train-from-saved-records) without keeping
-  the teacher running alongside each student.
-- **Try training beyond next-token prediction.** Train a model to predict several future tokens
-  with [multi-token prediction](docs/reference/models/model-loss.md#mtpconfig), or train a model to fill
-  masked token blocks with [block diffusion](docs/guides/training/block-diffusion.md). These require
-  compatible model configurations.
-- **Fine-tune with more than text.** Use paired text and
-  [images, video, or audio](docs/guides/data/processing.md) with supported multimodal models.
-- **Train models that use tools.** Combine [GRPO rewards](docs/guides/training/grpo.md) with
-  [environments and tool calls](docs/guides/training/environments.md), and control how devices are divided
-  between training and generating responses.
+- **FP8 and NVFP4 mixed-precision training.** [FP8](docs/guides/models/fp8.md) and
+  [NVFP4](docs/guides/models/nvfp4.md) training math includes activations, not just compressed weights,
+  to use your [hardware's low-precision compute](docs/guides/models/precision-hardware.md).
+- **Quantization-aware training.** [QAT](docs/guides/models/qat.md) is part of the normal training workflow,
+  helping models tolerate the rounding errors of lower-precision inference.
+- **Fit larger models in memory.** [Selective recomputation](docs/reference/execution/execution-profile-compute.md#remat)
+  and [CPU offload](docs/guides/training/optimization.md#offload-memory) reduce training memory use.
+- **GPU and TPU scaling.** The same Python workflow supports
+  [training across devices and machines](docs/guides/execution/launch.md).
+- **Find what slows training.** Built-in [XProf captures](docs/guides/training/callbacks.md#capture-profiles)
+  show GPU and TPU activity. Optional [cloud reports](docs/reference/execution/execution-profile-monitoring.md#goodput)
+  show time spent on useful training versus overhead.
+- **Less communication across machines.** [DiLoCo](docs/reference/execution/runtime.md#dilococonfig)
+  syncs less often, with [streaming updates](docs/reference/execution/execution-profile-compute.md#diloco)
+  spread across training steps.
+- **Train from another model's saved predictions.** [Offline distillation](docs/guides/training/distillation.md#train-from-saved-records)
+  avoids keeping a teacher model running alongside each student.
+- **More training objectives.** [Multi-token prediction](docs/reference/models/model-loss.md#mtpconfig)
+  predicts several future tokens. [Block diffusion](docs/guides/training/block-diffusion.md) learns to fill
+  masked token blocks in compatible models.
+- **Fine-tune with more than text.** Supported multimodal models learn from paired text and
+  [images, video, or audio](docs/guides/data/processing.md).
+- **Tool-use training.** [GRPO](docs/guides/training/grpo.md) supports rewards for interactions with
+  [environments and tools](docs/guides/training/environments.md).
 
 ## Coming from Hugging Face
 
