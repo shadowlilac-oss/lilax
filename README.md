@@ -1,5 +1,5 @@
 <h1 align="center">Lilax</h1>
-<h3 align="center">Language model training and generation on JAX</h3>
+<h3 align="center">A simpler, Hugging Face-style Python API for MaxText, built with JAX</h3>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
@@ -16,16 +16,31 @@
 
 ## Overview
 
-Lilax is a JAX library for training and running supported language models on GPUs and TPUs.
-Load Hub checkpoints, fine-tune on your datasets, and save trained models through familiar
-Hugging Face-style model, tokenizer, and Trainer APIs.
+Lilax makes [MaxText](https://github.com/AI-Hypercomputer/maxtext) easier to use through a Hugging Face-style
+Python API. It builds on MaxText's model and training implementations, powered by
+[JAX](https://github.com/jax-ml/jax) on GPUs and TPUs.
+
+Load models with `from_pretrained`, prepare datasets, and train through familiar Trainer APIs while using
+MaxText's distributed execution, low-precision computation, and model features.
 
 ## Highlights
 
-- Load [models and tokenizers](docs/guides/models/loading.md) with `from_pretrained`, then generate text with `generate`.
-- Fine-tune with [`SFTTrainer`](docs/guides/training/sft.md) or train [LoRA and QLoRA adapters](docs/guides/training/lora.md).
-- Choose [FP8](docs/guides/models/fp8.md), [NVFP4](docs/guides/models/nvfp4.md), or [quantization-aware training](docs/guides/models/qat.md).
-- Configure [device placement and multi-node execution](docs/guides/execution/launch.md) for your training script.
+- [Model loading](docs/guides/models/loading.md). Load supported Hub checkpoints or local weights with `AutoModelForCausalLM` and `AutoTokenizer`.
+- [Pretraining](docs/guides/training/pretraining.md) and [supervised fine-tuning](docs/guides/training/sft.md). Train with text, prompt-completion pairs, conversations, and supported multimodal records.
+- [LoRA and QLoRA](docs/guides/training/lora.md). Train adapters, quantize base weights, and save or reload adapter checkpoints.
+- [Preference training](docs/guides/training/dpo.md) and [distillation](docs/guides/training/distillation.md). Use DPO, ORPO, or teacher-guided training.
+- [Reinforcement learning](docs/guides/training/grpo.md). Train with GRPO, custom rewards, and [OpenEnv environments](docs/guides/training/environments.md).
+- [Low-precision training](docs/guides/models/quantization.md). Select FP8 variants, NVFP4 with or without RHT, int8 computation, or QAT. See [recipe hardware requirements](docs/guides/models/precision-hardware.md).
+- [Distributed execution](docs/guides/execution/runtime.md). Use JAX device meshes with data, tensor, pipeline, expert, and context parallelism, FSDP, DiLoCo, and [multi-node launches](docs/guides/execution/launch.md).
+- [Optimization and memory](docs/guides/training/optimization.md). Configure AdamW or Muon, gradient accumulation, rematerialization, host offload, and [block-diffusion objectives](docs/guides/training/block-diffusion.md).
+- [Model settings](docs/guides/models/family-settings.md). Configure expert routing, MoE kernels, multi-token prediction, and [attention and position encoding](docs/guides/models/attention.md) for supported architectures.
+- [Datasets and processing](docs/guides/data/datasets.md). Load Hub or local data, process [text, images, video, and audio](docs/guides/data/processing.md), export [Parquet or ArrayRecord](docs/guides/data/export.md), and build [Megatron indexes](docs/guides/data/mmap-indexes.md).
+- [Generation](docs/guides/inference/generation.md) and [serving](docs/guides/inference/serving.md). Sample text, batch requests, run continuous batching, and serve model endpoints.
+- [Evaluation](docs/guides/inference/evaluation.md) and [prompt optimization](docs/guides/inference/prompt-optimization.md). Run task benchmarks, calculate [ROUGE](docs/guides/inference/text-metrics.md), and [score candidate tokens](docs/guides/inference/token-scores.md).
+- [Training control](docs/guides/training/callbacks.md). Use callbacks, TensorBoard, Weights & Biases, Trackio, profiling, and [application diagnostics](docs/guides/execution/diagnostics.md).
+- [Checkpoint workflows](docs/guides/training/checkpoints.md). Save and resume training, export weights, and [convert, inspect, or manage checkpoint files](docs/guides/checkpoints/checkpoint-utilities.md).
+- [Advanced components](docs/guides/components/m3-components.md). Work with GLM components, [Wan diffusion components](docs/guides/components/wan-components.md), and [experimental Omni checkpoints](docs/guides/components/omni-checkpoints.md).
+- [Benchmarking](docs/guides/benchmarks/benchmarks.md). Run cluster benchmarks, estimate compute and memory, and prepare [MLPerf inference workloads](docs/guides/benchmarks/mlperf-offline.md).
 
 ## Installation
 
