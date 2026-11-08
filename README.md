@@ -1,25 +1,79 @@
-# Lilax
+<h1 align="center">Lilax</h1>
+<h3 align="center">Language model training and generation on JAX</h3>
 
-Train and generate with supported language models through a Hugging Face-style Python API on JAX.
+<p align="center">
+  <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
+  <a href="docs/getting-started/environment.md"><img alt="Python 3.12+" src="https://img.shields.io/badge/Python-3.12%2B-blue.svg"></a>
+  <a href="docs/README.md"><img alt="Documentation" src="https://img.shields.io/badge/Docs-Guides_and_API-blue.svg"></a>
+</p>
 
-[Documentation home](docs/README.md) | [Quickstart](docs/getting-started/quickstart.md) | [API reference](docs/reference/README.md)
+<p align="center">
+  <a href="docs/README.md">Documentation</a> |
+  <a href="#quickstart">Quickstart</a> |
+  <a href="docs/reference/README.md">API reference</a> |
+  <a href="docs/reference/models/models.md#supported-model-identities">Supported models</a>
+</p>
 
-Lilax provides model and tokenizer loading, text generation, and trainers for fine-tuning supported models.
-Use familiar `from_pretrained`, `generate`, and `SFTTrainer` workflows on your JAX accelerator.
+## Overview
 
-## Get started
+Lilax is a JAX library for training and running supported language models on GPUs and TPUs.
+Load Hub checkpoints, fine-tune on your datasets, and save trained models through familiar
+Hugging Face-style model, tokenizer, and Trainer APIs.
 
-Follow [environment setup](docs/getting-started/environment.md) for the GPU or TPU installation before running
-an example. Choose hardware with enough memory for the model and, for training, gradients and optimizer state.
+## Highlights
 
-The examples below are independent scripts. Run them separately. Training settings illustrate API use,
-not tuning recommendations.
+- Load [models and tokenizers](docs/guides/models/loading.md) with `from_pretrained`, then generate text with `generate`.
+- Fine-tune with [`SFTTrainer`](docs/guides/training/sft.md) or train [LoRA and QLoRA adapters](docs/guides/training/lora.md).
+- Choose [FP8](docs/guides/models/fp8.md), [NVFP4](docs/guides/models/nvfp4.md), or [quantization-aware training](docs/guides/models/qat.md).
+- Configure [device placement and multi-node execution](docs/guides/execution/launch.md) for your training script.
 
-## Load a model
+## Installation
 
-Load Qwen3-8B and its tokenizer from the Hugging Face Hub. Weights are restored when an operation needs them.
-First use converts Hub weights on CPU and caches an additional copy. See the
-[loading guide](docs/guides/models/loading.md) for disk requirements and local checkpoints.
+Lilax requires Python 3.12 or later. Use the supplied container for your accelerator.
+See [environment setup](docs/getting-started/environment.md) for host requirements and optional dependencies.
+
+<details>
+<summary>NVIDIA GPU installation</summary>
+
+On a host with Docker and the NVIDIA Container Toolkit configured:
+
+```bash
+git clone https://github.com/shadowlilac-oss/lilax.git
+cd lilax
+docker build -f Dockerfile.cuda -t lilax-cuda .
+docker run --rm --gpus all -it lilax-cuda bash
+```
+
+</details>
+
+<details>
+<summary>TPU installation</summary>
+
+On an x86_64 Linux TPU host with Docker and access to the TPU devices:
+
+```bash
+git clone https://github.com/shadowlilac-oss/lilax.git
+cd lilax
+docker build --platform linux/amd64 -f Dockerfile.tpu -t lilax-tpu .
+docker run --rm --privileged --network host -it lilax-tpu bash
+```
+
+</details>
+
+> [!NOTE]
+> Allow accelerator memory for the model and training state. First use of Hub weights also creates a
+> converted copy on disk. See [model loading](docs/guides/models/loading.md) for storage requirements and
+> [runtime setup](docs/guides/execution/runtime.md) before configuring a training mesh.
+
+## Quickstart
+
+Expand an example to load a model, generate text, or fine-tune on a Hub dataset.
+Each example is a standalone script. Run them separately in your accelerator environment.
+
+### AutoModelForCausalLM
+
+Load Qwen3-8B and its tokenizer from the Hugging Face Hub with
+[`AutoModelForCausalLM`](docs/guides/models/loading.md).
 
 <details>
 <summary>Load a pretrained model and tokenizer</summary>
@@ -35,10 +89,9 @@ print(model.config)
 
 </details>
 
-## Generate text
+### Text generation
 
-Tokenize a prompt, generate a continuation, and decode the returned tokens. The output includes the prompt.
-See the [generation guide](docs/guides/inference/generation.md) for sampling and batched inputs.
+Use [`generate`](docs/guides/inference/generation.md) to continue a prompt and decode the result.
 
 <details>
 <summary>Generate a text continuation</summary>
@@ -54,13 +107,13 @@ tokens = model.generate(**inputs, max_new_tokens=32)
 print(tokenizer.decode(tokens[0], skip_special_tokens=True))
 ```
 
+The returned tokens include the prompt and its continuation.
+
 </details>
 
-## Supervised fine-tuning
+### SFTTrainer
 
-Load conversations from a Hub dataset, fine-tune the model, and save it locally. This example uses the
-dataset's `messages` column and the model tokenizer's chat template. See the
-[SFT guide](docs/guides/training/sft.md) for text and prompt-completion datasets, evaluation, and callbacks.
+Fine-tune on conversations with [`SFTTrainer`](docs/guides/training/sft.md), then save the trained model.
 
 <details>
 <summary>Fine-tune Qwen3-8B with SFTTrainer</summary>
@@ -83,19 +136,24 @@ print(result.global_step, result.metrics["train_loss"])
 trainer.save_model("./sft-model")
 ```
 
+The tokenizer formats the `messages` column with its chat template. This short run illustrates the API.
+`save_model` writes the trained model to `./sft-model`. Training checkpoints and logs stay under `./sft-run`.
+
 </details>
 
-Configure device placement before constructing the trainer. Training writes run artifacts under
-`output_dir`. The final save writes model weights and configuration for local reloading.
-See [training checkpoints](docs/guides/training/checkpoints.md) to resume optimizer state and progress.
+## Documentation
 
-## Explore the documentation
+The [documentation home](docs/README.md) lists all guides and references by task.
 
-The [documentation home](docs/README.md) groups guides and API references by task.
+| Start here | What you'll find |
+| --- | --- |
+| [Model loading](docs/guides/models/loading.md) | Hub and local checkpoints. |
+| [Supervised fine-tuning](docs/guides/training/sft.md) | Datasets, training, and evaluation. |
+| [LoRA](docs/guides/training/lora.md) | Adapter training and saving. |
+| [Precision recipes](docs/guides/models/quantization.md) | FP8, NVFP4, and QAT. |
+| [Generation](docs/guides/inference/generation.md) | Sampling and batched prompts. |
+| [API reference](docs/reference/README.md) | Classes, arguments, and return values. |
 
-- [Load and configure models](docs/guides/models/loading.md).
-- [Prepare datasets](docs/guides/data/datasets.md).
-- [Fine-tune with SFT](docs/guides/training/sft.md), [LoRA](docs/guides/training/lora.md), or [preferences](docs/guides/training/dpo.md).
-- [Generate text](docs/guides/inference/generation.md) and [serve a model](docs/guides/inference/serving.md).
-- [Train with FP8](docs/guides/models/fp8.md), [NVFP4](docs/guides/models/nvfp4.md), or [QAT](docs/guides/models/qat.md).
-- [Look up the public API](docs/reference/README.md).
+## License
+
+Lilax is available under the [Apache 2.0 license](LICENSE).
