@@ -1,5 +1,5 @@
 <h1 align="center">Lilax</h1>
-<h3 align="center">A simpler, Hugging Face-style Python API for MaxText, built with JAX</h3>
+<h3 align="center">Language model training and inference in JAX</h3>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
@@ -16,12 +16,13 @@
 
 ## Overview
 
-Lilax makes [MaxText](https://github.com/AI-Hypercomputer/maxtext) easier to use through a Hugging Face-style
-Python API. It builds on MaxText's model and training implementations, powered by
-[JAX](https://github.com/jax-ml/jax) on GPUs and TPUs.
+Lilax is a [JAX](https://github.com/jax-ml/jax) framework for language model training and inference on GPUs
+and TPUs. It uses Hugging Face-style model, configuration, dataset, and Trainer APIs for pretraining,
+fine-tuning, reinforcement learning, and generation.
 
-Load models with `from_pretrained`, prepare datasets, and train through familiar Trainer APIs while using
-MaxText's distributed execution, low-precision computation, and model features.
+Much of Lilax's code comes from [MaxText](https://github.com/AI-Hypercomputer/maxtext), including model and
+distributed-training implementations. Lilax substantially reworks the architecture and user workflows,
+and adds its own implementations and integrations. MaxText remains a major foundation of the project.
 
 ## Highlights
 
