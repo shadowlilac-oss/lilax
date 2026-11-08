@@ -14,7 +14,87 @@
   <a href="docs/reference/models/models.md#supported-model-identities">Supported models</a>
 </p>
 
+# This repository is a work in progress
+
 ## Overview
+
+Lilax brings the capabilities, integration and performance of Google's [JAX](https://github.com/jax-ml/jax) framework to
+the already well known HuggingFace training. 
+Train
+[LoRA or QLoRA adapters](docs/guides/training/lora.md), teach models to operate agentic environments via [GRPO](docs/guides/training/grpo.md), or [train a model from scratch](docs/guides/training/pretraining.md)
+with familiar Hugging Face-style model, dataset, and Trainer APIs.
+
+Below is an example of how finetuning a model with [SFT](docs/guides/training/sft.md) on your own data is done in Lilax compared
+to HuggingFace's TRL. 
+### Lilax
+```py
+from datasets import load_dataset
+from lilax import (
+    AutoModelForCausalLM, AutoTokenizer,
+    SFTConfig, SFTTrainer,
+)
+
+model_id = "Qwen/Qwen3-8B"
+model = AutoModelForCausalLM.from_pretrained(model_id)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+dataset = load_dataset(
+    "HuggingFaceH4/ultrachat_200k",
+    split="train_sft",
+)
+
+trainer = SFTTrainer(
+    model,
+    args=SFTConfig(
+        output_dir="./sft", max_steps=10,
+        per_device_train_batch_size=1,
+        max_length=256, packing=False,
+        completion_only_loss=False,
+    ),
+    train_dataset=dataset,
+    processing_class=tokenizer,
+)
+trainer.train()
+```
+
+### HuggingFace
+```py
+from datasets import load_dataset
+from transformers import (
+    AutoModelForCausalLM, AutoTokenizer,
+)
+from trl import SFTConfig, SFTTrainer
+
+model_id = "Qwen/Qwen3-8B"
+model = AutoModelForCausalLM.from_pretrained(model_id)
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+dataset = load_dataset(
+    "HuggingFaceH4/ultrachat_200k",
+    split="train_sft",
+)
+
+trainer = SFTTrainer(
+    model,
+    args=SFTConfig(
+        output_dir="./sft", max_steps=10,
+        per_device_train_batch_size=1,
+        max_length=256, packing=False,
+        completion_only_loss=False,
+    ),
+    train_dataset=dataset,
+    processing_class=tokenizer,
+)
+trainer.train()
+```
+## Why Lilax?
+
+- **Integration with HuggingFace hub.** Models are automatically converted between the HuggingFace and JAX file formats. Models you train in Lilax can be uploaded to HuggingFace hub without .
+- **Mixed precision training.** Utilize the data types you were promised by your GPU's specs sheet, but were impossible to use for training like [FP8](docs/guides/models/fp8.md) or [NVFP4](docs/guides/models/nvfp4.md) for an up to 4x higher compute ceiling on supported hardware.
+- **QAT Training** Finetune LLMs to learn to be quantized. With [QAT](docs/guides/models/qat.md) training you can reduce the quantization error significantly 
+- **Fit larger models in memory.** Use [Gradient Checkpointing](docs/reference/execution/execution-profile-compute.md#remat)
+  and [CPU offload](docs/guides/training/optimization.md#offload-memory) to fit models on your GPUs that previously ran out of memory.
+- **Find what slows training** Use the [XProf Web UI](docs/guides/training/callbacks.md#capture-profiles) to see how efficiently your model is training compared to what your hardware allows, and what is slowing it down.
+- **Less communication between machines** Speed up your training on multi-gpu setups lacking NVLink or fast PCI Express lanes with Google's [DiLoCo](docs/reference/execution/runtime.md#dilococonfig) training algorithm.
+- **Distil from larger models** Train smaller student models to imitate more powerful teachers, without having to keep both models loaded using [Offline distillation](docs/guides/training/distillation.md#train-from-saved-records).
 
 Lilax is a [JAX](https://github.com/jax-ml/jax) framework for training and running language models on GPUs
 and TPUs. [Fine-tune on your own data](docs/guides/training/sft.md), train
